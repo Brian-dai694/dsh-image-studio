@@ -10,8 +10,22 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const fakeReact = {
   useRef(value) { return { current: value }; },
+  useState(value) {
+    // 极简桩：只保证组件顶层调用不炸；不需要重渲染语义（测试直接读返回的元素树）。
+    const holder = { value };
+    return [value, next => { holder.value = typeof next === 'function' ? next(holder.value) : next; }];
+  },
+  useEffect() {},
+  useLayoutEffect() {},
   createElement(type, props, ...children) { return { type, props: { ...(props || {}), children } }; },
 };
+
+/** 从页面元素树里找对话面板（不依赖它在 children 里的下标）。 */
+function conversationOf(page) {
+  const found = (page.props?.children || []).find(child => typeof child?.type === 'function' && child.type.name === 'Conversation');
+  assert.ok(found, '页面里必须有 Conversation 面板');
+  return found;
+}
 
 async function loadClient() {
   let exported = null;
@@ -70,8 +84,8 @@ test('main component receives real remote via injected props and closure without
   const main = registered.find(item => item.definition.name === 'main');
   const injected = main.definition.inject();
   assert.equal(injected.remote.session, session);
-  assert.equal(client.chat.makePage(client.entries[0], () => ctx.remote)(injected).props.children[1].props.getRemote().session, session);
-  assert.equal(client.chat.makePage(client.entries[0], () => ctx.remote)({}).props.children[1].props.getRemote().session, session);
+  assert.equal(conversationOf(client.chat.makePage(client.entries[0], () => ctx.remote)(injected)).props.getRemote().session, session);
+  assert.equal(conversationOf(client.chat.makePage(client.entries[0], () => ctx.remote)({})).props.getRemote().session, session);
 });
 
 test('dotted service lookup is supported without a root remote object', async () => {
@@ -81,7 +95,7 @@ test('dotted service lookup is supported without a root remote object', async ()
   ctx.get = key => key === 'remote.session' ? session : undefined;
   client.apply(ctx); flush();
   const main = registered.find(item => item.definition.name === 'main');
-  assert.equal(client.chat.makePage(client.entries[0])(main.definition.inject()).props.children[1].props.getRemote().session, session);
+  assert.equal(conversationOf(client.chat.makePage(client.entries[0])(main.definition.inject())).props.getRemote().session, session);
 });
 
 test('it registers exactly one sidebar entry and one main pane', async () => {
@@ -121,7 +135,7 @@ test('the host pages are framed by the panels, never exposed as their own entrie
   const panel = registered.filter(item => item.definition.name === 'main');
   const byId = Object.fromEntries(panel.map(item => [item.definition.id, client.chat.makePage(client.entries.find(entry => entry.id === item.definition.id))()]));
   assert.equal(byId['media-image-editor'].props.children[0].props.src, '/media-image/image/host.html');
-  for (const page of Object.values(byId)) assert.equal(page.props.children[1].type.name, 'Conversation');
+  for (const page of Object.values(byId)) assert.equal(conversationOf(page).type.name, 'Conversation');
 });
 
 test('main keyed panels only own anchors and one root overlay owns retained editor trees', async () => {
@@ -412,3 +426,96 @@ test('a missing slots service degrades instead of throwing', async () => {
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));
   assert.doesNotThrow(() => client.apply(undefined));
 });
+
+// ---------- 对话框 v1（P0）----------
+
+/** 渲染树断言：计划里任何一段要进 DOM 的文本，都不能是一段裸 JSON。 */
+function assertNoRawJsonInPlan(client, plan) {
+  const texts = [];
+  for (const item of plan) {
+    if (item.card?.line) texts.push(item.card.line);
+    if (item.issue) texts.push(item.issue);
+    for (const block of item.blocks || []) texts.push(block.text || '');
+    for (const block of item.blocks || []) for (const value of block.items || []) texts.push(value);
+  }
+  for (const text of texts) assert.equal(client.chat.looksLikeRawJson(text), false, `裸 JSON 进了渲染计划：${String(text).slice(0, 40)}`);
+}
+
+test('dialog plan maps every message kind and never carries raw JSON into the view', async () => {
+  const client = await loadClient();
+  const plan = client.chat.buildDialogPlan([
+    { id: 'u1', role: 'user', text: '把画布改成 1200×800' },
+    { id: 'a1', role: 'assistant', text: '好的\n\n- 已调整\n- 版本 R2\n\n```json\n{"width":1200}\n```' },
+    { id: 't1', role: 'tool', card: { name: '执行编辑', status: 'applied', revision: 2, line: 'canvas.resize' } },
+    { id: 't2', role: 'tool', card: { name: '执行编辑', status: 'unknown', revision: 2, line: '' } },
+    { id: 't3', role: 'tool', card: { name: '读取工程', status: 'rejected', revision: null, line: '', error: true } },
+    { id: 't4', role: 'tool', card: { name: '执行编辑', status: '', revision: null, line: '' } },
+    { id: 'v1', role: 'approval', text: '等待本人在原生会话确认审批：media_image_read_state' },
+    { id: 'v2', role: 'approval', decided: true, text: '审批已拒绝（也可能由 never 策略自动拒绝），本次请求未获授权。' },
+    { id: 'e1', role: 'error', text: '{"error":{"code":"REVISION_CONFLICT"}}' },
+    { id: 'raw1', role: 'assistant', text: '{"quite":"a long raw json body that must not reach the dom at all","n":1}' },
+  ]);
+  assert.deepEqual(plan.map(item => item.kind), ['user', 'assistant', 'tool', 'tool', 'tool', 'tool', 'approval', 'approval', 'error', 'assistant']);
+  // 四态徽标：unknown 单独一态，不能画成失败
+  assert.deepEqual(plan.slice(2, 6).map(item => item.badge), ['applied', 'unknown', 'rejected', 'pending']);
+  // 审批只读：唯一动作是打开原生会话，没有任何"允许/拒绝"按钮
+  for (const item of plan.filter(entry => entry.kind === 'approval')) {
+    assert.deepEqual(item.actions.map(action => action.kind), ['open-native']);
+  }
+  // 裸 JSON 兜底成一句话；原始内容只留在 diagnostic（剪贴板），不进 DOM
+  const raw = plan.at(-1);
+  assert.equal(raw.blocks[0].text, '这一步已执行（无法解析摘要）');
+  assert.match(raw.diagnostic, /^\{/);
+  assertNoRawJsonInPlan(client, plan);
+});
+
+test('markdown blocks keep code, lists, headings and inline links/images apart', async () => {
+  const client = await loadClient();
+  const blocks = client.chat.parseMarkdownBlocks('# 标题\n\n段落一\n\n- 一\n- 二\n\n```js\nconst a = 1\n```\n\n> 引用');
+  assert.deepEqual(blocks.map(block => block.kind), ['heading', 'paragraph', 'list', 'code', 'quote']);
+  assert.equal(blocks[2].items.length, 2);
+  assert.equal(blocks[3].lang, 'js');
+  const tokens = client.chat.parseInlineTokens('见 `a.js` 与 [文档](https://example.com) 和 ![图](https://example.com/a.png)');
+  assert.deepEqual(tokens.map(token => token.kind), ['text', 'code', 'text', 'link', 'text', 'image']);
+  assert.equal(tokens[3].href, 'https://example.com');
+  assert.equal(tokens[5].href, 'https://example.com/a.png');
+});
+
+test('attachments are validated before they can be attached', async () => {
+  const client = await loadClient();
+  const png = 'data:image/png;base64,' + Buffer.from('x'.repeat(64)).toString('base64');
+  const ok = client.chat.attachmentFromDataUrl('a.png', png);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.part.type, 'image');
+  assert.equal(client.chat.attachmentFromDataUrl('a.gif', 'data:image/gif;base64,AAA').ok, false);
+  assert.match(client.chat.attachmentFromDataUrl('a.txt', 'not-a-data-url').message, /PNG/);
+  const big = 'data:image/png;base64,' + 'A'.repeat(6 * 1024 * 1024);
+  assert.match(client.chat.attachmentFromDataUrl('big.png', big).message, /4 MB/);
+  const body = client.chat.promptBody('s', 'hi', [ok.part]);
+  assert.deepEqual(body.content.map(part => part.type), ['text', 'image']);
+  assert.deepEqual(client.chat.promptBody('s', 'hi').content.map(part => part.type), ['text']);
+});
+
+test('retry is allowed exactly once for a known failure and refused when the outcome is unknown', async () => {
+  const client = await loadClient();
+  assert.equal(client.chat.retryState(null), null);
+  assert.equal(client.chat.retryState({ text: 'a', unknown: false }).retryable, true);
+  assert.equal(client.chat.retryState({ text: 'a', unknown: true }).retryable, false);
+  assert.match(client.chat.retryState({ text: 'a', unknown: true }).reason, /核对会话记录/);
+  assert.equal(client.chat.normalizeToolStatus('completed', false), 'applied');
+  assert.equal(client.chat.normalizeToolStatus('', true), 'rejected');
+  assert.equal(client.chat.normalizeToolStatus('unknown', false), 'unknown');
+});
+
+test('undo action only fills the input, never executes by itself', async () => {
+  const client = await loadClient();
+  const plan = client.chat.buildDialogPlan([{ id: 't1', role: 'tool', card: { name: '执行编辑', status: 'applied', revision: 3, line: 'layer.set_frame' },
+    undo: { commandId: 'cmd-7', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000001' } }]);
+  const action = plan[0].actions.find(item => item.kind === 'fill-undo');
+  assert.ok(action, '撤销必须给"填入输入框"动作');
+  assert.match(action.hint, /栈顶/);
+  assert.match(action.hint, /HISTORY_CONFLICT/);
+  assert.equal(plan[0].actions.some(item => item.kind === 'undo'), false, '不允许出现直接执行撤销的动作');
+  assert.match(client.chat.undoPrompt({ commandId: 'cmd-7', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000001' }), /cmd-7/);
+});
+
