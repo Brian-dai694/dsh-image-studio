@@ -93,9 +93,13 @@ test('router serves boot only to same-origin fetch and never exposes a tool HTTP
   };
 
   assert.equal((await call({ url: '/elsewhere' })).handled, false);
-  const denied = await call({ url: '/media-image/boot' });
-  assert.equal(denied.status, 403);
-  const ok = await call({ url: '/media-image/boot', headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' } });
+  // 缺自定义头一律拒绝；带自定义头且非跨站放行（桌面端不带 Sec-Fetch-* 也放行）。
+  const noHeader = await call({ url: '/media-image/boot' });
+  assert.equal(noHeader.status, 403);
+  assert.match(noHeader.body, /Same-origin fetch required/);
+  const desktopLike = await call({ url: '/media-image/boot', headers: { 'x-dsh-media-boot': '1' } });
+  assert.equal(desktopLike.status, 200);
+  const ok = await call({ url: '/media-image/boot', headers: { 'x-dsh-media-boot': '1', 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'empty' } });
   assert.equal(ok.status, 200);
   assert.match(ok.body, /accessToken/);
 

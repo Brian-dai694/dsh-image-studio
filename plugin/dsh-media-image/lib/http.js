@@ -22,6 +22,28 @@ const MIME = {
 const SAFE = /^[a-zA-Z0-9._/-]+$/;
 const RELAY_ACTIONS = new Set(['register', 'poll', 'respond', 'disconnect']);
 
+/**
+ * boot 令牌的同源校验（与视频包同形）。
+ *
+ * 只信 `Sec-Fetch-*` 会误伤桌面端（Electron 经常不带这两个头），所以主判据改成**自定义请求头**：
+ * 跨源页面想带 `x-dsh-media-boot` 必须先过 CORS 预检，而本服务不响应预检 ⇒ 只有同源页能带。
+ * 辅以 `Sec-Fetch-Site`：显式拒绝 `cross-site` / `same-site`；缺失或 `same-origin` / `none` 都放行。
+ * 403 正文带观测值（site/dest/mode/origin），便于下次一眼定位。
+ */
+const BOOT_HEADER = 'x-dsh-media-boot';
+
+export function bootAllowed(req) {
+  const h = req?.headers || {};
+  const site = h['sec-fetch-site'];
+  const dest = h['sec-fetch-dest'];
+  const mode = h['sec-fetch-mode'];
+  const origin = h.origin;
+  const observed = { site: site ?? null, dest: dest ?? null, mode: mode ?? null, origin: origin ?? null };
+  if (h[BOOT_HEADER] !== '1') return { ok: false, reason: 'missing-boot-header', observed };
+  if (site === 'cross-site' || site === 'same-site') return { ok: false, reason: 'sec-fetch-site', observed };
+  return { ok: true, observed };
+}
+
 const send = (res, status, value) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(value));
@@ -112,8 +134,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     if (req.method !== 'GET') { send(res, 405, { error: 'GET required' }); return true; }
 
     if (pathname === bootPath) {
-      if (req.headers['sec-fetch-site'] !== 'same-origin' || req.headers['sec-fetch-dest'] !== 'empty') {
-        send(res, 403, { error: 'Same-origin fetch required' });
+      const verdict = bootAllowed(req);
+      if (!verdict.ok) {
+        send(res, 403, { error: 'Same-origin fetch required', reason: verdict.reason, observed: verdict.observed });
         return true;
       }
       send(res, 200, { accessToken: token, editorKinds: [editorKind] });
