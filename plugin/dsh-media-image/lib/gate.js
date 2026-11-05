@@ -15,50 +15,118 @@ export function trustedSessionId(exec) {
 }
 
 // Host 内部的会话↔页面授权登记表。不暴露任何 HTTP 认领接口，也没有客户端自报入口。
-// authorize 是唯一生产路径：真实会话身份 + 原生人工审批 + 页面/快照复验后才登记。
+// 两条授权来源：
+//   native —— 真实会话身份 + 原生人工审批 + 页面/快照复验后才登记（宿主 approval=ask 时可用）；
+//   panel  —— 本人在编辑器面板点一次「授权此会话读写本工程」，消费一次性 bindTicket 后登记。
+// 两条都必须本人发起：模型没有签发票据的调用面，也不能代点。
 // register 只是给宿主集成留的旧接口，要求调用方已独立核实页面归属。
-export function createSessionBindings({ resolvePage } = {}) {
+export function createSessionBindings({ resolvePage, tickets = null, now = () => Date.now() } = {}) {
   const bindings = new Map();
   const invalid = new Set();
   const pending = new Set();
+  const audit = [];
+  const recordAudit = entry => { audit.push(Object.freeze({ at: now(), ...entry })); if (audit.length > 200) audit.shift(); };
   const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
-  return {
-    async authorize(exec, { editorKind, instanceId, projectId, readState, approve }) {
-      // 流程：取可信 session → 锁定 relay 实时页面 → 读文档快照 → 原生审批
-      // → 复验信号/失效/页面/工程/快照 → 原子登记。任一步变化都不登记。
-      const sessionId = trustedSessionId(exec);
-      if (bindings.has(sessionId) || invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Session already bound or expired; use a new dedicated session.');
-      if (pending.has(sessionId)) fail('SESSION_BINDING_PENDING', 'A binding approval is already in progress.');
-      if (!resolvePage) fail('SESSION_BINDING_UNAVAILABLE', 'Host page resolver is unavailable.');
-      const signal = exec.signal;
-      const checkActive = () => {
-        if (signal?.aborted) fail('APPROVAL_CANCELLED', 'Request cancelled; explicitly start a new approval request.');
-        if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Binding request invalidated; use a new dedicated session.');
-      };
-      pending.add(sessionId);
+  const registerGrant = (binding) => {
+    bindings.set(binding.sessionId, Object.freeze(binding));
+    recordAudit({ action: 'grant', sessionId: binding.sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, ticketId: binding.ticketId ?? null, expiresAt: binding.expiresAt ?? null });
+    return bindings.get(binding.sessionId);
+  };
+
+  async function authorizeNative(exec, { editorKind, instanceId, projectId, readState, approve }) {
+    // 流程：取可信 session → 锁定 relay 实时页面 → 读文档快照 → 原生审批
+    // → 复验信号/失效/页面/工程/快照 → 原子登记。任一步变化都不登记。
+    const sessionId = trustedSessionId(exec);
+    if (bindings.has(sessionId) || invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Session already bound or expired; use a new dedicated session.');
+    if (pending.has(sessionId)) fail('SESSION_BINDING_PENDING', 'A binding approval is already in progress.');
+    if (!resolvePage) fail('SESSION_BINDING_UNAVAILABLE', 'Host page resolver is unavailable.');
+    const signal = exec.signal;
+    const checkActive = () => {
+      if (signal?.aborted) fail('APPROVAL_CANCELLED', 'Request cancelled; explicitly start a new approval request.');
+      if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Binding request invalidated; use a new dedicated session.');
+    };
+    pending.add(sessionId);
+    try {
+      checkActive();
+      const page = resolvePage(editorKind, instanceId);
+      if (!page) fail('EDITOR_NOT_READY', 'The editor page is not connected.');
+      const before = await readState();
+      if (before.documentId !== projectId) fail('DOCUMENT_MISMATCH', 'Requested project does not match the editor.');
+      const reason = `Authorize this session ${sessionId} to read, edit and export this exact editor project. editorKind=${editorKind}; documentId=${before.documentId}; instanceId=${instanceId}; pageId=${page.pageId}; revision=${before.revision}; digest=${before.stateDigest}. Destructive edits still require separate approval.`;
+      checkActive();
+      // approve is the caller's bounded native approval wait; it must honor the signal
+      // so a host cancellation closes the pending approval instead of leaking it.
+      const decision = await approve(reason, signal);
+      checkActive();
+      if (!decision.allowed) fail(decision.code, decision.message);
+      const after = await readState();
+      checkActive();
+      const currentPage = resolvePage(editorKind, instanceId);
+      if (!currentPage || currentPage.pageId !== page.pageId || after.documentId !== before.documentId || after.revision !== before.revision || after.stateDigest !== before.stateDigest) fail('SESSION_BINDING_STALE', 'Page or project changed during approval; no grant was registered.');
+      return registerGrant({ sessionId, editorKind, instanceId, projectId, pageId: page.pageId, grantId: globalThis.crypto.randomUUID(), source: 'native', grantedAt: now(), expiresAt: null, ticketId: null });
+    } finally { pending.delete(sessionId); }
+  }
+
+  // 面板授权：认领一张本人签发的票据后登记 grant。不调用宿主审批，因此 approval=never 的
+  // 桌面端也能用。票据按 (editorKind, projectId, instanceId, pageId) 匹配，会话身份由
+  // trustedSessionId(exec) 当场补上——面板从不自报 sessionId。
+  const GRANT_SOFT_TTL_MS = 8 * 60 * 60_000;
+  async function bindWithTicket(exec, { editorKind, instanceId, projectId, readState }) {
+    const sessionId = trustedSessionId(exec);
+    if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'The project/page binding expired; create a new dedicated session.');
+    if (bindings.has(sessionId)) return bindings.get(sessionId);
+    const page = resolvePage?.(editorKind, instanceId);
+    if (!page) fail('SESSION_BINDING_REQUIRED', '编辑器页面还没有连上；先打开编辑器，再由本人在面板点“授权此会话读写本工程”。');
+    if (!tickets) fail('SESSION_BINDING_REQUIRED', 'This deployment has no panel bind tickets.');
+    const verdict = tickets.redeem({ editorKind, projectId, editorInstanceId: instanceId, pageId: page.pageId });
+    if (!verdict.ok) fail('SESSION_BINDING_REQUIRED', `${verdict.message}（${verdict.code}）`);
+    const before = await readState();
+    if (before.documentId !== projectId) fail('DOCUMENT_MISMATCH', 'Requested project does not match the editor.');
+    const grantedAt = now();
+    return registerGrant({
+      sessionId, editorKind, instanceId, projectId, pageId: page.pageId,
+      grantId: globalThis.crypto.randomUUID(), source: 'panel',
+      issuedAt: verdict.ticket.issuedAt, grantedAt,
+      expiresAt: grantedAt + GRANT_SOFT_TTL_MS,
+      ticketId: verdict.ticket.ticketId,
+    });
+  }
+
+  // 统一绑定入口：先认领面板票据，再走原生审批；两条都没有就明确回未授权，
+  // 不复用 EDITOR_NOT_READY（那会让人一直去查连接）。
+  async function bind(exec, { editorKind, instanceId, projectId, readState, approve }) {
+    const sessionId = trustedSessionId(exec);
+    const existing = bindings.get(sessionId);
+    if (existing) {
+      if (Number.isFinite(existing.expiresAt) && existing.expiresAt <= now()) {
+        bindings.delete(sessionId);
+        recordAudit({ action: 'expired', sessionId, editorKind: existing.editorKind, projectId: existing.projectId, instanceId: existing.instanceId, source: existing.source, grantId: existing.grantId, reason: 'grant-soft-ttl' });
+        fail('SESSION_BINDING_EXPIRED', '授权已过期（软上限 8 小时）；请本人在面板重新授权。');
+      }
+      return existing;
+    }
+    try {
+      return await bindWithTicket(exec, { editorKind, instanceId, projectId, readState });
+    } catch (ticketError) {
+      if (ticketError?.code !== 'SESSION_BINDING_REQUIRED') throw ticketError;
+      if (typeof approve !== 'function') throw ticketError;
       try {
-        checkActive();
-        const page = resolvePage(editorKind, instanceId);
-        if (!page) fail('EDITOR_NOT_READY', 'The editor page is not connected.');
-        const before = await readState();
-        if (before.documentId !== projectId) fail('DOCUMENT_MISMATCH', 'Requested project does not match the editor.');
-        const reason = `Authorize this session ${sessionId} to read, edit and export this exact editor project. editorKind=${editorKind}; documentId=${before.documentId}; instanceId=${instanceId}; pageId=${page.pageId}; revision=${before.revision}; digest=${before.stateDigest}. Destructive edits still require separate approval.`;
-        checkActive();
-        // approve is the caller's bounded native approval wait; it must honor the signal
-        // so a host cancellation closes the pending approval instead of leaking it.
-        const decision = await approve(reason, signal);
-        checkActive();
-        if (!decision.allowed) fail(decision.code, decision.message);
-        const after = await readState();
-        checkActive();
-        const currentPage = resolvePage(editorKind, instanceId);
-        if (!currentPage || currentPage.pageId !== page.pageId || after.documentId !== before.documentId || after.revision !== before.revision || after.stateDigest !== before.stateDigest) fail('SESSION_BINDING_STALE', 'Page or project changed during approval; no grant was registered.');
-        const grantId = globalThis.crypto.randomUUID();
-        const binding = Object.freeze({ sessionId, editorKind, instanceId, projectId, pageId: page.pageId, grantId });
-        bindings.set(sessionId, binding);
-        return binding;
-      } finally { pending.delete(sessionId); }
-    },
+        return await authorizeNative(exec, { editorKind, instanceId, projectId, readState, approve });
+      } catch (error) {
+        // 策略 never 下「审批被拒绝」根本不是用户拒绝，必须与「纯未授权」分开报。
+        if (error?.code === 'APPROVAL_UNAVAILABLE' || error?.code === 'APPROVAL_DENIED' || error?.code === 'APPROVAL_FAILED') {
+          fail('SESSION_APPROVAL_UNAVAILABLE', `宿主审批不可用或策略为 never（${error.code}），这不是你拒绝了审批。请本人在编辑器面板点“授权此会话读写本工程”。`);
+        }
+        if (error?.code === 'SESSION_BINDING_REQUIRED') throw error;
+        throw error;
+      }
+    }
+  }
+
+  return {
+    authorize: authorizeNative,
+    bind,
+    bindWithTicket,
     // 旧宿主集成入口：调用方必须已独立证明该页面属于本会话，否则拒绝。
     register(exec, binding) {
       const sessionId = trustedSessionId(exec);
@@ -68,8 +136,7 @@ export function createSessionBindings({ resolvePage } = {}) {
       const page = resolvePage(binding.editorKind, binding.instanceId);
       if (!page || page.pageId !== binding.pageId || page.sessionId !== sessionId) fail('SESSION_BINDING_MISMATCH', 'Host has not verified session ownership of this page.');
       if (bindings.has(sessionId) || invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Create a new dedicated session after changing the project.');
-      bindings.set(sessionId, Object.freeze({ ...binding, sessionId }));
-      return bindings.get(sessionId);
+      return registerGrant({ ...binding, sessionId, source: 'verified-register', grantedAt: now(), expiresAt: null });
     },
     // 每次工具调用前校验：会话已绑定、kind/实例/工程一致、页面仍存活；
     // 页面断开或换页即作废绑定（保活切页不算断开）。
@@ -78,16 +145,42 @@ export function createSessionBindings({ resolvePage } = {}) {
       const binding = bindings.get(sessionId);
       if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'The project/page binding expired; create a new dedicated session.');
       if (!binding) fail('SESSION_BINDING_REQUIRED', 'Host-verified editor/session registration is required.');
+      // 授权软上限：8 小时，或页面/工程变化，任一不满足立即作废。
+      if (Number.isFinite(binding.expiresAt) && binding.expiresAt <= now()) {
+        bindings.delete(sessionId);
+        recordAudit({ action: 'expired', sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, source: binding.source, grantId: binding.grantId, reason: 'grant-soft-ttl' });
+        fail('SESSION_BINDING_EXPIRED', '授权已过期（软上限 8 小时）；请本人在面板重新授权。');
+      }
       if (kind !== binding.editorKind || args.instanceId !== binding.instanceId || args.projectId !== binding.projectId) fail('SESSION_BINDING_MISMATCH', 'Explicit projectId, instanceId and editor kind must match the Host binding.');
       const page = resolvePage?.(binding.editorKind, binding.instanceId);
       if (!page || page.pageId !== binding.pageId) {
         invalid.add(sessionId); bindings.delete(sessionId);
+        recordAudit({ action: 'revoked', sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, reason: 'page-disconnected-or-changed' });
         fail('SESSION_BINDING_STALE', 'The bound page disconnected or changed.');
       }
       if (kind !== binding.editorKind || args.instanceId !== binding.instanceId || args.projectId !== binding.projectId) fail('SESSION_BINDING_MISMATCH', 'Explicit projectId, instanceId and editor kind must match the Host binding.');
       return binding;
     },
-    invalidate(sessionId) { bindings.delete(sessionId); invalid.add(sessionId); },
+    invalidate(sessionId) {
+      const binding = bindings.get(sessionId);
+      bindings.delete(sessionId); invalid.add(sessionId);
+      recordAudit({ action: 'revoked', sessionId, editorKind: binding?.editorKind ?? null, projectId: binding?.projectId ?? null, instanceId: binding?.instanceId ?? null, source: binding?.source ?? null, grantId: binding?.grantId ?? null, reason: 'invalidated-by-host' });
+    },
+    bindingOf(sessionId) { return bindings.get(sessionId) ?? null; },
+    // 面板「撤销授权」：按页面+工程撤掉所有相关 grant（本人点击才走到这里）。
+    revokeByTarget({ editorKind, projectId, pageId }) {
+      let revoked = 0;
+      for (const [sessionId, binding] of [...bindings]) {
+        if (binding.editorKind !== editorKind) continue;
+        if (binding.projectId !== projectId) continue;
+        if (pageId && binding.pageId !== pageId) continue;
+        bindings.delete(sessionId);
+        revoked += 1;
+        recordAudit({ action: 'revoked', sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, reason: 'panel-unbind' });
+      }
+      return revoked;
+    },
+    auditLog() { return audit.slice(); },
   };
 }
 

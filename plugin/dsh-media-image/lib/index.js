@@ -6,7 +6,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createEditorRelay } from './relay.js';
 import { createMediaBridge } from './bridge.js';
-import { createGuard, createApprovalStore } from './gate.js';
+import { createGuard, createApprovalStore, createSessionBindings } from './gate.js';
+import { createBindTickets } from './tickets.js';
 import { registerMediaTools } from './tools.js';
 import { createMediaRouter } from './http.js';
 
@@ -25,6 +26,12 @@ export function apply(ctx, config = {}) {
   });
   const bridge = createMediaBridge({ relay, editorKind: 'image' });
   const approvals = createApprovalStore();
+  // 面板授权票据：桌面端 approval=never 时的授权路径（本人点一次，票据一次性、5 分钟）。
+  const tickets = createBindTickets();
+  const bindings = createSessionBindings({
+    resolvePage: (_kind, instanceId) => bridge.getPage(instanceId) ?? null,
+    tickets,
+  });
 
   ctx.effect(() => () => { relay.close(); }, 'dsh-media-image: relay dispose');
 
@@ -36,11 +43,13 @@ export function apply(ctx, config = {}) {
     prefix: '/media-image',
     token,
     publicDir,
+    tickets,
+    bindings,
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,
   });
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/media-image', handler: router }), 'dsh-media-image: routes');
 
-  registerMediaTools(ctx, { bridge, approvals });
+  registerMediaTools(ctx, { bridge, approvals, bindings });
   return { dispose() { relay.close(); } };
 }

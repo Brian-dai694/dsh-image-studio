@@ -31,6 +31,20 @@ const RESULT_SCHEMA = {
     artifactRef: { type: 'string' },
     changedObjectIds: { type: 'array', items: { type: 'string' } },
     objectKind: { type: 'string', enum: ['layer', 'clip', 'overlay', 'track'] },
+    // 本次调用实际使用的授权（binding 是 Host 侧事实，模型只能读不能改）。
+    grant: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        source: { type: 'string', enum: ['native', 'panel', 'verified-register', 'unknown'] },
+        grantId: { type: 'string' },
+        issuedAt: { type: 'integer' },
+        expiresAt: { type: 'integer' },
+        expiresInMs: { type: 'integer' },
+      },
+    },
+    // 未授权时给模型的一句下一步（去面板点授权 / 去原生会话批准）。
+    hint: { type: 'string' },
     state: { type: 'json' },
     error: {
       type: 'object',
@@ -169,13 +183,23 @@ const presentationMeta = (args, value) => ({
 const envelope = (kind, extra) => ({ status: 'rejected', commandId: 'unknown', editorKind: kind, ...extra });
 
 function failure(kind, commandId, error) {
+  const code = error?.code || 'EDITOR_ERROR';
+  // 未授权必须说清楚怎么授权，且不能和「编辑器未就绪」混在一起。
+  const hint = code === 'SESSION_BINDING_REQUIRED'
+    ? '请本人在编辑器面板点“授权此会话读写本工程”（不依赖宿主审批；票据 5 分钟一次性）。'
+    : code === 'SESSION_APPROVAL_UNAVAILABLE'
+      ? '宿主审批不可用（策略可能是 never，这不是你拒绝了）。请改用编辑器面板的“授权此会话读写本工程”。'
+      : code === 'SESSION_BINDING_EXPIRED'
+        ? '授权已到期（软上限 8 小时）；请本人在面板重新授权。'
+        : undefined;
   return envelope(kind, {
     commandId,
     error: {
-      code: error?.code || 'EDITOR_ERROR',
+      code,
       message: error?.message || 'Editor request failed.',
-      retryable: error?.code === 'EDITOR_TIMEOUT' || error?.code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN',
+      retryable: error?.code === 'EDITOR_TIMEOUT' || error?.code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN' || code === 'SESSION_BINDING_REQUIRED' || code === 'SESSION_APPROVAL_UNAVAILABLE',
     },
+    ...(hint ? { hint } : {}),
     // Any error that may have landed a write is `unknown`, never `rejected`.
     ...(error?.code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN' || error?.outcomeUnknown === true ? { status: 'unknown' } : {}),
   });
@@ -256,15 +280,25 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     });
   };
 
-  // 首次调用带 bind:true 时走原生审批登记；之后每次读取都复核绑定与工程一致。
+  // 首次调用带 bind:true 时登记授权：先面板票据（不依赖宿主审批），再原生审批；
+  // 之后每次读取都复核绑定与工程一致，并把授权来源如实回读。
   const readState = (kind, bridge) => async (args, exec) => {
     try {
-      if (args.bind === true) await bindings.authorize(exec, {
+      if (args.bind === true) await bindings.bind(exec, {
         editorKind: kind, instanceId: args.instanceId, projectId: args.projectId,
         readState: () => bridge.readState({ instanceId: args.instanceId, projectId: args.projectId }),
         approve: (reason, signal) => requestHumanApproval(ctx, { agent: exec.agent, toolName: `media_${kind}_read_state`, callId: exec.callId, reason, signal: signal ?? exec.signal }),
       });
       const state = await verify(kind, bridge, args, exec);
+      const binding = bindings.bindingOf?.(agentKey(exec)) ?? null;
+      // 契约 §4：grant:{source,grantId,issuedAt,expiresAt,expiresInMs}|null
+      const grant = binding ? {
+        source: binding.source || 'unknown',
+        grantId: binding.grantId ?? null,
+        issuedAt: Number.isFinite(binding.issuedAt) ? binding.issuedAt : (Number.isFinite(binding.grantedAt) ? binding.grantedAt : null),
+        expiresAt: Number.isFinite(binding.expiresAt) ? binding.expiresAt : null,
+        expiresInMs: Number.isFinite(binding.expiresAt) ? Math.max(0, binding.expiresAt - Date.now()) : null,
+      } : null;
       return {
         status: 'applied',
         commandId: 'read_state',
@@ -274,6 +308,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         stateDigest: state.stateDigest,
         canUndo: !!state.history?.canUndo,
         canRedo: !!state.history?.canRedo,
+        ...(grant ? { grant } : {}),
         state,
       };
     } catch (error) {

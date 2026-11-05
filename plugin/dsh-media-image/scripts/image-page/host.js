@@ -128,6 +128,35 @@ window.addEventListener('message', async event => {
     }
     return;
   }
+  // 面板授权：本人点一次「授权此会话读写本工程」。票据由 Host 签发、一次性、5 分钟，
+  // Agent 既没有这个入口也不能代点；这里只负责把点击转成一次同源 POST 并把结果回给面板。
+  if (event.data.type === 'media.bind.request' || event.data.type === 'media.bind.revoke') {
+    const requestId = event.data.requestId;
+    const revoke = event.data.type === 'media.bind.revoke';
+    try {
+      const connection = await connect();
+      const token = await boot();
+      const payload = { sessionId: event.data.sessionId };
+      if (revoke) payload.action = 'revoke';
+      else {
+        const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+        payload.instanceId = connection.editorInstanceId;
+        payload.projectId = state.documentId;
+      }
+      const response = await fetch('/media-image/bind', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1' },
+        body: JSON.stringify(payload),
+      });
+      const value = await response.json();
+      if (!response.ok) throw Object.assign(new Error(value.message || '授权失败'), { code: value.code });
+      parent.postMessage({ type: revoke ? 'media.bind.revoked' : 'media.bind.result', requestId, ok: true, ...(value.ticket ? { ticket: value.ticket } : {}) }, location.origin);
+    } catch (error) {
+      parent.postMessage({ type: revoke ? 'media.bind.revoked' : 'media.bind.result', requestId, ok: false, error: { code: error.code || 'BIND_FAILED', message: error.message } }, location.origin);
+    }
+    return;
+  }
   if (event.data.type !== 'media.binding.read') return;
   const requestId = event.data.requestId;
   try {

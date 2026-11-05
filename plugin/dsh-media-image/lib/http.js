@@ -1,5 +1,6 @@
 // Same-origin routes served by ctx.webServer.register: boot token, relay transport and the
 // packaged editor pages for this single editor kind. No separate HTTP server is started.
+import { randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, relative, resolve, sep } from 'node:path';
 
@@ -100,7 +101,7 @@ const RELAY_HEADER = 'x-dsh-media-relay';
  *
  * 返回 `null` 表示放行，否则返回 `{ reason, message, observed }`，403 正文原样带出。
  */
-function authorizeRelay(req, token) {
+function authorizeSameOrigin(req, token, methods = ['POST']) {
   const h = req?.headers || {};
   const host = h.host;
   const origin = h.origin;
@@ -118,9 +119,79 @@ function authorizeRelay(req, token) {
     return { reason: 'missing-relay-header', message: 'Relay header required when Origin is absent', observed };
   }
   if (h.authorization !== `Bearer ${token}`) return { reason: 'relay-auth-failed', message: 'Relay authentication failed', observed };
-  if (h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
-  if (req.method !== 'POST') return { reason: 'method', message: 'POST required', observed };
+  if (methods.includes('POST') && h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
+  if (!methods.includes(req.method)) return { reason: 'method', message: `${methods.join('/')} required`, observed };
   return null;
+}
+
+function authorizeRelay(req, token) { return authorizeSameOrigin(req, token, ['POST']); }
+
+// 只有本人能在面板上点这一下：入口要求同源（自定义头）+ 页面令牌，Agent 没有 HTTP 调用面。
+// 契约（project-grant-v1）：票据只绑 (editorKind, projectId, instanceId, pageId)，
+// 面板只发 {instanceId}，**不接受 sessionId**；会话身份由 Host 在工具调用时用真实 exec 补上。
+async function handleBind(req, res, { tickets, bindings, relay, editorKind, prefix, token, pathname }) {
+  const isStatus = pathname.endsWith('/bind-status');
+  const isUnbind = pathname.endsWith('/grant/unbind');
+  const rejection = authorizeSameOrigin(req, token, isStatus ? ['GET'] : ['POST']);
+  if (rejection) {
+    send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed });
+    return true;
+  }
+  const url = new URL(req.url ?? '/', 'http://dsh.local');
+  const pageOf = editorInstanceId => {
+    const page = relay?.getPage?.(editorInstanceId) ?? null;
+    return page && page.kind === editorKind ? page : null;
+  };
+  const stateOf = async editorInstanceId => {
+    const state = await relay.request({ type: 'editor.read_state', requestId: randomUUID(), editorInstanceId });
+    if (!state?.documentId) throw Object.assign(new Error('编辑器没有返回工程 id'), { code: 'EDITOR_NOT_READY' });
+    return state;
+  };
+  try {
+    if (isStatus) {
+      // instanceId 优先；为了兼容旧面板，允许只传 sessionId（此时只能看 grant，没有 pending 票据）。
+      const editorInstanceId = url.searchParams.get('instanceId') || url.searchParams.get('instanceIdOrNull');
+      const sessionId = url.searchParams.get('sessionId');
+      let page = editorInstanceId ? pageOf(editorInstanceId) : null;
+      let pending = null;
+      let projectId = null;
+      if (page) {
+        try { projectId = (await stateOf(editorInstanceId)).documentId; } catch { projectId = null; }
+        if (projectId) pending = tickets?.pendingFor({ pageId: page.pageId, projectId }) ?? null;
+      }
+      const grant = sessionId && bindings?.bindingOf ? bindings.bindingOf(sessionId) : null;
+      send(res, 200, {
+        ok: true,
+        editorKind,
+        projectId: projectId ?? grant?.projectId ?? null,
+        ticket: pending && pending.state === 'pending' ? { ticketId: pending.ticketId, projectId: pending.projectId, issuedAt: pending.issuedAt, expiresAt: pending.expiresAt, ttlMs: pending.ttlMs, state: pending.state } : null,
+        grant: grant ? { source: grant.source || 'unknown', grantId: grant.grantId ?? null, projectId: grant.projectId, issuedAt: grant.issuedAt ?? grant.grantedAt ?? null, expiresAt: grant.expiresAt ?? null, expiresInMs: Number.isFinite(grant.expiresAt) ? Math.max(0, grant.expiresAt - Date.now()) : null } : null,
+      });
+      return true;
+    }
+    const body = await readJsonBody(req).catch(() => null);
+    if (!body || typeof body !== 'object') { send(res, 400, { code: 'INVALID_REQUEST', message: 'JSON body is required.' }); return true; }
+    const editorInstanceId = typeof body.instanceId === 'string' ? body.instanceId : null;
+    if (!editorInstanceId) { send(res, 400, { code: 'INVALID_REQUEST', message: 'instanceId is required.' }); return true; }
+    const page = pageOf(editorInstanceId);
+    if (!page) { send(res, 409, { code: 'EDITOR_NOT_READY', message: '编辑器页面还没有连上，先打开编辑器再授权。' }); return true; }
+    const state = await stateOf(editorInstanceId);
+    if (isUnbind || body.action === 'revoke') {
+      tickets?.revokeTarget({ pageId: page.pageId, projectId: state.documentId });
+      const revokedGrants = bindings?.revokeByTarget?.({ editorKind, projectId: state.documentId, pageId: page.pageId }) ?? 0;
+      send(res, 200, { ok: true, revoked: true, revokedGrants });
+      return true;
+    }
+    if (!tickets) { send(res, 501, { code: 'BIND_UNAVAILABLE', message: 'This deployment has no panel grant tickets.' }); return true; }
+    const ticket = tickets.issue({ editorKind, projectId: state.documentId, editorInstanceId, pageId: page.pageId, issuedBy: 'panel' });
+    send(res, 200, {
+      ok: true,
+      ticket: { ticketId: ticket.ticketId, editorKind, projectId: ticket.projectId, instanceId: editorInstanceId, pageId: ticket.pageId, issuedAt: ticket.issuedAt, expiresAt: ticket.expiresAt, ttlMs: ticket.ttlMs },
+    });
+  } catch (error) {
+    send(res, error.code === 'PAYLOAD_TOO_LARGE' ? 413 : error.code === 'EDITOR_NOT_READY' ? 409 : 400, { code: error.code || 'INVALID_REQUEST', message: error.message });
+  }
+  return true;
 }
 
 async function handleRelay(req, res, { relay, prefix, token, pathname }) {
@@ -138,12 +209,16 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const editorPrefix = `${prefix}/${editorKind}/`;
   const bootPath = `${prefix}/boot`;
-  const missing = () => send(null, 0, null);
+  const bindPath = `${prefix}/bind`;
+  const bindStatusPath = `${prefix}/bind-status`;
+  // 契约 §6 的正式路由；/bind 保留为同义旧路径，等面板全部切换后删。
+  const grantTicketPath = `${prefix}/grant/ticket`;
+  const grantUnbindPath = `${prefix}/grant/unbind`;
 
   return async function handle(req, res) {
     const url = new URL(req.url ?? '/', 'http://dsh.local');
@@ -151,6 +226,10 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     if (!pathname.startsWith(prefix)) return false;
 
     if (pathname.startsWith(relayPrefix)) return handleRelay(req, res, { relay, prefix: relayPrefix, token, pathname });
+    // 面板授权入口在 GET 拦截之前：签发/解绑是 POST。
+    if (pathname === bindPath || pathname === bindStatusPath || pathname === grantTicketPath || pathname === grantUnbindPath) {
+      return handleBind(req, res, { tickets, bindings, relay, editorKind, prefix, token, pathname });
+    }
 
     if (req.method !== 'GET') { send(res, 405, { error: 'GET required' }); return true; }
 
