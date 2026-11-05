@@ -2,7 +2,7 @@ import app from './app.js';
 import config from './config.js';
 import zoomView from './libs/zoomView.js';
 
-const COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.set_frame', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -12,8 +12,7 @@ const stableStringify = value => {
   if (plain(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
   return JSON.stringify(value);
 };
-const digestOf = value => {
-  const input = stableStringify(value);
+const digestOf = value => {  const input = stableStringify(value);
   let hash = 0xcbf29ce484222325n;
   for (let index = 0; index < input.length; index++) {
     hash ^= BigInt(input.charCodeAt(index));
@@ -23,6 +22,39 @@ const digestOf = value => {
 };
 
 export class DshEditorBridge {
+  /** 纯像素算法按需加载：生产走动态 import，测试可注入 globalThis.__dshPixelOps。 */
+  async pixelOps() {
+    if (globalThis.__dshPixelOps) return globalThis.__dshPixelOps;
+    return import('./dsh-pixel-ops.js');
+  }
+  /** 把图层栅格化成 ImageData；没有可绘制像素时明确报错，不猜。 */
+  rasterizeLayer(layer) {
+    const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+    const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx || typeof ctx.getImageData !== 'function') throw this.error('LAYER_NOT_RASTERIZED', '这个图层还不能按像素处理');
+    if (!layer.link) throw this.error('LAYER_NOT_RASTERIZED', '图层像素尚未加载为图像，请先导入或栅格化');
+    ctx.drawImage(layer.link, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height);
+  }
+  /** 把处理后的像素封装成原生动作：一步撤销、一个 revision。 */
+  imageAction(image) {
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width; canvas.height = image.height;
+    canvas.getContext('2d').putImageData(image, 0, 0);
+    return new app.Actions.Update_layer_image_action(canvas, image.layerId);
+  }
+  /** 取（或建立）该图层处理前的首帧快照；之后每次都从它重算，保证幂等。 */
+  baseSnapshot(layerId, image, pixelDigest) {
+    const key = String(layerId);
+    const existing = this.pixelBases.get(key);
+    if (existing) return existing;
+    const snapshot = { base: image, digest: pixelDigest(image) };
+    this.pixelBases.set(key, snapshot);
+    return snapshot;
+  }
   constructor() {
     this.editorInstanceId = randomId();
     this.documentId = randomId();
@@ -227,7 +259,7 @@ export class DshEditorBridge {
       if (this.isHumanEditing()) throw this.error('EDITOR_NOT_READY', '人工编辑尚未提交，请结束拖拽或文字输入后重试');
       this.refreshRevision();
       if (request.expectedRevision !== this.revision) throw this.error('REVISION_CONFLICT');
-      const prepared = this.prepare(request.command);
+      const prepared = await this.prepare(request.command);
       // Validation and action construction are synchronous inside the shared scheduler.
       // Mutation uses the original native history entrypoint, avoiding queue re-entry.
       this.commandResults.set(request.commandId, { status: 'unknown', originalResult: null });
@@ -284,7 +316,29 @@ export class DshEditorBridge {
     return item;
   }
 
-  prepare(command) {
+  /** 取色彩匹配的参考像素：同画布其他图层（canvas）或该图层下方图层（below），可裁成矩形。 */
+  referencePixels(layer, reference) {
+    const width = Math.max(1, Math.round(config.WIDTH || 1));
+    const height = Math.max(1, Math.round(config.HEIGHT || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx || typeof ctx.getImageData !== 'function') throw this.error('LAYER_NOT_RASTERIZED', '画布还不支持像素读取');
+    const sorted = app.Layers.get_sorted_layers();
+    const index = sorted.findIndex(item => String(item.id) === String(layer.id));
+    const sources = reference === 'below' ? sorted.slice(index + 1) : sorted.filter(item => String(item.id) !== String(layer.id));
+    for (const item of sources) {
+      if (item.visible === false || !item.link) continue;
+      ctx.globalAlpha = (item.opacity ?? 100) / 100;
+      try { ctx.drawImage(item.link, item.x || 0, item.y || 0, item.width || item.width_original || 1, item.height || item.height_original || 1); } catch (_) { /* 不可绘制图层跳过 */ }
+    }
+    ctx.globalAlpha = 1;
+    const rect = reference !== 'canvas' && reference !== 'below' ? reference.rect : [0, 0, width, height];
+    const [x, y, w, h] = rect;
+    return ctx.getImageData(x, y, Math.max(1, Math.min(w, width - x)), Math.max(1, Math.min(h, height - y)));
+  }
+
+  async prepare(command) {
     if (!keysOnly(command, ['type', 'payload']) || !COMMANDS.has(command.type)) throw this.error('UNSUPPORTED_COMMAND');
     const p = command.payload;
     if (command.type === 'history.undo' || command.type === 'history.redo') {
@@ -306,6 +360,55 @@ export class DshEditorBridge {
       }
       actions.push(new app.Actions.Update_config_action({ WIDTH: p.width, HEIGHT: p.height }));
       return { action: new app.Actions.Bundle_action('dsh_canvas', crop ? '裁剪画布' : '调整画布尺寸', actions), ids: () => config.layers.map(layer => String(layer.id)) };
+    }
+    if (command.type === 'layer.feather' || command.type === 'layer.color_match') {
+      const isFeather = command.type === 'layer.feather';
+      const allowed = isFeather ? ['layerId', 'radiusPx'] : ['layerId', 'method', 'strength', 'reference'];
+      if (!keysOnly(p, allowed)) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      const ops = await this.pixelOps();
+      const key = String(layer.id);
+      const current = this.rasterizeLayer(layer);
+      const snapshot = this.baseSnapshot(layer.id, current, ops.pixelDigest);
+      let output;
+      let applied;
+      if (isFeather) {
+        if (!Number.isSafeInteger(p.radiusPx) || p.radiusPx < 1 || p.radiusPx > 64) throw this.error('INVALID_REQUEST');
+        // 每次都用首帧快照重算：调半径是覆盖，不是叠加。
+        output = ops.blurAlpha(snapshot.base, p.radiusPx);
+        applied = { feather: { radiusPx: p.radiusPx, fromDigest: snapshot.digest } };
+      } else {
+        if (p.method !== 'reinhard') throw this.error('INVALID_REQUEST');
+        const strength = p.strength === undefined ? 1 : p.strength;
+        if (typeof strength !== 'number' || !Number.isFinite(strength) || strength < 0 || strength > 1) throw this.error('INVALID_REQUEST');
+        const reference = p.reference === undefined ? 'below' : p.reference;
+        if (reference !== 'canvas' && reference !== 'below') {
+          if (!plain(reference) || !keysOnly(reference, ['rect']) || !Array.isArray(reference.rect) || reference.rect.length !== 4
+            || !reference.rect.every(value => Number.isSafeInteger(value) && value >= 0)) throw this.error('INVALID_REQUEST');
+        }
+        const referenceImage = this.referencePixels(layer, reference);
+        output = ops.reinhardTransfer(snapshot.base, referenceImage, strength);
+        applied = { colorMatch: { method: 'reinhard', strength, fromDigest: snapshot.digest } };
+      }
+      output.layerId = layer.id;
+      // 「已应用」必须跟着历史走：把参数挂到该动作的 do/undo 上，撤销时回退、重做时恢复，
+      // 否则撤销后 read_state 还会说 feather/colorMatch 在生效，等于骗人。
+      const previous = { ...(this.pixelApplied.get(key) || {}) };
+      const action = this.imageAction(output);
+      const nativeDo = action.do.bind(action);
+      const nativeUndo = action.undo.bind(action);
+      const appliedState = this.pixelApplied;
+      action.do = async () => {
+        await nativeDo();
+        appliedState.set(key, { ...previous, ...applied });
+      };
+      action.undo = async () => {
+        await nativeUndo();
+        if (Object.keys(previous).length) appliedState.set(key, previous);
+        else appliedState.delete(key);
+      };
+      return { action, ids: () => [key] };
     }
     if (command.type === 'layer.remove') {
       if (!keysOnly(p, ['layerId']) || typeof p.layerId !== 'string' || !config.layers.some(layer => String(layer.id) === p.layerId)) throw this.error('LAYER_NOT_FOUND');

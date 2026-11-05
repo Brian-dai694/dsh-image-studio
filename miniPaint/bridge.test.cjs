@@ -29,6 +29,33 @@ context.Base_gui_class = function () {return app.GUI;};
 context.Helper_class = function () {this.is_input = () => false;};
 app.State = new (load('core/base-state.js', 'Base_state_class'))();
 app.Actions.Update_config_action = load('actions/update-config.js', 'Update_config_action');
+// test-only 画布桩：只让羽化/色匹的结构可测（路由、校验、快照、撤销回退、read_state 字段），
+// 不断言像素颜色；真实像素效果由浏览器验收。不进生产包。
+function makeCanvas(w = 8, h = 8) {
+  return {
+    width: w, height: h,
+    getContext() {
+      return {
+        globalAlpha: 1,
+        drawImage() {}, putImageData() {},
+        getImageData: (x, y, cw, ch) => ({ width: cw, height: ch, data: new Uint8ClampedArray(cw * ch * 4) }),
+      };
+    },
+  };
+}
+context.document = Object.assign(context.document || {}, { createElement: () => makeCanvas() });
+// 与原生 Update_layer_image_action 同形的桩：只做 link/尺寸写回，验证历史与状态同步。
+app.Actions.Update_layer_image_action = class {
+  constructor(canvas, layer_id) { this.canvas = canvas; this.layer_id = layer_id; this.action_id = 'update_layer_image'; this.action_description = 'Update Layer Image'; }
+  async do() {
+    this.layer = config.layers.find(item => String(item.id) === String(this.layer_id));
+    if (!this.layer) return;
+    this.previous = { link: this.layer.link, width: this.layer.width, height: this.layer.height };
+    this.layer.link = this.canvas; this.layer.width = this.canvas.width; this.layer.height = this.canvas.height;
+  }
+  async undo() { if (this.layer && this.previous) Object.assign(this.layer, this.previous); }
+  free() {}
+};
 const Bridge = load('dsh-editor-bridge.js', 'DshEditorBridge', { zoomView });
 const bridge = new Bridge();
 let count = 0;
@@ -202,6 +229,67 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       assert.equal(rejected.ok, false);
     }
     assert.deepEqual({ x: layer.x, y: layer.y, width: layer.width, height: layer.height }, before);
+  });
+  await test('layer.feather keeps one base snapshot, reports it and follows undo/redo', async () => {
+    context.__dshPixelOps = await import('./src/js/dsh-pixel-ops.js');
+    // 桥里读的是 vm 里的 `globalThis`（harness 显式提供了一个对象），两边都挂上更稳。
+    context.globalThis.__dshPixelOps = context.__dshPixelOps;
+    const layer = { id: 'img-1', name: '图', type: 'image', link: makeCanvas(8, 8), x: 0, y: 0, width: 8, height: 8, width_original: 8, height_original: 8, order: 0, visible: true };
+    config.layers.push(layer);
+    // 直接改 config 相当于一次人工编辑：先让桥重算 revision，再发命令，否则会拿到 REVISION_CONFLICT。
+    bridge.refreshRevision();
+    let state = bridge.readState().layers.find(item => item.id === 'img-1');
+    assert.equal(state.feather, undefined, '未应用前不应出现 feather');
+
+    const first = await send({type:'layer.feather', payload:{layerId:'img-1', radiusPx:4}});
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const baseDigest = bridge.pixelBases.get('img-1').digest;
+    assert.match(baseDigest, /^fnv1a64-[0-9a-f]{16}$/);
+    state = bridge.readState().layers.find(item => item.id === 'img-1');
+    // vm 里的对象与宿主的原型不同，deepStrictEqual 会因为跨 realm 失败，用 JSON 归一化后比较。
+    assert.deepEqual(JSON.parse(JSON.stringify(state.feather)), { radiusPx: 4, fromDigest: baseDigest });
+
+    // 撤销：字段必须消失，不能继续声称生效。
+    const undone = await send({type:'history.undo', payload:{}});
+    assert.equal(undone.ok, true);
+    assert.equal(bridge.readState().layers.find(item => item.id === 'img-1').feather, undefined, '撤销后不能还显示 feather');
+    // 重做：字段恢复成刚才那次的参数。
+    const redone = await send({type:'history.redo', payload:{}});
+    assert.equal(redone.ok, true);
+    assert.equal(bridge.readState().layers.find(item => item.id === 'img-1').feather.radiusPx, 4);
+
+    // 换半径必须允许，但仍从同一份 base 重算。
+    const second = await send({type:'layer.feather', payload:{layerId:'img-1', radiusPx:9}});
+    assert.equal(second.ok, true);
+    assert.equal(bridge.pixelBases.get('img-1').digest, baseDigest, '调半径不能换 base');
+    assert.equal(bridge.readState().layers.find(item => item.id === 'img-1').feather.radiusPx, 9);
+  });
+  await test('layer.feather rejects bad radius, unknown keys and missing layers', async () => {
+    for (const payload of [{layerId:'img-1', radiusPx:0}, {layerId:'img-1', radiusPx:65}, {layerId:'img-1', radiusPx:1.5},
+      {layerId:'img-1', radiusPx:3, extra:1}, {layerId:'missing', radiusPx:3}]) {
+      const rejected = await send({type:'layer.feather', payload});
+      assert.equal(rejected.ok, false, JSON.stringify(payload));
+    }
+  });
+  await test('layer.color_match is idempotent per base and follows undo', async () => {
+    const first = await send({type:'layer.color_match', payload:{layerId:'img-1', method:'reinhard', strength:0.8}});
+    assert.equal(first.ok, true);
+    const baseDigest = bridge.pixelBases.get('img-1').digest;
+    let state = bridge.readState().layers.find(item => item.id === 'img-1');
+    assert.deepEqual(JSON.parse(JSON.stringify(state.colorMatch)), { method: 'reinhard', strength: 0.8, fromDigest: baseDigest });
+    const second = await send({type:'layer.color_match', payload:{layerId:'img-1', method:'reinhard', strength:0.25, reference:'canvas'}});
+    assert.equal(second.ok, true);
+    assert.equal(bridge.pixelBases.get('img-1').digest, baseDigest);
+    assert.equal(bridge.readState().layers.find(item => item.id === 'img-1').colorMatch.strength, 0.25);
+    const undone = await send({type:'history.undo', payload:{}});
+    assert.equal(undone.ok, true);
+    // 撤销的是第二次匹配，状态回到第一次的 0.8，而不是整段消失。
+    assert.equal(bridge.readState().layers.find(item => item.id === 'img-1').colorMatch.strength, 0.8);
+    for (const payload of [{layerId:'img-1', method:'lab'}, {layerId:'img-1', method:'reinhard', strength:2},
+      {layerId:'img-1', method:'reinhard', reference:{rect:[1,2,3]}}, {layerId:'img-1', method:'reinhard', extra:1}]) {
+      const rejected = await send({type:'layer.color_match', payload});
+      assert.equal(rejected.ok, false, JSON.stringify(payload));
+    }
   });
   await test('canvas crop and resize are native reversible single history entries', async () => {
     const width=config.WIDTH,height=config.HEIGHT,x=config.layers[0].x;
