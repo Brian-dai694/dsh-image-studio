@@ -813,7 +813,7 @@ test('面板授权按 Host 真实线协议：先取页面令牌，再带 Bearer 
   const record = await client.chat.requestAuthorization(binding, stub);
   assert.equal(calls[0].url, '/media-image/boot');
   assert.equal(calls[0].init.headers['x-dsh-media-boot'], '1');
-  assert.equal(calls[1].url, '/media-image/bind');
+  assert.equal(calls[1].url, '/media-image/grant/ticket');
   assert.equal(calls[1].init.method, 'POST');
   assert.equal(calls[1].init.headers.authorization, 'Bearer page-token-1');
   assert.equal(calls[1].init.headers['x-dsh-media-relay'], '1');
@@ -871,9 +871,9 @@ test('授权状态读取与解绑走真实路由；解绑失败不谎报已解�
     return { ok: true, status: 200, json: async () => ({ ok: true, revoked: true }) };
   };
   assert.deepEqual(await client.chat.releaseAuthorization(binding, revokeStub), { authorized: false });
-  const revokeCall = sent.find(call => call.url === client.chat.AUTH.bind);
-  assert.ok(revokeCall, '解绑必须 POST /bind');
-  assert.deepEqual(JSON.parse(revokeCall.init.body), { action: 'revoke', instanceId: 'i-1' });
+  const revokeCall = sent.find(call => call.url === client.chat.AUTH.unbind);
+  assert.ok(revokeCall, '解绑必须 POST /grant/unbind');
+  assert.deepEqual(JSON.parse(revokeCall.init.body), { instanceId: 'i-1' });
   const broken = async (url) => url.endsWith('/boot')
     ? { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) }
     : { ok: false, status: 500, json: async () => null };

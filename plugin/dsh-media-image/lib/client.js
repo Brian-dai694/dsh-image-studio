@@ -476,16 +476,17 @@ window.__ModuleLoader__.load({
     // **本人点击**的授权通道：Host 签发一次性票据（5 分钟，绑定 会话×工程×实例），gate 校验后写审计。
     // 铁律（契约）：不得静默授权、Agent 不得代点、票据不可重放、解绑同样要本人点。
     //
-    // 线协议按契约（docs/project-grant-v1.md §3）：
-    //   POST /media-image/bind        {instanceId}                     → {ok, ticket:{ticketId,projectId,expiresAt,ttlMs}}
-    //   POST /media-image/bind        {action:'revoke', instanceId}    → {ok, revoked:true}
-    //   GET  /media-image/bind-status ?instanceId=…                    → {ok, ticket|null, grant:null|{source,projectId,grantedAt,expiresAt}}
+    // 线协议（契约 docs/project-grant-v1.md §3，按 Host 的 canonical 路由）：
+    //   POST /media-image/grant/ticket {instanceId}                    → {ok, ticket:{ticketId,projectId,pageId,issuedAt,expiresAt,ttlMs}}
+    //   POST /media-image/grant/unbind {instanceId}                    → {ok, revoked:true, revokedGrants}
+    //   GET  /media-image/bind-status ?instanceId=…                    → {ok, projectId, ticket|null, grant:null|{source,grantId,projectId,issuedAt,expiresAt,expiresInMs}}
     // 面板只发 instanceId：会话身份由 Host 在工具调用时用真实 exec 补，工程由 Host 从页面实时读。
     // 鉴权：同源 + `authorization: Bearer <pageToken>`；桌面端没有 Origin，还要带 `x-dsh-media-relay: 1`。
     // pageToken 从 /media-image/boot 取（同源页面才拿得到）。
     var AUTH = {
       boot: '/media-image/boot',
-      bind: '/media-image/bind',
+      ticket: '/media-image/grant/ticket',
+      unbind: '/media-image/grant/unbind',
       status: '/media-image/bind-status',
       bootHeader: 'x-dsh-media-boot',
       relayHeader: 'x-dsh-media-relay',
@@ -609,7 +610,7 @@ window.__ModuleLoader__.load({
           authorized: true,
           ...(grant.source === 'native' || grant.source === 'panel' ? { source: grant.source } : {}),
           ...(typeof grant.projectId === 'string' ? { projectId: grant.projectId } : {}),
-          ...(Number.isFinite(grant.grantedAt) ? { grantedAt: grant.grantedAt } : {}),
+          ...(Number.isFinite(grant.issuedAt) ? { grantedAt: grant.issuedAt } : Number.isFinite(grant.grantedAt) ? { grantedAt: grant.grantedAt } : {}),
           ...(Number.isFinite(grant.expiresAt) ? { expiresAt: grant.expiresAt } : {}),
           ...(binding && binding.editorInstanceId ? { editorInstanceId: binding.editorInstanceId } : {}),
         }
@@ -646,7 +647,7 @@ window.__ModuleLoader__.load({
      */
     async function requestAuthorization(binding, fetchImpl) {
       var identity = authorizationRequest(binding)
-      var result = await authorizationCall(AUTH.bind, {
+      var result = await authorizationCall(AUTH.ticket, {
         method: 'POST',
         body: { instanceId: identity.instanceId },
       }, fetchImpl)
@@ -666,9 +667,9 @@ window.__ModuleLoader__.load({
     }
     async function releaseAuthorization(binding, fetchImpl) {
       var identity = authorizationRequest(binding)
-      var result = await authorizationCall(AUTH.bind, {
+      var result = await authorizationCall(AUTH.unbind, {
         method: 'POST',
-        body: { action: 'revoke', instanceId: identity.instanceId },
+        body: { instanceId: identity.instanceId },
       }, fetchImpl)
       if (!result.response.ok || (result.body && result.body.ok === false)) {
         throw Object.assign(new Error((result.body && result.body.message) || ('解绑失败（HTTP ' + result.response.status + '）；授权可能仍然有效')), { code: 'AUTH_FAILED' })
