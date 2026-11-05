@@ -1,5 +1,6 @@
 import app from './app.js';
 import config from './config.js';
+import { DSH_IMAGE_VERSION } from './dsh-version.js';
 
 export function installMinimalUi(bridge) {
   if (!new URLSearchParams(location.search).has('minimal')) return;
@@ -13,6 +14,7 @@ export function installMinimalUi(bridge) {
     .dsh-minimal .main_wrapper {inset:0!important;margin:0!important}
     .dsh-minimal-bar {position:fixed;inset:0 0 auto;height:60px;display:flex;align-items:center;gap:12px;padding:0 var(--dsh-space);background:#fff;color:var(--dsh-ink);font:14px -apple-system,BlinkMacSystemFont,'SF Pro Text','Microsoft YaHei',sans-serif;z-index:20;border-bottom:1px solid #e5e5ea}
     .dsh-minimal-bar strong {margin-right:auto;font-weight:600}
+    .dsh-minimal-bar .dsh-minimal-version {font-size:12px;color:#6e6e73;font-variant-numeric:tabular-nums;margin-right:4px}
     .dsh-minimal-bar button,.dsh-minimal-bar summary {font:inherit;border:0;border-radius:var(--dsh-radius);padding:10px 16px;background:var(--dsh-bg);color:var(--dsh-ink);cursor:pointer;list-style:none;transition:transform 180ms cubic-bezier(.25,.1,.25,1)}
     .dsh-minimal-bar button:active,.dsh-minimal-bar summary:active {transform:scale(.98)}
     .dsh-minimal-bar :focus-visible {outline:2px solid var(--dsh-blue);outline-offset:2px}
@@ -29,6 +31,12 @@ export function installMinimalUi(bridge) {
   document.head.appendChild(style);
   const bar = document.createElement('header'); bar.className = 'dsh-minimal-bar';
   const title = document.createElement('strong'); title.textContent = '图片编辑器'; bar.appendChild(title);
+  // 版本号来自 package.json（构建时生成 dsh-version.js），顶栏常驻显示，便于用户和验收核对版本。
+  const version = document.createElement('span');
+  version.className = 'dsh-minimal-version';
+  version.textContent = `v${DSH_IMAGE_VERSION}`;
+  version.setAttribute('data-dsh-version', DSH_IMAGE_VERSION);
+  bar.appendChild(version);
   const note = document.createElement('output'); note.className = 'dsh-minimal-note'; note.setAttribute('aria-live','polite'); note.hidden = true;
   function fail(error) { note.hidden = false; note.textContent = error.message || '操作失败'; }
   function download(url, name) { const a = document.createElement('a'); a.href = url; a.download = name; a.click(); }

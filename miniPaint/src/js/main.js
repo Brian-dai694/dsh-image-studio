@@ -27,6 +27,7 @@ import File_save_class from './modules/file/save.js';
 import * as Actions from './actions/index.js';
 import DshEditorBridge from './dsh-editor-bridge.js';
 import { installMinimalUi } from './dsh-minimal-ui.js';
+import { installVersionBadge } from './dsh-version-badge.js';
 
 window.addEventListener('load', function (e) {
 	// Initiate app
@@ -60,4 +61,5 @@ window.addEventListener('load', function (e) {
 	Layers.init();
 	window.DshEditorBridge = new DshEditorBridge();
 	installMinimalUi(window.DshEditorBridge);
+	installVersionBadge();
 }, false);
