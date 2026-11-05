@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@babel/runtime": "^7.14.5",
+    "ag-psd": "^34.1.0",
     "alertifyjs": "^1.13.1",
     "blueimp-canvas-to-blob": "^3.28.0",
     "exif-js": "^2.3.0",

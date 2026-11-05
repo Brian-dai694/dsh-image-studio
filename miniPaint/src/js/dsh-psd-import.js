@@ -121,7 +121,12 @@ export async function importPsd(file) {
   if (!layers.length) throw new Error('这个 PSD 的所有图层都无法导入（可能是空的智能对象或调整层）');
   const actions = layers.map(layer => new app.Actions.Insert_layer_action(layer));
   if (psd.width && psd.height && (psd.width !== config.WIDTH || psd.height !== config.HEIGHT)) {
-    actions.push(new app.Actions.Autoresize_canvas_action(psd.width, psd.height, null, true, true));
+    // 画布尺寸必须精确等于 PSD：Autoresize 只放大不缩小、宽高分别判断，
+    // 在已有画布上会得到「宽用 PSD、高用旧画布」的混合尺寸。
+    if (!Number.isSafeInteger(psd.width) || !Number.isSafeInteger(psd.height)) throw new Error('这个 PSD 的画布尺寸无效');
+    actions.push(new app.Actions.Update_config_action({ WIDTH: psd.width, HEIGHT: psd.height }));
+    // config 改了还要重排画布：Update_config_action 只写 config，prepare 由独立动作完成。
+    actions.push(new app.Actions.Prepare_canvas_action('do'));
   }
   app.State.do_action(new app.Actions.Bundle_action('open_psd', '导入 PSD', actions));
   return { layers, warnings, width: psd.width, height: psd.height };
