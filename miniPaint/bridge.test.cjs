@@ -348,10 +348,36 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     bridge.refreshRevision();
     assert.notEqual(bridge.readState().contentDigest, beforeTiny, '一个像素的改动也不能被摘要漏掉');
   });
+  await test('large layers digest in chunks, equal to one-shot, and never leak a Promise', async () => {
+    const big = { id: 'img-big', name: '大图', type: 'image', link: makeCanvas(1001, 1000, 7), x: 0, y: 0, width: 1001, height: 1000, order: 4, visible: true };
+    config.layers.push(big);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const bytes = 1001 * 1000 * 4;
+    const expected = 'pixels:' + bridge.hashPixels(new Uint8ClampedArray(bytes).fill(7)).toString(16).padStart(16, '0');
+    await bridge.prepareDigest();
+    assert.equal(bridge.pixelDigestCache.get('img-big').digest, expected, `分块计算结果必须与一次性计算完全一致（actual=${bridge.pixelDigestCache.get('img-big').digest} expected=${expected}）`);
+    const state = bridge.readState();
+    assert.equal(typeof state.contentDigest, 'string', 'contentDigest 必须是字符串，不能是 Promise');
+    assert.match(state.contentDigest, /^fnv1a64-/);
+    assert.equal(typeof state.digestTimeMs, 'number');
+    // 大图未算完就同步读取：必须明确失败，绝不返回占位摘要。
+    bridge.pixelDigestCache.delete('img-big');
+    assert.throws(() => bridge.readState(), /摘要|DIGEST/);
+    // 写后审计：afterDigest 必须已经算完，且像素动作后发生变化。
+    await bridge.prepareDigest();
+    bridge.refreshRevision();
+    const before = bridge.readState().contentDigest;
+    const feather = await send({type:'layer.feather', payload:{layerId:'img-big', radiusPx:3}});
+    assert.equal(feather.ok, true, JSON.stringify(feather));
+    assert.equal(typeof feather.result.afterDigest, 'string');
+    assert.match(feather.result.afterDigest, /^fnv1a64-/);
+    assert.notEqual(feather.result.afterDigest, before, '像素写入后 afterDigest 必须变');
+  });
   await test('canvas crop and resize are native reversible single history entries', async () => {
     const width=config.WIDTH,height=config.HEIGHT,x=config.layers[0].x;
     const crop=await send({type:'canvas.crop',payload:{x:10,y:10,width:200,height:100}});
-    assert.equal(crop.ok,true);
+    assert.equal(crop.ok,true,JSON.stringify(crop));
     assert.equal(config.WIDTH,200);assert.equal(config.layers[0].x,x-10);
     const undo=await send({type:'history.undo',payload:{}});
     assert.equal(undo.ok,true);assert.equal(config.WIDTH,width);assert.equal(config.HEIGHT,height);assert.equal(config.layers[0].x,x);

@@ -103,17 +103,28 @@ export class DshEditorBridge {
     return { selectedLayerId: config.layer ? String(config.layer.id) : null, scale: zoomView.getScale(), position: { x: position.x, y: position.y } };
   }
 
-  /**
-   * 单层像素摘要：按**全分辨率**逐字节算 FNV-1a，缩略图会抹掉小改动，不能用于审计。
-   * 性能靠缓存：键 = 图层像素对象身份 + 显示尺寸 + 像素变更计数，三者都没变就复用。
-   * 像素变更计数由每个原生像素动作（羽化/调色，含其撤销重做）自增。
-   */
-  layerPixelDigest(layer) {
+  /** 全分辨率逐字节 FNV-1a；同步快路径与分块异步路径共用，保证两者结果完全一致。 */
+  hashPixels(data, hash = 0xcbf29ce484222325n) {
+    for (let index = 0; index < data.length; index += 1) {
+      hash ^= BigInt(data[index]);
+      hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+    }
+    return hash;
+  }
+
+  /** 图层像素字节数：决定走同步快路径还是分块异步路径。 */
+  layerByteLength(layer) {
+    const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+    const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
+    return width * height * 4;
+  }
+
+  /** 计算并缓存一个图层的全分辨率像素摘要；**绝不缩小采样**。 */
+  computePixelDigest(layer) {
     const key = String(layer.id);
     const link = layer.link || null;
-    const cache = this.pixelDigestCache.get(key);
     const size = `${layer.width || 0}x${layer.height || 0}`;
-    if (cache && cache.link === link && cache.size === size && cache.mutation === this.pixelMutation) return cache.digest;
+    const started = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     let digest = 'pixels:none';
     if (link && typeof document !== 'undefined' && document.createElement) {
       try {
@@ -126,21 +137,101 @@ export class DshEditorBridge {
           ctx.clearRect?.(0, 0, width, height);
           ctx.drawImage(link, 0, 0, width, height);
           const image = ctx.getImageData(0, 0, width, height);
-          let hash = 0xcbf29ce484222325n;
-          for (let index = 0; index < image.data.length; index += 1) {
-            hash ^= BigInt(image.data[index]);
-            hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-          }
-          digest = `pixels:${hash.toString(16).padStart(16, '0')}`;
+          digest = `pixels:${this.hashPixels(image.data).toString(16).padStart(16, '0')}`;
         }
       } catch (_) { digest = 'pixels:unreadable'; }
     }
-    this.pixelDigestCache.set(key, { link, size, mutation: this.pixelMutation, digest });
+    const timeMs = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - started);
+    this.digestTimeMs = Math.max(this.digestTimeMs || 0, timeMs);
+    this.pixelDigestCache.set(key, { link, size, mutation: this.pixelMutation, digest, timeMs });
     return digest;
   }
 
+  /** 分块版：字节顺序与同步版完全一致，只是每若干行让出主线程。 */
+  async computePixelDigestChunked(layer) {
+    const key = String(layer.id);
+    const link = layer.link || null;
+    const size = `${layer.width || 0}x${layer.height || 0}`;
+    const started = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    let digest = 'pixels:none';
+    if (link && typeof document !== 'undefined' && document.createElement) {
+      try {
+        const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+        const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx && typeof ctx.drawImage === 'function' && typeof ctx.getImageData === 'function') {
+          ctx.clearRect?.(0, 0, width, height);
+          ctx.drawImage(link, 0, 0, width, height);
+          const data = ctx.getImageData(0, 0, width, height).data;
+          const stride = width * 4;
+          const rowsPerChunk = Math.max(1, Math.min(256, Math.floor(1_000_000 / stride) || 1));
+          let hash = 0xcbf29ce484222325n;
+          this.digestBusy = true;
+          for (let row = 0; row < height; row += rowsPerChunk) {
+            hash = this.hashPixels(data.subarray(row * stride, Math.min(data.length, (row + rowsPerChunk) * stride)), hash);
+            // 让出主线程；没有 setTimeout 的环境（Node 测试桩）退化为微任务，不改变哈希结果。
+            await new Promise(resolve => (typeof setTimeout === 'function' ? setTimeout(resolve, 0) : resolve()));
+          }
+          this.digestBusy = false;
+          digest = `pixels:${hash.toString(16).padStart(16, '0')}`;
+        }
+      } catch (_) { digest = 'pixels:unreadable'; this.digestBusy = false; }
+    }
+    const timeMs = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - started);
+    this.digestTimeMs = Math.max(this.digestTimeMs || 0, timeMs);
+    this.pixelDigestCache.set(key, { link, size, mutation: this.pixelMutation, digest, timeMs });
+    return digest;
+  }
+
+  /** 取缓存摘要；小图缺失时现场同步补算，大图未就绪则明确失败（不返回占位值）。 */
+  layerPixelDigest(layer) {
+    const key = String(layer.id);
+    const cache = this.pixelDigestCache.get(key);
+    const size = `${layer.width || 0}x${layer.height || 0}`;
+    if (cache && cache.link === (layer.link || null) && cache.size === size && cache.mutation === this.pixelMutation) return cache.digest;
+    if (this.layerByteLength(layer) > 4_000_000) throw this.error('DIGEST_TIMEOUT', '该图层像素摘要需要异步计算，请稍后重试');
+    return this.computePixelDigest(layer);
+  }
+
+  /** 写操作/读状态前把摘要算完：小图同步、大图分块，算不出来就抛错。 */
+  async prepareDigest() {
+    for (const layer of config.layers) {
+      const cache = this.pixelDigestCache.get(String(layer.id));
+      const size = `${layer.width || 0}x${layer.height || 0}`;
+      const fresh = cache && cache.link === (layer.link || null) && cache.size === size && cache.mutation === this.pixelMutation;
+      if (fresh) continue;
+      if (this.layerByteLength(layer) <= 4_000_000) this.computePixelDigest(layer);
+      else await this.computePixelDigestChunked(layer);
+    }
+  }
+
+  /** 内容摘要（同步字符串）；算不出来就抛 DIGEST_TIMEOUT，绝不返回 Promise 或 {}。 */
+  contentDigestValue() {
+    const digest = digestOf(this.documentState());
+    if (typeof digest !== 'string' || !/^fnv1a64-/.test(digest)) throw this.error('DIGEST_TIMEOUT', '内容摘要不可用，请重试');
+    return digest;
+  }
+
+  /** 只含元数据的状态（无像素摘要）：用于 revision 追踪，避免摘要异步算完导致版本跳变。 */
+  metadataState() {
+    return {
+      width: config.WIDTH, height: config.HEIGHT,
+      layers: config.layers.map(layer => ({
+        id: layer.id, name: layer.name, type: layer.type,
+        x: layer.x, y: layer.y, width: layer.width, height: layer.height, rotate: layer.rotate,
+        visible: layer.visible, order: layer.order, opacity: layer.opacity, color: layer.color,
+        params: layer.params, filters: layer.filters,
+        data: Array.isArray(layer.data) ? layer.data : null,
+      })),
+    };
+  }
+
   fingerprint() {
-    return stableStringify(this.documentState());
+    // revision 只追踪元数据：像素摘要依赖异步计算，放进指纹会让版本号随摘要算完而跳变。
+    // 像素动作引发的版本推进由原生动作完成后的强制刷新负责。
+    return stableStringify(this.metadataState());
   }
 
   // Revision counts distinct document states, so it advances at most once per observed
@@ -274,7 +365,7 @@ export class DshEditorBridge {
     const historyIndex = app.State.action_history_index;
     const historyLength = app.State.action_history.length;
     const top = this.lastAgentCommit;
-    const currentDigest = digestOf(this.documentState());
+    const currentDigest = this.contentDigestValue();
     const validTop = top && top.revision === this.revision && top.afterDigest === currentDigest && top.historyIndex === historyIndex && top.action === app.State.action_history[historyIndex - 1];
     const position = zoomView.getPosition();
     // A canvas that has not been laid out yet can still report a non-positive config size;
@@ -288,6 +379,10 @@ export class DshEditorBridge {
       viewState: this.viewState(),
       // deprecated：保留一版以稳住旧契约，值与 contentDigest 相同。
       stateDigest: contentDigest,
+      // 诊断：像素摘要耗时；超过阈值只给非阻塞提示，算法不变、数值仍是精确值。
+      digestTimeMs: this.digestTimeMs || 0,
+      digestBusy: !!this.digestBusy,
+      ...((this.digestTimeMs || 0) > 1500 ? { digestNotice: '该图层像素摘要耗时较长（仅供诊断，摘要仍为全分辨率精确值）' } : {}),
       canvas: { width: canvasWidth, height: canvasHeight },
       view: { scale: zoomView.getScale(), position: { x: position.x, y: position.y } },
       history: { ...(validTop ? { lastCommandId: top.commandId, appliedRevision: top.revision, afterDigest: top.afterDigest } : {}), canUndo: app.State.can_undo(), canRedo: app.State.can_redo(),
@@ -319,6 +414,8 @@ export class DshEditorBridge {
     try {
       if (this.isHumanEditing()) throw this.error('EDITOR_NOT_READY', '人工编辑尚未提交，请结束拖拽或文字输入后重试');
       this.refreshRevision();
+      // 写前先把像素摘要算完（大图分块让出主线程）；算不出来就失败，不进入写入。
+      await this.prepareDigest();
       if (request.expectedRevision !== this.revision) throw this.error('REVISION_CONFLICT');
       const prepared = await this.prepare(request.command);
       // Validation and action construction are synchronous inside the shared scheduler.
@@ -342,7 +439,9 @@ export class DshEditorBridge {
         app.Layers.render(true);
         this.refreshRevision(true);
       }
-      const afterDigest = digestOf(this.documentState());
+      // 写后审计：像素动作后必须真正重算完，再返回 afterDigest，不能先返回再补。
+      await this.prepareDigest();
+      const afterDigest = this.contentDigestValue();
       this.lastAgentCommit = prepared.action ? { commandId: request.commandId, revision: this.revision, afterDigest, historyIndex: app.State.action_history_index, action: app.State.action_history[app.State.action_history_index - 1] } : null;
       const result = { editorKind: 'image', documentId: this.documentId, revision: this.revision, afterDigest, commandId: request.commandId,
         changedObjectIds: prepared.ids(), stateSummary: { selectedLayerId: config.layer ? String(config.layer.id) : null } };
