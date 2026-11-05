@@ -768,6 +768,7 @@ test('工程授权四态：未授权 / 待激活（票据）/ 已授权 / 已过
   const pending = client.chat.fromBindingStatus({ ok: true, ticket: { ticketId: 't1', projectId: 'p-1', expiresAt: now + 300_000 }, grant: null }, binding, now);
   assert.equal(pending.pending, true);
   assert.equal(pending.authorized, false);
+  assert.equal(client.chat.authorizationState(pending, now).code, 'pending', '票据阶段是第四态「待激活」，不是已授权');
   assert.equal(client.chat.authorizationState(pending, now).label, '待激活');
   // 会话消费后才有 grant
   const granted = client.chat.fromBindingStatus({ ok: true, ticket: null, grant: { source: 'panel', projectId: 'p-1', grantedAt: now - 1_000, expiresAt: now + 3_600_000 } }, binding, now);
@@ -817,7 +818,7 @@ test('面板授权按 Host 真实线协议：先取页面令牌，再带 Bearer 
   assert.equal(calls[1].init.headers.authorization, 'Bearer page-token-1');
   assert.equal(calls[1].init.headers['x-dsh-media-relay'], '1');
   assert.equal(calls[1].init.headers['content-type'], 'application/json');
-  assert.deepEqual(JSON.parse(calls[1].init.body), { sessionId: 's-1', instanceId: 'i-1' });
+  assert.deepEqual(JSON.parse(calls[1].init.body), { instanceId: 'i-1' }, '面板只发 instanceId：sessionId 由 Host 用真实 exec 补');
   // 签出来的是票据，不是授权
   assert.equal(record.authorized, false);
   assert.equal(record.pending, true);
@@ -830,7 +831,7 @@ test('面板授权按 Host 真实线协议：先取页面令牌，再带 Bearer 
   // 身份缺一项：一个字节都不发（连 boot 都不取）
   const fresh = await loadClient();
   const noCall = async () => { throw new Error('不应发起请求'); };
-  await assert.rejects(() => fresh.chat.requestAuthorization({ sessionId: 's-1' }, noCall), /无法授权：instanceId/);
+  await assert.rejects(() => fresh.chat.requestAuthorization({ sessionId: 's-1' }, noCall), /编辑器实例缺失/);
   // Host 明确拒绝：稳定错误码 → 中文，不重试
   const denied = async (url) => url.endsWith('/boot')
     ? { ok: true, status: 200, json: async () => ({ accessToken: 't' }) }
@@ -859,7 +860,7 @@ test('授权状态读取与解绑走真实路由；解绑失败不谎报已解�
   // 页面令牌可能已被同进程内的模块缓存复用，所以按 URL 找调用，不假设固定下标。
   const statusCall = calls.find(call => call.url.startsWith(client.chat.AUTH.status));
   assert.ok(statusCall, '必须请求 bind-status');
-  assert.equal(statusCall.url, '/media-image/bind-status?sessionId=s-1');
+  assert.equal(statusCall.url, '/media-image/bind-status?instanceId=i-1', '状态按实例维度读：面板不知道真实 sessionId');
   assert.equal(statusCall.init.method, 'GET');
   assert.equal(statusCall.init.body, undefined, 'GET 不带 body');
 
@@ -872,7 +873,7 @@ test('授权状态读取与解绑走真实路由；解绑失败不谎报已解�
   assert.deepEqual(await client.chat.releaseAuthorization(binding, revokeStub), { authorized: false });
   const revokeCall = sent.find(call => call.url === client.chat.AUTH.bind);
   assert.ok(revokeCall, '解绑必须 POST /bind');
-  assert.deepEqual(JSON.parse(revokeCall.init.body), { action: 'revoke', sessionId: 's-1' });
+  assert.deepEqual(JSON.parse(revokeCall.init.body), { action: 'revoke', instanceId: 'i-1' });
   const broken = async (url) => url.endsWith('/boot')
     ? { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) }
     : { ok: false, status: 500, json: async () => null };

@@ -476,10 +476,11 @@ window.__ModuleLoader__.load({
     // **本人点击**的授权通道：Host 签发一次性票据（5 分钟，绑定 会话×工程×实例），gate 校验后写审计。
     // 铁律（契约）：不得静默授权、Agent 不得代点、票据不可重放、解绑同样要本人点。
     //
-    // 线协议按 Host 的实现（docs/project-grant-v1.md 的落地版）：
-    //   POST /media-image/bind        {sessionId, instanceId}          → {ok, ticket:{ticketId,projectId,expiresAt,ttlMs}}
-    //   POST /media-image/bind        {action:'revoke', sessionId}     → {ok, revoked:true}
-    //   GET  /media-image/bind-status ?sessionId=…                     → {ok, ticket|null, grant:null|{source,projectId,grantedAt,expiresAt}}
+    // 线协议按契约（docs/project-grant-v1.md §3）：
+    //   POST /media-image/bind        {instanceId}                     → {ok, ticket:{ticketId,projectId,expiresAt,ttlMs}}
+    //   POST /media-image/bind        {action:'revoke', instanceId}    → {ok, revoked:true}
+    //   GET  /media-image/bind-status ?instanceId=…                    → {ok, ticket|null, grant:null|{source,projectId,grantedAt,expiresAt}}
+    // 面板只发 instanceId：会话身份由 Host 在工具调用时用真实 exec 补，工程由 Host 从页面实时读。
     // 鉴权：同源 + `authorization: Bearer <pageToken>`；桌面端没有 Origin，还要带 `x-dsh-media-relay: 1`。
     // pageToken 从 /media-image/boot 取（同源页面才拿得到）。
     var AUTH = {
@@ -529,7 +530,10 @@ window.__ModuleLoader__.load({
     }
 
 
-    /** 授权三态：未授权 / 已授权 / 已过期。票据已签发但还没被会话消费时，如实显示「待激活」。 */
+    /**
+     * 授权四态：未授权 / 待激活 / 已授权 / 已过期。
+     * 「待激活」= 票据已签发、但还没被会话消费（票据 ≠ 授权，契约 §3），不能显示成已授权。
+     */
     function authorizationState(record, now) {
       var at = Number.isFinite(now) ? now : Date.now()
       if (!record || typeof record !== 'object') return { code: 'unauthorized', label: '未授权' }
@@ -537,7 +541,7 @@ window.__ModuleLoader__.load({
         if (Number.isFinite(record.expiresAt) && record.expiresAt <= at) return { code: 'expired', label: '已过期' }
         return { code: 'authorized', label: '已授权' }
       }
-      if (record.pending === true) return { code: 'unauthorized', label: '待激活', pending: true }
+      if (record.pending === true) return { code: 'pending', label: '待激活' }
       if (record.expired === true) return { code: 'expired', label: '已过期' }
       return { code: 'unauthorized', label: '未授权' }
     }
@@ -557,11 +561,11 @@ window.__ModuleLoader__.load({
     function authorizationSummary(record, now) {
       var at = Number.isFinite(now) ? now : Date.now()
       var state = authorizationState(record, at)
-      if (state.code === 'unauthorized' && !state.pending) {
+      if (state.code === 'unauthorized') {
         return '当前会话还没有读写这个工程的授权；此时模型调用会回「未授权」，编辑器不会被改动。'
       }
       // 票据 ≠ 授权：票据要等会话里第一次 read_state 才算激活（契约 §3）。
-      if (state.pending) {
+      if (state.code === 'pending') {
         var left = (record.ticketExpiresAt || 0) - at
         return '已签发票据 ' + shortRef(record.ticketId) + '，等待会话里第一次「读取工程」激活'
           + (Number.isFinite(record.ticketExpiresAt) ? '（' + (left > 0 ? '还剩 ' + remainingText(left) : '已过期') + '）' : '')
@@ -579,16 +583,18 @@ window.__ModuleLoader__.load({
       if (record.grantedAt && Number.isFinite(record.grantedAt)) parts.push('授权于 ' + clockText(record.grantedAt))
       return parts.join(' · ')
     }
-    /** 授权请求体：会话与编辑器实例两项缺一不发（工程由 Host 从页面实时读，不信调用方）。 */
+    /**
+     * 面板请求体：**只有 instanceId**（契约 §3）。
+     * 面板不知道也不该知道真实会话；sessionId 由 Host 在工具调用时用真实 exec 补上，
+     * 让面板指定 sessionId 等于把"自报身份"请回来。工程也由 Host 从页面实时读。
+     */
     function authorizationRequest(binding) {
       if (!binding || typeof binding !== 'object') throw Object.assign(new Error('还没有绑定会话，无法授权'), { code: 'AUTH_NO_BINDING' })
-      var fields = { sessionId: binding.sessionId, instanceId: binding.editorInstanceId }
-      for (var key in fields) {
-        if (typeof fields[key] !== 'string' || !fields[key]) {
-          throw Object.assign(new Error('会话或编辑器实例缺失，无法授权：' + key), { code: 'AUTH_NO_BINDING' })
-        }
+      var instanceId = binding.editorInstanceId
+      if (typeof instanceId !== 'string' || !instanceId) {
+        throw Object.assign(new Error('编辑器实例缺失（页面还没连上编辑器），无法授权'), { code: 'AUTH_NO_BINDING' })
       }
-      return fields
+      return { instanceId: instanceId }
     }
     /**
      * bind-status 回执 → 本地记录。
@@ -642,7 +648,7 @@ window.__ModuleLoader__.load({
       var identity = authorizationRequest(binding)
       var result = await authorizationCall(AUTH.bind, {
         method: 'POST',
-        body: { sessionId: identity.sessionId, instanceId: identity.instanceId },
+        body: { instanceId: identity.instanceId },
       }, fetchImpl)
       if (!result.response.ok || !result.body || result.body.ok === false) {
         throw Object.assign(new Error(authorizationFailure(result.body, result.response.status)), { code: 'AUTH_FAILED' })
@@ -662,7 +668,7 @@ window.__ModuleLoader__.load({
       var identity = authorizationRequest(binding)
       var result = await authorizationCall(AUTH.bind, {
         method: 'POST',
-        body: { action: 'revoke', sessionId: identity.sessionId },
+        body: { action: 'revoke', instanceId: identity.instanceId },
       }, fetchImpl)
       if (!result.response.ok || (result.body && result.body.ok === false)) {
         throw Object.assign(new Error((result.body && result.body.message) || ('解绑失败（HTTP ' + result.response.status + '）；授权可能仍然有效')), { code: 'AUTH_FAILED' })
@@ -672,7 +678,7 @@ window.__ModuleLoader__.load({
     /** 读一次授权状态：接口缺失（404）就标 unsupported，UI 会提示走原生审批。 */
     async function readAuthorizationStatus(binding, fetchImpl) {
       var identity = authorizationRequest(binding)
-      var result = await authorizationCall(AUTH.status + '?sessionId=' + encodeURIComponent(identity.sessionId), { method: 'GET' }, fetchImpl)
+      var result = await authorizationCall(AUTH.status + '?instanceId=' + encodeURIComponent(identity.instanceId), { method: 'GET' }, fetchImpl)
       if (result.response.status === 404) return { authorized: false, unsupported: true }
       if (!result.response.ok || !result.body) return { authorized: false }
       return fromBindingStatus(result.body, binding)
@@ -1735,8 +1741,8 @@ window.__ModuleLoader__.load({
           'Host 还没有提供面板授权接口（当前版本较旧），请点上面的「打开原生会话 / 审批」。') : null,
         authError ? React.createElement('div', { role: 'alert', style: { marginTop: 6, fontSize: 11.5, color: '#ff3b30' } }, authError) : null,
         React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
-          authView.code === 'authorized' || authView.pending
-            ? btn({ label: authBusy ? '解绑中…' : (authView.pending ? '撤销票据' : '解绑工程授权'), disabled: authBusy, title: '解绑后本会话立即失去读写权限，模型调用会回「未授权」', onClick: function () { void unbindAuthorization() } })
+          authView.code === 'authorized' || authView.code === 'pending'
+            ? btn({ label: authBusy ? '解绑中…' : (authView.code === 'pending' ? '撤销票据' : '解绑工程授权'), disabled: authBusy, title: '解绑后本会话立即失去读写权限，模型调用会回「未授权」', onClick: function () { void unbindAuthorization() } })
             : authConfirm
               ? [btn({ key: 'confirm', label: authBusy ? '授权中…' : '确认授权（本人点击）', variant: 'primary', disabled: authBusy || !bindingRef.current, onClick: function () { void authorize() } }),
                  btn({ key: 'cancel', label: '取消', disabled: authBusy, onClick: function () { setAuthConfirm(false) } })]
