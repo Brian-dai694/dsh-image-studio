@@ -84,27 +84,96 @@ window.__ModuleLoader__.load({
      * `remote.session.list` 在不同宿主版本里字段形状不一，这里统一成 `[{sessionId,title}]`。
      * 拿不到结构就返回 null，调用方据此回退到"只能新建"，绝不假装有会话列表。
      */
-    function sessionListItems(value) {
+    /**
+     * 严格解析 `remote.session.list`：契约是 `{ items: SessionSummary[] }`（单页，没有 sessions/hasMore/
+     * nextCursor）。形状不对就抛明确错误，**不静默退回"只能新建"**——那会让功能静默消失。
+     * 标题只在 `projections.values.title`，可为 null 或缺失；缺失时渲染层显示「未命名会话」。
+     */
+    function normalizeSessionItems(value) {
       const raw = value && (value.value || value);
-      if (!raw) return null;
-      const items = raw.sessions || raw.items || (Array.isArray(raw) ? raw : null);
-      if (!Array.isArray(items)) return null;
+      if (!raw || !Array.isArray(raw.items)) {
+        const error = new Error('宿主返回的会话列表不符合契约（缺少 items 数组），请核对 remote.session.list 的版本');
+        error.code = 'SESSION_LIST_UNSUPPORTED';
+        throw error;
+      }
       const out = [];
-      for (const item of items) {
-        if (!item || typeof item !== 'object') continue;
-        const id = item.sessionId || item.id;
-        if (typeof id !== 'string' || !id) continue;
-        out.push({ sessionId: id, title: String(item.title || item.name || item.summary || id).slice(0, 80), updatedAt: item.updatedAt || item.updated_at || null });
+      for (const item of raw.items) {
+        if (!item || typeof item.sessionId !== 'string' || !item.sessionId) continue;
+        const values = item.projections && item.projections.values;
+        const rawTitle = values && typeof values.title === 'string' ? values.title.trim() : '';
+        out.push({
+          sessionId: item.sessionId,
+          title: rawTitle ? rawTitle.slice(0, 80) : null,
+          updatedAt: Number.isFinite(item.updatedAt) ? item.updatedAt : null,
+          running: item.running === true,
+          blank: item.blank === true,
+          agentAvailable: item.agentAvailable !== false,
+          cwd: typeof item.cwd === 'string' ? item.cwd : null,
+        });
       }
       return out;
     }
 
-    /** 读最近会话；宿主没有 list 或读失败都返回 null（调用方回退到新建）。 */
-    async function listSessions(remote, limit = 5) {
+    /** 读会话列表；宿主没提供 list 或形状不符合契约时抛错（由绑定流程明确报给用户）。 */
+    async function listSessions(remote, limit = 8) {
       const session = remote && remote.session;
       const list = session && (session.list || session.listSessions);
-      if (typeof list !== 'function') return null;
-      try { return sessionListItems(await list({ limit })) } catch (_) { return null }
+      if (typeof list !== 'function') {
+        const error = new Error('宿主未提供 remote.session.list，无法列出历史会话；可以新建专属会话');
+        error.code = 'SESSION_LIST_UNSUPPORTED';
+        throw error;
+      }
+      return normalizeSessionItems(await list({ limit }));
+    }
+
+    /** 会话摘要上的标注：空会话 / 有回合在跑 / 助手不在线。只做显示，不改变排序。 */
+    function sessionAnnotations(item) {
+      const notes = [];
+      if (item && item.blank === true) notes.push('空会话');
+      if (item && item.running === true) notes.push('有回合在跑');
+      if (item && item.agentAvailable === false) notes.push('助手不在线');
+      return notes;
+    }
+
+    /**
+     * 隐私边界：默认只列出**带本工程标记**的会话；其余一律不进列表（连标题都不显示）。
+     * 没有匹配项时由 UI 只给「新建」，而不是让用户从无关会话里挑。
+     */
+    function filterSessionsForProject(items, projectId, projectById) {
+      const list = Array.isArray(items) ? items : [];
+      const matched = [];
+      const others = [];
+      for (const item of list) {
+        if (projectId && projectById && projectById[item.sessionId] === projectId) matched.push(item);
+        else others.push(item);
+      }
+      return { matched, others };
+    }
+
+    /**
+     * 读取一个会话的工程标记：短暂 follow，拿到快照就取消；超时/无标记返回 null。
+     * 只用于"能否挂接"的判断，不缓存、不落盘。
+     */
+    function peekProjectId(remote, sessionId, timeoutMs = 800) {
+      return new Promise(resolve => {
+        let done = false;
+        let stop = null;
+        const finish = value => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (typeof stop === 'function') stop();
+          resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        stop = followSession(remote, sessionId, frame => {
+          const records = frame && frame.type === 'snapshot' ? frame.records : (frame && frame.record ? [frame.record] : []);
+          const found = projectIdFromRecords(records);
+          if (found) finish(found);
+          else if (frame && frame.type === 'snapshot') finish(null);
+        }, () => finish(null));
+        if (typeof stop !== 'function') finish(null);
+      });
     }
 
     /** 从会话记录里找工程身份标记的 projectId；找不到返回 null（只代表"没标记"，不代表匹配）。 */
@@ -257,6 +326,8 @@ window.__ModuleLoader__.load({
         if (bareCode && /^[A-Z][A-Z0-9_]{3,}$/.test(bareCode)) errorCode = bareCode;
       }
       if (!errorCode && pickAny(sources, ['ok']) === false) errorCode = 'TOOL_ERROR';
+      // 后端已把稳定错误码放进 meta.errorCode（不再靠解析文本行）。
+      if (!errorCode) errorCode = stringOf(pickAny(sources, ['errorCode']));
       var revision = pickAny(sources, ['revision', 'appliedRevision']);
       var format = stringOf(pickAny(sources, ['format', 'mimeType']));
       // 状态：按层级优先取第一个；若其他层给出不同值，不静默丢弃，交给卡片显示"不一致"。
@@ -274,8 +345,12 @@ window.__ModuleLoader__.load({
         format: format,
       };
     }
+    /** 回执证据优先取 message.content 里的工具输出 JSON，其次才是事件外壳。 */
+    function evidenceData(value) {
+      return outputJsonOf(value && value.message) || outputJsonOf(value) || value;
+    }
     function undoEvidence(value) {
-      var facts = toolFacts(value);
+      var facts = toolFacts(evidenceData(value));
       if (!facts.commandId || !Number.isSafeInteger(facts.revision) || !facts.afterDigest) return null;
       return { commandId: facts.commandId, appliedRevision: facts.revision, afterDigest: facts.afterDigest };
     }
@@ -291,7 +366,7 @@ window.__ModuleLoader__.load({
         + '先 read_state 确认这一步仍是历史栈顶；若返回 HISTORY_CONFLICT 说明已有后续修改，立即停止并说明，不要重试或绕过。';
     }
     function resultIssue(value) {
-      var facts = toolFacts(value);
+      var facts = toolFacts(evidenceData(value));
       if (facts.errorCode === 'HISTORY_CONFLICT') return '已有后续人工或 AI 修改，不能单独撤销这一步。请回读当前历史；不要重试旧命令。';
       return null;
     }
@@ -300,7 +375,7 @@ window.__ModuleLoader__.load({
      * Host 侧通常是合成引用（artifact://…），因此按钮会请编辑器自己再导一次，而不是直接打开该引用。
      */
     function exportEvidence(value) {
-      var facts = toolFacts(value);
+      var facts = toolFacts(evidenceData(value));
       if (!facts.exportId && !facts.artifactRef) return null;
       return { exportId: facts.exportId || null, artifactRef: facts.artifactRef || null, format: /jpe?g/i.test(String(facts.format || '')) ? 'jpeg' : 'png' };
     }
@@ -390,28 +465,83 @@ window.__ModuleLoader__.load({
      * 把工具回执压成一张可读卡片：工具中文名、状态、修订号、一行说明。
      * 聊天面板只显示这些结构化字段，绝不把 canonical JSON 原样铺给用户。
      */
+    /** 从 message.content 的文本块里解析工具输出 JSON（真实事件里状态与凭据都在这层）。 */
+    function outputJsonOf(container, depth = 0) {
+      if (!container || typeof container !== 'object' || depth > 4) return null;
+      const content = container.content;
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (!part) continue;
+          if (typeof part === 'string') {
+            const parsed = parseJsonText(part);
+            if (parsed) return parsed;
+          } else if (typeof part.text === 'string') {
+            const parsed = parseJsonText(part.text);
+            if (parsed) return parsed;
+          }
+        }
+      }
+      if (container.message && container.message !== container) return outputJsonOf(container.message, depth + 1);
+      return null;
+    }
+    function parseJsonText(text) {
+      if (typeof text !== 'string') return null;
+      const trimmed = text.trim();
+      if (trimmed.charAt(0) !== '{') return null;
+      try { return JSON.parse(trimmed) } catch (_) { return null }
+    }
+
+    /**
+     * 工具回执卡片。真实事件形状（源码结论，见 docs/session-event-shapes.md）：
+     *   tool/call  : {callId, name, arguments(JSON 字符串)}
+     *   tool/result: {callId?, message:{toolCallId, isError, content[]}, error?{code}}
+     *   工具输出（status/revision/commandId/afterDigest/exportId/artifactRef）在 content 文本 JSON 里。
+     * 规则：pending 只由"有 call 无 result"得出；rejected 只由 isError/error 得出；
+     * **不许把"解析不到摘要"当成 unknown**——成功但摘要解析不出来时显示 applied + 摘要无法解析。
+     */
     function toolCard(data, isCall, fallbackName) {
       if (!data || typeof data !== 'object') return null
-      // 走统一的字段抽取：真实事件的外壳可能多一层（result.value / call.* / content 文本 JSON）。
-      var facts = toolFacts(data)
-      var rawName = facts.toolName || fallbackName || ''
+      var message = data.message && typeof data.message === 'object' ? data.message : null
+      var isError = message ? message.isError === true : false
+      var callName = typeof data.name === 'string' ? data.name : (data.call && typeof data.call.name === 'string' ? data.call.name : '')
+      var output = message ? outputJsonOf(message) : null
+      var baseFacts = toolFacts(data)
+      // 事件外壳（result.value 等）优先；只有外壳里没有任何可用字段时，才把 content 文本 JSON 当来源。
+      if (!output && !baseFacts.status && !baseFacts.exportId && !baseFacts.artifactRef) output = outputJsonOf(data)
+      var facts = output ? toolFacts(output) : baseFacts
+      var errorCode = facts.errorCode || (data.error && typeof data.error.code === 'string' ? data.error.code : undefined)
+      if (!errorCode && isError) errorCode = 'TOOL_ERROR'
+      var rawName = callName || facts.toolName || fallbackName || ''
       var name = TOOL_NAMES[rawName] || rawName || '工具调用'
-      var status = isCall ? 'running' : facts.status
+      var status
+      if (isCall) status = 'running'
+      else if (isError || errorCode) status = 'rejected'
+      else status = facts.status || 'applied'
       var revision = facts.revision
-      var errorCode = facts.errorCode
       var line = ''
       if (!isCall) {
         if (errorCode) line = ERROR_TEXT[errorCode] || ('操作没有完成：' + errorCode)
-        else if (facts.exportId) line = '导出任务 ' + facts.exportId + (status ? ' · ' + status : '')
+        else if (facts.exportId) line = '导出任务 ' + facts.exportId + (facts.status ? ' · ' + facts.status : '')
         else if (facts.artifactRef) line = '导出文件已就绪'
         else if (revision !== undefined) line = '修订 R' + revision
+        else if (status === 'rejected') line = '未执行（编辑器拒绝了这次修改，回执里没有错误码）'
+        // 成功但拿不到结构化摘要：明确说出来，既不猜状态也不清空正文。
+        if (!output && status === 'applied') line = (line ? line + ' ' : '') + '已执行（摘要无法解析）'
       }
       // 同一回执里出现多个不一致的状态：按外层取值，但必须把"不一致"说出来，不能静默挑一个。
       if (facts.statusConflicts.length) {
         var all = [facts.status].concat(facts.statusConflicts).filter(Boolean).join(' / ')
         line = (line ? line + ' ' : '') + '（回执里有多处状态不一致：' + all + '，已按外层取值）'
       }
-      return { name: name, status: status || (isCall ? 'running' : (errorCode ? 'rejected' : 'unknown')), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
+      var card = { name: name, status: status, revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
+      // 摘要解析不出来时，把原始正文留给"复制诊断信息"，不进 DOM。
+      if (!isCall && !output) {
+        var rawText = message && Array.isArray(message.content)
+          ? message.content.map(function (part) { return part && (typeof part === 'string' ? part : part.text) || '' }).join('\n')
+          : ''
+        if (rawText) card.diagnostic = rawText
+      }
+      return card
     }
     // ---------- 对话框 v1：纯函数层 ----------
     //
@@ -603,13 +733,14 @@ window.__ModuleLoader__.load({
           if (undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT', prompt: undoPrompt(undo), undo: undo })
           var exported = sanitizeExport(row.exportRef)
           if (exported) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件', export: exported })
-          // 解析失败的原始文本只用于复制诊断，不渲染成正文。
-          var diagnostic = card.line && isRawPayload(card.line) ? card.line : ''
+          // 裸 JSON 只进诊断（剪贴板），不进卡片正文；普通文本诊断（如"版本冲突"）保留正文。
+          var rawLine = card.line && isRawPayload(card.line)
+          var diagnostic = card.diagnostic || (rawLine ? card.line : '')
           var locate = sanitizeLocate(row.locate)
           return {
             key: key, kind: 'tool', badge: badge,
             tone: badge === 'rejected' ? 'error' : badge === 'unknown' ? 'warn' : badge === 'applied' ? 'good' : 'muted',
-            card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: diagnostic ? '' : (card.line || '') },
+            card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: rawLine ? '' : (card.line || '') },
             issue: row.issue || '', diagnostic: diagnostic, actions: actions,
             // 透传：P1 的 editor.highlight 全靠它；渲染规则是"有 locate 才可点"。
             ...(locate ? { locate: locate } : {}),
@@ -651,9 +782,10 @@ window.__ModuleLoader__.load({
           }
         }
         var rows = []
-        // tool/call 行带工具名，tool/result 行在很多外壳里只有回执、没有名字：
-        // 按顺序把上一条 call 的名字带给结果行，避免整屏都叫「工具调用」。
+        // tool/call 行带工具名，tool/result 行只有 toolCallId：按 id 映射回名字，
+        // 映射不到就沿用上一条 call 的名字，避免整屏「工具调用」。
         var lastName = null
+        var callNames = new Map()
         Array.from(events.values()).sort(function (a,b) { return a.seq-b.seq }).forEach(function (e) {
           var d = e.data || {}, message = d.message || d
           if (e.type === 'user/message' || e.type === 'assistant/message') {
@@ -678,9 +810,11 @@ window.__ModuleLoader__.load({
             rows.push({ id: 'event-'+e.seq, role: 'error', text: String(failureText) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
             var isCall = e.type === 'tool/call'
-            var card = toolCard(d, isCall, isCall ? null : lastName)
-            if (isCall && card && card.name) lastName = card.name
-            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '' })
+            var callId = d.callId || (d.call && d.call.callId) || (d.message && (d.message.toolCallId || (d.message.source && d.message.source.callId)))
+            var fallback = (callId && callNames.get(callId)) || lastName
+            var card = toolCard(d, isCall, isCall ? null : fallback)
+            if (isCall && card) { if (callId) callNames.set(callId, card.name); lastName = card.name }
+            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '', diagnostic: card && card.diagnostic ? card.diagnostic : null })
           }
         })
         attempts.forEach(function (a, id) {
@@ -755,6 +889,9 @@ window.__ModuleLoader__.load({
       var choiceState = React.useState(null)
       var choices = choiceState[0]
       var setChoices = choiceState[1]
+      var showAllState = React.useState(false)
+      var showAll = showAllState[0]
+      var setShowAll = showAllState[1]
       // 附图相关的提示只能留在输入区，不许污染顶部状态行（上一版出现过"没选文件却报 5MB 超限"）。
       var attachNoticeState = React.useState('')
       var attachNotice = attachNoticeState[0]
@@ -809,24 +946,36 @@ window.__ModuleLoader__.load({
         finally { sendingRef.current = false; if (aliveRef.current) setBusy(false) }
       }
 
-      /** 绑定入口：宿主支持会话列表就先让用户选（最近几个 + 新建），否则直接新建。 */
+      /**
+       * 绑定入口：先按契约列会话，再逐个读工程标记，**只把与本工程匹配的会话给用户看**。
+       * 契约不符时明确报错（不静默退回）；没有匹配项时只保留「新建」。
+       */
       async function bind() {
         if (sendingRef.current) return
-        sendingRef.current = true; setBusy(true); setReady(false)
+        sendingRef.current = true; setBusy(true); setReady(false); setShowAll(false)
         if (stopRef.current) { stopRef.current(); stopRef.current = null }
         bindingRef.current = null; transcriptRef.current = null; setMessages([]); resetComposer()
         try {
-          var items = await listSessions(props.getRemote(), 5)
-          if (items && items.length) {
-            setChoices(items.slice(0, 5))
-            setStatus('选择要挂接的会话，或新建一个专属会话')
-            return
-          }
-          if (items) setStatus('宿主没有可挂接的历史会话，直接新建专属会话')
-          sendingRef.current = false
-          await bindSession(null)
-        } catch (error) { if (aliveRef.current) setStatus(error.message) }
-        finally { if (aliveRef.current) setBusy(false); sendingRef.current = false }
+          var binding = await readBinding(props.frameRef.current, props.kind)
+          var remote = props.getRemote()
+          var items = await listSessions(remote, 8)
+          var usable = items.filter(function (item) { return item.agentAvailable !== false }).slice(0, 8)
+          var projectById = {}
+          await Promise.all(usable.map(function (item) {
+            return peekProjectId(remote, item.sessionId, 800).then(function (projectId) { projectById[item.sessionId] = projectId })
+          }))
+          if (!aliveRef.current) return
+          var grouped = filterSessionsForProject(usable, binding.projectId, projectById)
+          setChoices({ matched: grouped.matched, others: grouped.others, projectId: binding.projectId })
+          setStatus(grouped.matched.length
+            ? '选择一个与本工程匹配的会话，或新建专属会话'
+            : '没有与本工程匹配的历史会话，可以新建专属会话')
+        } catch (error) {
+          if (!aliveRef.current) return
+          // 契约不符/接口缺失：说清楚原因，但仍允许新建（不是"静默回退"）。
+          setChoices({ matched: [], others: [], error: error.message })
+          setStatus(error.message)
+        } finally { if (aliveRef.current) setBusy(false); sendingRef.current = false }
       }
 
       React.useEffect(function () {
@@ -1155,9 +1304,18 @@ window.__ModuleLoader__.load({
         style: { padding: '14px 16px 10px', fontSize: 12, letterSpacing: '.02em', color: '#6e6e73', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,.08)' },
       }, '对话 · ' + props.label, React.createElement('button', { type: 'button', className: 'dsh-media-btn', disabled: busy, onClick: function () { void bind() }, style: { marginLeft: 12 } }, '绑定专属对话'), React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: status.indexOf('未') === 0 ? '#ff3b30' : '#6e6e73' } }, status),
       choices ? React.createElement('div', { role: 'listbox', 'aria-label': '可挂接的会话', style: { marginTop: 8, display: 'grid', gap: 6, padding: 8, borderRadius: 12, background: '#f5f5f7' } },
-        choices.map(function (item) {
-          return btn({ key: item.sessionId, label: item.title, style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
+        choices.error ? React.createElement('div', { role: 'status', style: { fontSize: 11.5, color: '#ff3b30' } }, choices.error) : null,
+        choices.matched.map(function (item) {
+          var notes = sessionAnnotations(item)
+          return btn({ key: item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
         }),
+        !choices.error && !choices.matched.length ? React.createElement('div', { style: { fontSize: 11.5, color: '#6e6e73' } }, '没有与本工程匹配的历史会话。') : null,
+        choices.others.length ? btn({ label: showAll ? '隐藏其他会话' : '显示全部会话（仅供诊断）', onClick: function () { setShowAll(!showAll) } }) : null,
+        showAll && choices.others.length ? React.createElement('div', { role: 'note', style: { fontSize: 11, color: '#ff3b30', lineHeight: 1.5 } }, '下面是与本工程无关的会话，仅供诊断；默认不展示，以免暴露本实例其他会话的标题。') : null,
+        showAll ? choices.others.map(function (item) {
+          var notes = sessionAnnotations(item)
+          return btn({ key: 'other-' + item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
+        }) : null,
         btn({ label: '＋ 新建专属会话', variant: 'primary', onClick: function () { void bindSession(null) } })) : null),
       React.createElement('div', {
         style: { padding: '8px 16px', fontSize: 12, color: '#6e6e73' }, role: 'status',
@@ -1472,8 +1630,10 @@ window.__ModuleLoader__.load({
       buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate, sanitizeUndo: sanitizeUndo, sanitizeExport: sanitizeExport,
       // 静态夹具复用同一套渲染组件（docs/fixtures/dialog-fixture.html）。
       Conversation: Conversation,
-      // 会话挂接：列表归一化、工程标识提取与不匹配判定（纯函数，便于测试）。
-      sessionListItems: sessionListItems, listSessions: listSessions, projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
+      // 会话挂接：严格契约解析、工程标记提取、隐私过滤（纯函数，便于测试）。
+      sessionListItems: normalizeSessionItems, normalizeSessionItems: normalizeSessionItems, listSessions: listSessions,
+      sessionAnnotations: sessionAnnotations, filterSessionsForProject: filterSessionsForProject, peekProjectId: peekProjectId,
+      projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
     return module.exports
   },
 })

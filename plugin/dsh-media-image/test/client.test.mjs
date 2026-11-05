@@ -432,29 +432,55 @@ test('an empty status with an error code defaults to rejected, not unknown', asy
   const plan = client.chat.buildDialogPlan([{ id: 't1', role: 'tool', card }]);
   assert.equal(plan[0].badge, 'rejected');
   const plain = client.chat.toolCard({ toolName: 'media_image_apply_command', result: { revision: 4 } }, false);
-  assert.equal(plain.status, 'unknown', '没有明确结果、也没有错误码时仍然是 unknown');
+  assert.equal(plain.status, 'applied', '没有错误码、也没有结构化摘要 → applied + 摘要无法解析，不是 unknown');
+  assert.match(plain.line, /摘要无法解析/);
 });
 
-test('binding can attach an existing session, and refuses one that belongs to another project', async () => {
+test('session list follows the strict contract and only our project is shown', async () => {
   const client = await loadClient();
-  // 列表归一化：字段形状在不同宿主版本里不一致，统一成 {sessionId,title}
-  const items = client.chat.sessionListItems({ value: { sessions: [{ sessionId: 's1', title: '首次绑定视频工程只读状态' }, { id: 's2' }, {}, { sessionId: '' }] } });
-  assert.deepEqual(items.map(item => item.sessionId), ['s1', 's2']);
-  assert.equal(items[0].title, '首次绑定视频工程只读状态');
-  assert.equal(items[1].title, 's2');
-  assert.equal(client.chat.sessionListItems({ value: { sessions: 'nope' } }), null);
-  assert.equal(client.chat.sessionListItems(undefined), null);
-  // 宿主没有 list / 读失败 → null，调用方回退到新建
-  assert.equal(await client.chat.listSessions({ session: {} }), null);
-  assert.equal(await client.chat.listSessions({ session: { list: async () => { throw new Error('no') } } }), null);
-  // 工程标识提取：只认带身份标记的那条用户消息
+  // 契约：{ items: SessionSummary[] }；标题在 projections.values.title，缺失就是 null
+  const items = client.chat.normalizeSessionItems({ value: { items: [
+    { sessionId: 's1', updatedAt: 1700000000000, running: true, blank: false, agentAvailable: true, projections: { values: { title: '本工程：改标题' } } },
+    { sessionId: 's2', updatedAt: 1699999999000, running: false, blank: true, agentAvailable: true },
+    { sessionId: 's3', updatedAt: 1699999998000, running: false, blank: false, agentAvailable: false, projections: { values: { title: '助手不在线' } } },
+    { sessionId: '' },
+  ] } });
+  assert.deepEqual(items.map(item => item.sessionId), ['s1', 's2', 's3']);
+  assert.equal(items[0].title, '本工程：改标题');
+  assert.equal(items[1].title, null, '没有 projections 时标题必须是 null，不许拿 id 冒充');
+  assert.deepEqual(client.chat.sessionAnnotations(items[0]), ['有回合在跑']);
+  assert.deepEqual(client.chat.sessionAnnotations(items[1]), ['空会话']);
+  assert.deepEqual(client.chat.sessionAnnotations(items[2]), ['助手不在线']);
+  // 形状不符合契约 → 明确抛错，不静默退回"只能新建"
+  assert.throws(() => client.chat.normalizeSessionItems({ value: { sessions: [] } }), /items/);
+  assert.throws(() => client.chat.normalizeSessionItems(undefined), /items/);
+  await assert.rejects(() => client.chat.listSessions({ session: {} }), /session\.list/);
+  await assert.rejects(() => client.chat.listSessions({ session: { list: async () => ({ ok: true, value: {} }) } }), /items/);
+  // 隐私边界：只把本工程标记的会话放进列表，其他一律进 others（默认不展示）
+  const grouped = client.chat.filterSessionsForProject(items, 'proj-a', { s1: 'proj-a', s2: 'proj-b', s3: null });
+  assert.deepEqual(grouped.matched.map(item => item.sessionId), ['s1']);
+  assert.deepEqual(grouped.others.map(item => item.sessionId), ['s2', 's3']);
+  const none = client.chat.filterSessionsForProject(items, 'proj-none', { s1: 'proj-a', s2: 'proj-b', s3: null });
+  assert.equal(none.matched.length, 0, '没有匹配时不能把无关会话顶上来');
+  assert.equal(none.others.length, 3);
+});
+
+test('peekProjectId reads the project marker from a session snapshot without keeping it', async () => {
+  const client = await loadClient();
   const marked = '当前编辑工程身份：' + JSON.stringify({ editorKind: 'image', projectId: 'proj-a' }) + '\n用户指令：\n改标题';
-  const records = [{ event: { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: marked }] } } } }];
-  assert.equal(client.chat.projectIdFromRecords(records), 'proj-a');
-  assert.equal(client.chat.projectMismatch(records, 'proj-a'), null);
-  assert.equal(client.chat.projectMismatch(records, 'proj-b'), 'proj-a', '不同工程必须能被识别出来');
-  assert.equal(client.chat.projectIdFromRecords([]), null);
-  assert.equal(client.chat.projectMismatch([], 'proj-a'), null, '没有标记不拒绝，交给 read_state/审批把关');
+  const remote = {
+    session: {
+      follow() {
+        let index = 0;
+        const frames = [{ type: 'snapshot', header: { id: 's1' }, records: [{ event: { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: marked }] } } } }] }];
+        return { [Symbol.asyncIterator]() { return { async next() { return index < frames.length ? { done: false, value: frames[index++] } : new Promise(() => {}) } } } };
+      },
+    },
+  };
+  assert.equal(await client.chat.peekProjectId(remote, 's1', 500), 'proj-a');
+  const empty = { session: { follow() { return { [Symbol.asyncIterator]() { return { async next() { return { done: false, value: { type: 'snapshot', header: { id: 's2' }, records: [] } } } } } } } } };
+  assert.equal(await client.chat.peekProjectId(empty, 's2', 300), null, '没有标记就返回 null，不猜测');
+  assert.equal(await client.chat.peekProjectId({ session: {} }, 's3', 300), null);
 });
 
 test('real tool/result envelopes map to applied/rejected/undo/export instead of unknown', async () => {
@@ -513,9 +539,139 @@ test('status priority: outer layer wins, inner-only status still resolves, confl
   // meta.status 也能认
   const meta = client.chat.toolCard({ meta: { status: 'rejected', revision: 5 } }, false, '执行编辑');
   assert.equal(meta.status, 'rejected');
-  // 完全没有任何状态或错误码 → 才是 unknown（显式未知，不是解析失败）
+  // 完全没有状态、也没有错误码：按源码结论，成功即 applied，"解析不到"不许冒充 unknown
   const none = client.chat.toolCard({ result: { ok: true, value: { revision: 6 } } }, false, '执行编辑');
-  assert.equal(none.status, 'unknown');
+  assert.equal(none.status, 'applied');
+  assert.match(none.line, /摘要无法解析/);
+});
+
+test('source-documented event shapes: name on call, isError on result, output JSON in message content', async () => {
+  const client = await loadClient();
+  const reduce = client.chat.makeTranscript();
+  const applied = { status: 'applied', revision: 1, commandId: 'fde-addtext-001', afterDigest: 'fnv1a64-0000000000000001', operation: 'layer.add_text' };
+  const exported = { status: 'applied', revision: 2, exportId: 'exp-doc-1', artifactRef: 'blob:http://127.0.0.1:59302/abc', format: 'png' };
+  const events = [
+    // tool/call：名字在 name，参数是 JSON 字符串
+    { seq: 1, type: 'tool/call', data: { turn: 1, step: 2, callId: 'call-1', name: 'media_image_apply_command', arguments: JSON.stringify({ operation: 'layer.add_text' }) } },
+    // tool/result：状态与凭据都在 message.content 的文本 JSON 里
+    { seq: 2, type: 'tool/result', data: { turn: 1, step: 3, message: { toolCallId: 'call-1', isError: false, content: [{ type: 'text', text: JSON.stringify(applied) }] } } },
+    // 失败：isError + error.code，事件里没有 status
+    { seq: 3, type: 'tool/result', data: { turn: 1, step: 4, message: { toolCallId: 'call-2', isError: true, content: [{ type: 'text', text: '版本冲突' }] }, error: { name: 'MediaBridgeError', code: 'REVISION_CONFLICT' } } },
+    // 导出成功：exportId/artifactRef 同样在 content JSON 里
+    { seq: 4, type: 'tool/result', data: { turn: 1, step: 5, message: { toolCallId: 'call-3', isError: false, content: [{ type: 'text', text: JSON.stringify(exported) }] } } },
+    // 成功但摘要无法解析：不许变成 unknown
+    { seq: 5, type: 'tool/result', data: { turn: 1, step: 6, message: { toolCallId: 'call-4', isError: false, content: [{ type: 'text', text: '操作完成，但没有结构化摘要' }] } } },
+    // 显式 unknown：工具自己回 status:'unknown' 才算
+    { seq: 6, type: 'tool/result', data: { turn: 1, step: 7, message: { toolCallId: 'call-5', isError: false, content: [{ type: 'text', text: JSON.stringify({ status: 'unknown', revision: 3 }) }] } } },
+  ];
+  const rows = reduce({ type: 'snapshot', header: { id: 's1' }, records: events.map(event => ({ event })) });
+  const plan = client.chat.buildDialogPlan(rows);
+  assert.deepEqual(plan.map(item => item.badge), ['pending', 'applied', 'rejected', 'applied', 'applied', 'unknown']);
+  // 名字：result 靠 toolCallId 映射回 call 的名字
+  assert.deepEqual(plan.slice(1).map(item => item.card.name), ['执行编辑', '执行编辑', '执行编辑', '执行编辑', '执行编辑']);
+  // 失败行的原因是中文，不是错误码原文
+  assert.match(plan[2].card.line, /版本已变化/);
+  // 撤销与导出都来自 content JSON
+  assert.ok(plan[1].actions.some(action => action.kind === 'fill-undo'), '带凭据的回执要给撤销动作');
+  assert.equal(plan[3].actions.find(action => action.kind === 'download-export').export.exportId, 'exp-doc-1');
+  // 摘要无法解析：applied + 明确提示 + 原文只进 diagnostic
+  assert.match(plan[4].card.line, /摘要无法解析/);
+  assert.ok(plan[4].diagnostic, '原文应保留给复制诊断');
+  assert.equal(plan[4].actions.some(action => action.kind === 'fill-undo'), false, '没有凭据就不给撤销');
+  assertNoRawJsonInPlan(client, plan);
+});
+
+test('structured credentials in meta drive the undo and export buttons', async () => {
+  const client = await loadClient();
+  const reduce = client.chat.makeTranscript();
+  const events = [
+    { seq: 1, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'media_image_apply_command', arguments: '{}' } },
+    { seq: 2, type: 'tool/result', data: { turn: 1, step: 1, message: { toolCallId: 'c1', isError: false, content: [{ type: 'text', text: 'applied · c-meta · R3' }] },
+      meta: { status: 'applied', operation: 'layer.add_text', commandId: 'c-meta', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000003' } } },
+    { seq: 3, type: 'tool/call', data: { turn: 1, step: 2, callId: 'c2', name: 'media_image_export_start', arguments: '{}' } },
+    { seq: 4, type: 'tool/result', data: { turn: 1, step: 2, message: { toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'applied · c-export · R3' }] },
+      meta: { status: 'applied', exportId: 'exp-1', artifactRef: 'blob:http://127.0.0.1:59302/abc', format: 'png' } } },
+    // 缺 appliedRevision → 不给撤销按钮
+    { seq: 5, type: 'tool/call', data: { turn: 1, step: 3, callId: 'c3', name: 'media_image_apply_command', arguments: '{}' } },
+    { seq: 6, type: 'tool/result', data: { turn: 1, step: 3, message: { toolCallId: 'c3', isError: false, content: [{ type: 'text', text: 'applied · c-partial · R4' }] },
+      meta: { status: 'applied', commandId: 'c-partial', afterDigest: 'fnv1a64-0000000000000004' } } },
+  ];
+  const plan = client.chat.buildDialogPlan(reduce({ type: 'snapshot', header: { id: 's' }, records: events.map(event => ({ event })) }));
+  const tools = plan.filter(item => item.kind === 'tool');
+  const undo = tools[1].actions.find(action => action.kind === 'fill-undo');
+  assert.ok(undo, 'meta 里三项齐全时必须给撤销动作');
+  assert.equal(undo.undo.commandId, 'c-meta');
+  assert.equal(undo.undo.appliedRevision, 3);
+  assert.match(undo.prompt, /targetCommandId/);
+  const exported = tools[3].actions.find(action => action.kind === 'download-export');
+  assert.ok(exported, 'meta 里 exportId/artifactRef 齐全时必须给导出动作');
+  assert.equal(exported.export.exportId, 'exp-1');
+  assert.equal(exported.export.format, 'png');
+  assert.equal(tools[5].actions.some(action => action.kind === 'fill-undo'), false, '缺 appliedRevision 就不出按钮');
+});
+
+test('real captured events render with meta.status and callId-linked names', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve: resolvePath, dirname: dirOf } = await import('node:path');
+  const { fileURLToPath: fileOf } = await import('node:url');
+  const fixture = JSON.parse(readFileSync(resolvePath(dirOf(fileOf(import.meta.url)), '../../../docs/fixtures/real-events.json'), 'utf8'));
+  const client = await loadClient();
+  const reduce = client.chat.makeTranscript();
+  const rows = reduce({ type: 'snapshot', header: { id: 's1' }, records: fixture.events.map(event => ({ event })) });
+  const plan = client.chat.buildDialogPlan(rows);
+  const tools = plan.filter(item => item.kind === 'tool');
+  // 前 8 条是 FDE 抓包原文（含按形状重建的 rejected 那条）；后面 4 条是 synthetic:meta-credentials，
+  // 用来演示"后端补 meta 凭据后按钮出现"的状态。
+  assert.deepEqual(tools.slice(0, 8).map(item => item.badge), ['pending', 'rejected', 'pending', 'applied', 'pending', 'applied', 'pending', 'unknown']);
+  assert.deepEqual(tools.slice(0, 8).map(item => item.card.name), ['执行编辑', '执行编辑', '开始导出', '开始导出', '查询导出', '查询导出', '执行编辑', '执行编辑']);
+  // REVISION_CONFLICT 那条：未执行 + 中文说明（真实回执 meta 里没有 errorCode，不能编）
+  assert.match(tools[1].card.line, /未执行/);
+  // 抓包原文的 6 条结果里没有结构化凭据：按钮不出现才是正确行为
+  assert.equal(tools.slice(0, 8).some(item => item.actions.some(action => action.kind === 'fill-undo')), false);
+  assert.equal(tools.slice(0, 8).some(item => item.actions.some(action => action.kind === 'download-export')), false);
+  // 后端补了 meta 凭据的合成样例：撤销与导出各出现一次
+  assert.ok(tools[9].actions.some(action => action.kind === 'fill-undo'), 'meta 带凭据的写入给撤销');
+  assert.ok(tools[11].actions.some(action => action.kind === 'download-export'), 'meta 带 exportId 的导出给下载');
+  assertNoRawJsonInPlan(client, plan);
+});
+
+test('fixture samples still match the captured probe file (source guard)', async (t) => {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { resolve: resolvePath, dirname: dirOf } = await import('node:path');
+  const { fileURLToPath: fileOf } = await import('node:url');
+  const probe = 'C:/Users/UEFR/.dsh/bot/workspace/diagram-studio-prototype/.qa/probe/real-events.json';
+  if (!existsSync(probe)) { t.skip('抓包原文不在这台机器上（.qa 不入库）'); return }
+  const fixture = JSON.parse(readFileSync(resolvePath(dirOf(fileOf(import.meta.url)), '../../../docs/fixtures/real-events.json'), 'utf8'));
+  const captured = JSON.parse(readFileSync(probe, 'utf8'));
+  const bySeq = new Map();
+  for (const key of Object.keys(captured.samples || {})) for (const event of captured.samples[key]) bySeq.set(event.seq, event);
+  if (captured.revisionConflictSample) bySeq.set(captured.revisionConflictSample.seq, captured.revisionConflictSample);
+  let checked = 0;
+  for (const event of fixture.events) {
+    if (!String(event.fixtureOrigin || '').startsWith('probe:')) continue;
+    const source = bySeq.get(event.seq);
+    assert.ok(source, `夹具里的 seq ${event.seq} 在抓包里找不到来源`);
+    assert.deepEqual(JSON.parse(JSON.stringify(event.data)), JSON.parse(JSON.stringify(source.data)), `seq ${event.seq} 与抓包原文不一致`);
+    checked += 1;
+  }
+  assert.ok(checked >= 6, '至少要比对到 6 条真实样本');
+});
+
+test('unknown only from explicit status; pending only from call without result; parse failure falls back', async () => {
+  const client = await loadClient();
+  const reduce = client.chat.makeTranscript();
+  const events = [
+    { seq: 1, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'media_image_apply_command', arguments: '{}' } },
+    { seq: 2, type: 'tool/result', data: { turn: 1, step: 1, message: { toolCallId: 'c1', isError: false, content: [{ type: 'text', text: 'applied · cmd-1 · R1' }] }, meta: { status: 'applied', operation: 'layer.add_text' } } },
+    { seq: 3, type: 'tool/call', data: { turn: 1, step: 2, callId: 'c2', name: 'media_image_apply_command', arguments: '{}' } },
+    { seq: 4, type: 'tool/result', data: { turn: 1, step: 2, message: { toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'unknown' }] }, meta: { status: 'unknown' } } },
+  ];
+  const plan = client.chat.buildDialogPlan(reduce({ type: 'snapshot', header: { id: 's' }, records: events.map(event => ({ event })) }));
+  const tools = plan.filter(item => item.kind === 'tool');
+  assert.deepEqual(tools.map(item => item.badge), ['pending', 'applied', 'pending', 'unknown']);
+  // 成功但只有人读文本、没有结构化字段：摘要无法解析，但**不是** unknown
+  assert.match(tools[1].card.line, /摘要无法解析/);
+  assert.equal(tools[1].badge, 'applied');
 });
 
 test('a missing slots service degrades instead of throwing', async () => {

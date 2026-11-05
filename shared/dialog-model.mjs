@@ -4,11 +4,11 @@
 // 不发起任何调用。图片侧 `plugin/dsh-media-image/lib/client.js` 内联实现与本文档语义一致，
 // 由 `plugin/dsh-media-image/test/dialog-parity.test.mjs` 逐函数对照，改一边不改另一边会红。
 //
-// 版本：dialog-model@3（2026-11-05）。@3 相比 @2：
-//   1) 动作携带自身所需凭据：fill-undo 带 prompt + undo，download-export 带 export；
-//      渲染层不再回查原始行（@2 的 locate 已按同一原则处理）；
-//   2) 新增 sanitizeUndo / undoPrompt / sanitizeExport（architect 把 undoPrompt 列入共享清单）。
-// @2 相比 @1：tool 计划透传 locate；错误行/工具回执改严格裸 JSON 判定。
+// 版本：dialog-model@4（2026-11-05）。@4 相比 @3：
+//   1) tool 计划把 `card.diagnostic`（解析失败时保留的原文）透传到 diagnostic，供"复制诊断信息"；
+//   2) 裸 JSON 的 row.card.line 仍然只进 diagnostic，不进渲染正文（rawLine 判定不变）。
+// @3：动作自带凭据（fill-undo 的 prompt/undo、download-export 的 export）。
+// @2：tool 计划透传 locate；错误行/工具回执改严格裸 JSON 判定。
 // 版本号变了就不允许跨版本混用：同版本号两个不同文件是歧义。
 //
 // 视频侧 vendor 本文件后，在旁侧 source.json 记录版本 + sha256 + 字节数；升级时整份替换并同步三者。
@@ -216,11 +216,13 @@ export function buildDialogPlan(rows) {
       if (undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT', prompt: undoPrompt(undo), undo });
       const exported = sanitizeExport(row.exportRef);
       if (exported) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件', export: exported });
-      const diagnostic = card.line && isRawPayload(card.line) ? card.line : '';
+      const rawLine = card.line && isRawPayload(card.line);
+      // 裸 JSON 只进 diagnostic（剪贴板），不进卡片正文；普通文本诊断保留正文。
+      const diagnostic = card.diagnostic || (rawLine ? card.line : '');
       return {
         key, kind: 'tool', badge,
         tone: badge === 'rejected' ? 'error' : badge === 'unknown' ? 'warn' : badge === 'applied' ? 'good' : 'muted',
-        card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: diagnostic ? '' : (card.line || '') },
+        card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: rawLine ? '' : (card.line || '') },
         issue: row.issue || '', diagnostic, actions,
         // 透传：P1 的 editor.highlight 全靠它。渲染层规则是"有 locate 才可点"，
         // 不允许再按 key 回查原始行，那属于隐式耦合。
@@ -241,4 +243,4 @@ export function buildDialogPlan(rows) {
   });
 }
 
-export const DIALOG_MODEL_VERSION = 'dialog-model@3';
+export const DIALOG_MODEL_VERSION = 'dialog-model@4';

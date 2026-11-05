@@ -34,24 +34,41 @@ function makeFrame(binding) {
   return iframe;
 }
 
-/** 假会话：create 立即成功；给了 list 就模拟"可挂接的历史会话"；follow 只吐固定帧，吐完挂起。 */
-function makeRemote(frames, sessionId, list) {
+/**
+ * 假会话：create 立即成功；给了 list 就按**真实契约** `{items: SessionSummary[]}` 返回；
+ * 给了 peek 映射就为那些 sessionId 返回带工程标记的快照（模拟"读一眼工程身份"）。
+ */
+function makeRemote(frames, sessionId, options = {}) {
+  const { list, peek } = options;
+  const probed = new Set();
+  function streamOf(framesToSend) {
+    let index = 0;
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            if (index < framesToSend.length) return { done: false, value: framesToSend[index++] };
+            return new Promise(() => {});
+          },
+        };
+      },
+    };
+  }
   return {
     session: {
       async create() { return { ok: true, value: { sessionId } }; },
-      ...(list ? { async list() { return { ok: true, value: { sessions: list } }; } } : {}),
-      follow() {
-        let index = 0;
-        return {
-          [Symbol.asyncIterator]() {
-            return {
-              async next() {
-                if (index < frames.length) return { done: false, value: frames[index++] };
-                return new Promise(() => {}); // 静态夹具：不再产生新消息
-              },
-            };
-          },
-        };
+      ...(list ? { async list() { return { ok: true, value: { items: list } }; } } : {}),
+      follow(request) {
+        const asked = request && request.address && request.address.sessionId;
+        const projectId = peek && peek[asked];
+        // 同一个会话会被看两次：第一次是"读工程标记"的探针（回标记快照），之后是真正订阅（回内容帧）。
+        const isProbe = !!projectId && !probed.has(asked);
+        if (projectId) probed.add(asked);
+        if (isProbe) {
+          const marked = '当前编辑工程身份：' + JSON.stringify({ editorKind: 'image', projectId }) + '\n用户指令：\n（夹具里的历史会话）';
+          return streamOf([{ type: 'snapshot', header: { id: asked }, records: [{ event: { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: marked }] } } } }] }]);
+        }
+        return streamOf(frames);
       },
     },
   };
@@ -60,36 +77,33 @@ function makeRemote(frames, sessionId, list) {
 const text = value => [{ type: 'text', text: value }];
 const message = (role, value) => ({ message: { role, content: text(value) } });
 
-/** 8 类样例事件：用户、助手、工具四态、审批四态、错误、解析失败、撤销/导出凭据。 */
-const EVENTS = [
-  { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, ...message('user', '把画布改成 1200×800，标题换成「产品主图」，然后导出 PNG') } },
-  { seq: 2, type: 'assistant/message', data: message('assistant',
+// 工具/审批事件一律来自 docs/fixtures/real-events.json（FDE 抓包原文，来源写在每条 fixtureOrigin 里）。
+// 这里只构造"人说话"的样例：Markdown 富文本、会话错误、裸 JSON 兜底。
+const MARKDOWN_EVENTS = [
+  { seq: 101, type: 'user/message', data: { source: { kind: 'user' }, ...message('user', '把画布改成 1200×800，标题换成「产品主图」，然后导出 PNG') } },
+  { seq: 102, type: 'assistant/message', data: message('assistant',
     '## 已开始处理\n\n先读取工程，再按顺序改：\n\n1. `canvas.resize` 到 1200×800\n2. 更新标题文本\n3. `export_start` 导出 PNG\n\n参考 [宽度规范](https://example.com/spec)，行内代码 `expectedRevision` 会带上。\n\n```json\n{"width":1200,"height":800}\n```\n\n> 版本冲突时会返回 REVISION_CONFLICT，请重新读取。') },
-  // 工具事件用真实外壳：call 带 toolName，result 是 {ok, value} 包一层（与线上一致）
-  { seq: 3, type: 'tool/call', data: { call: { toolName: 'media_image_read_state', arguments: { operation: 'read_state' } } } },
-  { seq: 4, type: 'tool/result', data: { call: { toolName: 'media_image_read_state' }, result: { ok: true, value: { status: 'applied', revision: 1, layersCount: 3 } } } },
-  { seq: 5, type: 'tool/call', data: { call: { toolName: 'media_image_apply_command', arguments: { operation: 'canvas.resize' } } } },
-  { seq: 6, type: 'tool/result', data: { call: { toolName: 'media_image_apply_command' }, result: { ok: true, value: { status: 'applied', revision: 2, commandId: 'cmd-fixture-1', afterDigest: 'fnv1a64-00000000000000a2', operation: 'canvas.resize' } } } },
-  { seq: 7, type: 'tool/result', data: { result: { ok: false, error: { code: 'REVISION_CONFLICT' }, value: { status: 'rejected', revision: 2 } } } },
-  { seq: 8, type: 'tool/result', data: { result: { ok: true, value: { status: 'unknown', revision: 3 } } } },
-  { seq: 9, type: 'tool/call', data: { call: { toolName: 'media_image_export_start', arguments: { format: 'png' } } } },
-  { seq: 10, type: 'tool/result', data: { call: { toolName: 'media_image_export_start' }, result: { ok: true, value: { status: 'applied', revision: 4, exportId: 'exp-fixture-1', artifactRef: 'blob:http://127.0.0.1:8819/fixture-1', format: 'png' } } } },
-  { seq: 11, type: 'approval/asked', data: { toolName: 'media_image_apply_command', reason: 'document=fixture-project page=fixture-page' } },
-  { seq: 12, type: 'approval/decided', data: { outcome: 'allowed-once' } },
-  { seq: 13, type: 'approval/decided', data: { outcome: 'rejected' } },
-  { seq: 14, type: 'approval/decided', data: { outcome: 'unavailable' } },
-  { seq: 15, type: 'session/error', data: { error: { code: 'APPROVAL_TIMEOUT', message: '等待授权超时，本次请求已取消，需要重新发起' } } },
-  { seq: 16, type: 'assistant/message', data: message('assistant',
+  { seq: 103, type: 'session/error', data: { error: { code: 'APPROVAL_TIMEOUT', message: '等待授权超时，本次请求已取消，需要重新发起' } } },
+  { seq: 104, type: 'assistant/message', data: message('assistant',
     '{"quite":"a raw json body that must never reach the dom, it is long enough to trigger the fallback rule","n":1}') },
 ];
+
+const REAL = await fetch('./real-events.json').then(response => {
+  if (!response.ok) throw new Error('real-events.json 加载失败：' + response.status);
+  return response.json();
+});
+const ALL_EVENTS = MARKDOWN_EVENTS.concat(REAL.events).sort((left, right) => left.seq - right.seq);
 
 function snapshot(records) {
   return { type: 'snapshot', header: { id: 'fixture-session' }, records: records.map(event => ({ event })) };
 }
 
-function mount(target, { frames, bind, width = 600, list }) {
+function mount(target, { frames, bind, width = 600, list, peek }) {
   const frame = makeFrame(BINDING);
-  const remote = makeRemote(frames, 'fixture-session', list);
+  // 默认给一条"与本工程匹配"的历史会话，模拟真实面板先列会话、再由用户选中的流程。
+  const effectiveList = list || [{ sessionId: 'fixture-session', updatedAt: Date.now(), running: false, blank: false, agentAvailable: true, projections: { values: { title: '本工程：夹具会话' } } }];
+  const effectivePeek = peek || { 'fixture-session': 'fixture-project' };
+  const remote = makeRemote(frames, 'fixture-session', { list: effectiveList, peek: effectivePeek });
   const mountNode = document.createElement('div');
   mountNode.style.cssText = 'flex:1;min-width:0;display:flex;min-height:0;height:100%';
   target.appendChild(mountNode);
@@ -98,16 +112,25 @@ function mount(target, { frames, bind, width = 600, list }) {
     getRemote: () => remote, getWorkspace: () => ({ openSession() {} }), active: true, width, narrow: false,
   }));
   if (!bind) return;
-  // 点一次「绑定专属对话」，之后的订阅、投影、渲染都走真实代码路径。
+  // 真实路径：先点「绑定专属对话」列出会话，再点本工程那条（不是直接 create）。
+  let clickedBind = false;
   const timer = setInterval(() => {
-    const button = Array.from(mountNode.querySelectorAll('button')).find(node => node.textContent === '绑定专属对话');
-    if (!button) return;
+    const buttons = Array.from(mountNode.querySelectorAll('button'));
+    if (!clickedBind) {
+      const button = buttons.find(node => node.textContent === '绑定专属对话');
+      if (!button) return;
+      button.click(); clickedBind = true; return;
+    }
+    const listbox = mountNode.querySelector('[role="listbox"]');
+    if (!listbox) return;
+    const pick = Array.from(listbox.querySelectorAll('button')).find(node => /^本工程/.test(node.textContent));
+    if (!pick) return;
     clearInterval(timer);
-    button.click();
+    pick.click();
   }, 100);
 }
 
-mount(document.getElementById('full'), { frames: [snapshot(EVENTS),  // 助手流式增量：start → chunk → end（committed），结尾落成一条助手消息
+mount(document.getElementById('full'), { frames: [snapshot(ALL_EVENTS),  // 助手流式增量：start → chunk → end（committed），结尾落成一条助手消息
   { type: 'assistant-stream', frame: { type: 'start', attemptId: 'attempt-fixture', revision: 1 } },
   { type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'attempt-fixture', revision: 1, index: 0, chunk: { type: 'text-delta', text: '（流式增量）我已经把画布改成 1200×800，' } } },
   { type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'attempt-fixture', revision: 1, index: 1, chunk: { type: 'text-delta', text: '接下来处理标题文本。' } } },
@@ -115,13 +138,15 @@ mount(document.getElementById('full'), { frames: [snapshot(EVENTS),  // 助手�
 ], bind: true, width: 1080 });
 mount(document.getElementById('empty'), { frames: [snapshot([])], bind: true, width: 560 });
 mount(document.getElementById('unbound'), { frames: [], bind: false, width: 560 });
-// ④ 绑定已有会话：宿主返回两个历史会话，点「绑定专属对话」应列出它们 + 新建入口
+// ④ 绑定已有会话：严格契约 {items}，且只展示与本工程匹配的会话（无关会话默认隐藏）
 mount(document.getElementById('sessions'), {
   frames: [], bind: true, width: 560,
   list: [
-    { sessionId: 'session-image-a', title: '图片工程：改标题与画布尺寸' },
-    { sessionId: 'session-video-b', title: '视频工程：首次绑定只读状态' },
+    { sessionId: 'session-image-a', updatedAt: 1700000002000, running: false, blank: false, agentAvailable: true, projections: { values: { title: '本工程：改标题与画布尺寸' } } },
+    { sessionId: 'session-video-b', updatedAt: 1700000001000, running: true, blank: false, agentAvailable: true, projections: { values: { title: '别的工程：视频只读状态' } } },
+    { sessionId: 'session-blank-c', updatedAt: 1700000000000, running: false, blank: true, agentAvailable: true },
   ],
+  peek: { 'session-image-a': 'fixture-project', 'session-video-b': 'other-project' },
 });
 
 document.documentElement.dataset.fixtureReady = 'pending';
