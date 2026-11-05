@@ -1,39 +1,40 @@
 {
-  "note": "夹具样本来源：probe=抓包原文；derived=按 real-events-shapes.txt 重建；synthetic=仅补显式 unknown。每个事件都有 fixtureOrigin。",
-  "sourceSession": "session-a2a81a0c-d0be-41c3-b0fe-153f6dc5cb13",
-  "generatedAt": "2026-11-05T07:55:12.590Z",
+  "note": "夹具样本：probe=FDE 在 0.2.1 上抓的原文（meta 已带 commandId/appliedRevision/afterDigest/exportId/artifactRef/format/errorCode）；synthetic=仅补显式 unknown。",
+  "sourceSession": "session-c5042084-84d2-4e2b-8820-ff646401630a",
+  "generatedAt": "2026-11-05T08:01:22.539Z",
+  "version": "0.2.1",
   "events": [
     {
       "type": "tool/call",
       "seq": 19,
-      "time": 1793864583606,
+      "time": 1793865648493,
       "data": {
         "turn": 1,
         "step": 1,
-        "callId": "call_00_ET_OkfsciAOxGwfRU5V9W2E9576",
+        "callId": "call_00_yd5jnRnf50yvJMl5Vr9g2464",
         "name": "media_image_read_state",
-        "arguments": "{\"editorKind\": \"image\", \"instanceId\": \"594bcefa-6eb6-44ac-8314-bce3b6910b52\", \"projectId\": \"a550ef3f-de20-4901-b726-9e3965e20c43\", \"bind\": true}"
+        "arguments": "{\"editorKind\": \"image\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"bind\": true}"
       },
       "fixtureOrigin": "probe:samples/tool/call"
     },
     {
       "type": "approval/asked",
       "seq": 20,
-      "time": 1793864583692,
+      "time": 1793865648556,
       "data": {
-        "id": "637d069b-e559-433d-833a-54bc8f9d16bb",
+        "id": "49477513-2ee3-47cd-a051-4e4d8e8f1679",
         "toolName": "media_image_read_state",
-        "callId": "call_00_ET_OkfsciAOxGwfRU5V9W2E9576",
-        "reason": "Authorize this session <id:44> to read, edit and export this exact editor project. editorKind=image; documentId=a550ef3f-de20-4901-b726-9e3965e20c43; instanceId=594bcefa-6eb6-44ac-8314-bce3b6910b52; pageId=53432124-72ea-4aaa-9c9c-47648350eebd; revision=0; digest=fnv1a64-9fb1dbb7755578ab. Destructive edits still require separate approval."
+        "callId": "call_00_yd5jnRnf50yvJMl5Vr9g2464",
+        "reason": "Authorize this session <id:44> to read, edit and export this exact editor project. editorKind=image; documentId=0f0a0faf-030b-45e3-bac4-67899ea3ef97; instanceId=bb6aed74-ebfd-494c-b870-4136d34dab1c; pageId=bf1fe2e0-b15a-468e-ad59-4bf4146d20f2; revision=0; digest=fnv1a64-9fb1dbb7755578ab. Destructive edits still require separate approval."
       },
       "fixtureOrigin": "probe:samples/approval/asked"
     },
     {
       "type": "approval/decided",
       "seq": 21,
-      "time": 1793864640084,
+      "time": 1793865654336,
       "data": {
-        "id": "637d069b-e559-433d-833a-54bc8f9d16bb",
+        "id": "49477513-2ee3-47cd-a051-4e4d8e8f1679",
         "outcome": "allowed-once"
       },
       "fixtureOrigin": "probe:samples/approval/decided"
@@ -41,7 +42,7 @@
     {
       "type": "tool/result",
       "seq": 22,
-      "time": 1793864640223,
+      "time": 1793865654475,
       "data": {
         "turn": 1,
         "step": 1,
@@ -49,23 +50,24 @@
           "role": "tool",
           "source": {
             "kind": "tool",
-            "callId": "call_00_ET_OkfsciAOxGwfRU5V9W2E9576"
+            "callId": "call_00_yd5jnRnf50yvJMl5Vr9g2464"
           },
-          "toolCallId": "call_00_ET_OkfsciAOxGwfRU5V9W2E9576",
+          "toolCallId": "call_00_yd5jnRnf50yvJMl5Vr9g2464",
           "content": [
             {
               "type": "text",
-              "text": "image · R0 · projectId a550ef3f-de20-4901-b726-9e3965e20c43 · stateDigest fnv1a64-9fb1dbb7755578ab · undo no · redo no · objects {\"editorKind\":\"image\",\"documentId\":\"a550ef3f-de20-4901-b726-9e3965e20c43\",\"revision\":0,\"canvas\":{\"width\":520,\"height\":721},\"history\":{\"canUndo\":false,\"canRedo\":false,\"undoDepth\":0,\"redoDepth\":0,\"lastActionId\":\"unknown\"},\"selectedLayerId\":\"1\",\"selectedObjects\":[{\"id\":\"1\",\"kind\":\"empty\",\"textSummary\":null,\"propsSummary\":{\"name\":\"Animation #1\"},\"transform\":{\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0},\"visible\":true,\"zIndex\":0}],\"layers\":[{\"id\":\"1\",\"name\":\"Animation #1\",\"type\":\"empty\",\"visible\":true,\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0}],\"layersCount\":1,\"layersTruncated\":false}"
+              "text": "image · R0 · projectId 0f0a0faf-030b-45e3-bac4-67899ea3ef97 · stateDigest fnv1a64-9fb1dbb7755578ab · undo no · redo no · objects {\"editorKind\":\"image\",\"documentId\":\"0f0a0faf-030b-45e3-bac4-67899ea3ef97\",\"revision\":0,\"canvas\":{\"width\":520,\"height\":721},\"history\":{\"canUndo\":false,\"canRedo\":false,\"undoDepth\":0,\"redoDepth\":0,\"lastActionId\":\"unknown\"},\"selectedLayerId\":\"1\",\"selectedObjects\":[{\"id\":\"1\",\"kind\":\"empty\",\"textSummary\":null,\"propsSummary\":{\"name\":\"Animation #1\"},\"transform\":{\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0},\"visible\":true,\"zIndex\":0}],\"layers\":[{\"id\":\"1\",\"name\":\"Animation #1\",\"type\":\"empty\",\"visible\":true,\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0}],\"layersCount\":1,\"layersTruncated\":false}"
             }
           ],
           "isError": false,
-          "id": "390a8811-7296-490e-9279-0ce7cd459dbc"
+          "id": "4a1080db-f888-4e1a-80aa-b510771b46ff"
         },
         "meta": {
           "status": "applied",
           "editorKind": "image",
-          "projectId": "a550ef3f-de20-4901-b726-9e3965e20c43",
-          "stateDigest": "fnv1a64-9fb1dbb7755578ab"
+          "projectId": "0f0a0faf-030b-45e3-bac4-67899ea3ef97",
+          "stateDigest": "fnv1a64-9fb1dbb7755578ab",
+          "appliedRevision": 0
         }
       },
       "sourceEventSeqs": [
@@ -77,20 +79,20 @@
     {
       "type": "tool/call",
       "seq": 27,
-      "time": 1793864641960,
+      "time": 1793865656887,
       "data": {
         "turn": 1,
         "step": 2,
-        "callId": "call_00_59yOVZT9MeSeD0CpJ0nC6393",
+        "callId": "call_00_jRDXzQ0vAVqxXOLZeo128268",
         "name": "media_image_apply_command",
-        "arguments": "{\"editorKind\": \"image\", \"projectId\": \"a550ef3f-de20-4901-b726-9e3965e20c43\", \"instanceId\": \"594bcefa-6eb6-44ac-8314-bce3b6910b52\", \"commandId\": \"fde-acceptance-addtext-001\", \"expectedRevision\": 0, \"operation\": \"layer.add_text\", \"mode\": \"assist\", \"params\": {\"text\": \"FDE 验收\"}, \"targets\": [\"1\"]}"
+        "arguments": "{\"editorKind\": \"image\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"commandId\": \"fde-021-step2-addtext-01\", \"expectedRevision\": 0, \"operation\": \"layer.add_text\", \"mode\": \"assist\", \"params\": {\"text\": \"FDE 0.2.1 验收\"}}"
       },
       "fixtureOrigin": "probe:samples/tool/call"
     },
     {
       "type": "tool/result",
       "seq": 28,
-      "time": 1793864642356,
+      "time": 1793865657452,
       "data": {
         "turn": 1,
         "step": 2,
@@ -98,25 +100,28 @@
           "role": "tool",
           "source": {
             "kind": "tool",
-            "callId": "call_00_59yOVZT9MeSeD0CpJ0nC6393"
+            "callId": "call_00_jRDXzQ0vAVqxXOLZeo128268"
           },
-          "toolCallId": "call_00_59yOVZT9MeSeD0CpJ0nC6393",
+          "toolCallId": "call_00_jRDXzQ0vAVqxXOLZeo128268",
           "content": [
             {
               "type": "text",
-              "text": "applied · fde-acceptance-addtext-001 · R1"
+              "text": "applied · fde-021-step2-addtext-01 · R1"
             }
           ],
           "isError": false,
-          "id": "0d01ee3d-d3ab-48e0-860f-92f710718594"
+          "id": "15f128b6-df44-46ab-a25f-9b70053b7639"
         },
         "meta": {
           "operation": "layer.add_text",
           "status": "applied",
           "editorKind": "image",
-          "projectId": "a550ef3f-de20-4901-b726-9e3965e20c43",
-          "stateDigest": "fnv1a64-a00c77fab4dabfd5",
-          "auditRef": "audit-fde-acceptance-addtext-001"
+          "projectId": "0f0a0faf-030b-45e3-bac4-67899ea3ef97",
+          "stateDigest": "fnv1a64-541b9dfeaf6c5f70",
+          "auditRef": "audit-fde-021-step2-addtext-01",
+          "commandId": "fde-021-step2-addtext-01",
+          "appliedRevision": 1,
+          "afterDigest": "fnv1a64-541b9dfeaf6c5f70"
         }
       },
       "sourceEventSeqs": [
@@ -127,49 +132,52 @@
     },
     {
       "type": "tool/call",
-      "seq": 42,
-      "time": 1793864684831,
+      "seq": 39,
+      "time": 1793865658932,
       "data": {
-        "turn": 2,
-        "step": 1,
-        "callId": "call_00_rxpENlPILeVAjJ0Z2y5n3755",
-        "name": "media_image_read_state",
-        "arguments": "{\"editorKind\": \"image\", \"instanceId\": \"594bcefa-6eb6-44ac-8314-bce3b6910b52\", \"projectId\": \"a550ef3f-de20-4901-b726-9e3965e20c43\"}"
+        "turn": 1,
+        "step": 3,
+        "callId": "call_00_iZD01HIZ87wHmXvncAwl9807",
+        "name": "media_image_apply_command",
+        "arguments": "{\"commandId\": \"fde-021-step3-conflict-probe-01\", \"editorKind\": \"image\", \"expectedRevision\": 0, \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"mode\": \"assist\", \"operation\": \"layer.add_text\", \"params\": {\"text\": \"FDE 0.2.1 验收\"}, \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\"}"
       },
       "fixtureOrigin": "probe:samples/tool/call"
     },
     {
       "type": "tool/result",
-      "seq": 43,
-      "time": 1793864685038,
+      "seq": 40,
+      "time": 1793865658990,
       "data": {
-        "turn": 2,
-        "step": 1,
+        "turn": 1,
+        "step": 3,
         "message": {
           "role": "tool",
           "source": {
             "kind": "tool",
-            "callId": "call_00_rxpENlPILeVAjJ0Z2y5n3755"
+            "callId": "call_00_iZD01HIZ87wHmXvncAwl9807"
           },
-          "toolCallId": "call_00_rxpENlPILeVAjJ0Z2y5n3755",
+          "toolCallId": "call_00_iZD01HIZ87wHmXvncAwl9807",
           "content": [
             {
               "type": "text",
-              "text": "image · R1 · projectId a550ef3f-de20-4901-b726-9e3965e20c43 · stateDigest fnv1a64-a00c77fab4dabfd5 · undo yes · redo no · objects {\"editorKind\":\"image\",\"documentId\":\"a550ef3f-de20-4901-b726-9e3965e20c43\",\"revision\":1,\"canvas\":{\"width\":520,\"height\":721},\"history\":{\"lastCommandId\":\"fde-acceptance-addtext-001\",\"appliedRevision\":1,\"afterDigest\":\"fnv1a64-a00c77fab4dabfd5\",\"canUndo\":true,\"canRedo\":false,\"undoDepth\":1,\"redoDepth\":0,\"lastActionId\":\"insert_layer\"},\"selectedLayerId\":\"2\",\"selectedObjects\":[{\"id\":\"2\",\"kind\":\"text\",\"textSummary\":\"FDE 验收\",\"propsSummary\":null,\"transform\":{\"x\":260,\"y\":361,\"width\":172,\"height\":46,\"rotationDeg\":0},\"visible\":true,\"zIndex\":0}],\"layers\":[{\"id\":\"2\",\"name\":\"FDE 验收\",\"type\":\"text\",\"visible\":true,\"x\":260,\"y\":361,\"width\":172,\"height\":46,\"rotationDeg\":0,\"text\":\"FDE 验收\"},{\"id\":\"1\",\"name\":\"Animation #1\",\"type\":\"empty\",\"visible\":true,\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0}],\"layersCount\":2,\"layersTruncated\":false}"
+              "text": "rejected · fde-021-step3-conflict-probe-01 · R1 · REVISION_CONFLICT"
             }
           ],
           "isError": false,
-          "id": "80629c83-2b2b-4c30-a540-aa90b40c29d0"
+          "id": "b6545419-fe82-4bc4-868b-2398544a6fa8"
         },
         "meta": {
-          "status": "applied",
+          "operation": "layer.add_text",
+          "status": "rejected",
           "editorKind": "image",
-          "projectId": "a550ef3f-de20-4901-b726-9e3965e20c43",
-          "stateDigest": "fnv1a64-a00c77fab4dabfd5"
+          "stateDigest": "fnv1a64-541b9dfeaf6c5f70",
+          "commandId": "fde-021-step3-conflict-probe-01",
+          "appliedRevision": 1,
+          "errorCode": "REVISION_CONFLICT"
         }
       },
       "sourceEventSeqs": [
-        42
+        39
       ],
       "surfaceOp": "append",
       "fixtureOrigin": "probe:samples/tool/result"
@@ -177,44 +185,49 @@
     {
       "type": "tool/call",
       "seq": 48,
-      "time": 1793864688589,
+      "time": 1793865661711,
       "data": {
-        "turn": 2,
-        "step": 2,
-        "callId": "call_00_uffZ4gH6nQoAblRYzuuP3166",
-        "name": "media_image_apply_command",
-        "arguments": "{\"commandId\": \"fde-conflict-probe-addtext-002\", \"editorKind\": \"image\", \"expectedRevision\": 0, \"instanceId\": \"594bcefa-6eb6-44ac-8314-bce3b6910b52\", \"mode\": \"assist\", \"operation\": \"layer.add_text\", \"params\": {\"text\": \"FDE 验收\"}, \"projectId\": \"a550ef3f-de20-4901-b726-9e3965e20c43\"}"
+        "turn": 1,
+        "step": 4,
+        "callId": "call_00_TfCqIiDf8dJQ4RqJ2eMT7846",
+        "name": "media_image_export_start",
+        "arguments": "{\"commandId\": \"fde-021-step4-export-png-01\", \"editorKind\": \"image\", \"expectedRevision\": 1, \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\", \"format\": \"png\"}"
       },
       "fixtureOrigin": "probe:samples/tool/call"
     },
     {
       "type": "tool/result",
       "seq": 49,
-      "time": 1793864688657,
+      "time": 1793865661924,
       "data": {
-        "turn": 2,
-        "step": 2,
+        "turn": 1,
+        "step": 4,
         "message": {
           "role": "tool",
           "source": {
             "kind": "tool",
-            "callId": "call_00_uffZ4gH6nQoAblRYzuuP3166"
+            "callId": "call_00_TfCqIiDf8dJQ4RqJ2eMT7846"
           },
-          "toolCallId": "call_00_uffZ4gH6nQoAblRYzuuP3166",
+          "toolCallId": "call_00_TfCqIiDf8dJQ4RqJ2eMT7846",
           "content": [
             {
               "type": "text",
-              "text": "rejected · fde-conflict-probe-addtext-002 · R1 · REVISION_CONFLICT"
+              "text": "applied · fde-021-step4-export-png-01 · R1 · exportId 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · artifactRef blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
             }
           ],
           "isError": false,
-          "id": "26ee53d8-1baa-49aa-b9c3-b78ba55f45a3"
+          "id": "653051da-0818-426b-8029-8559566195bc"
         },
         "meta": {
-          "operation": "layer.add_text",
-          "status": "rejected",
+          "status": "applied",
           "editorKind": "image",
-          "stateDigest": "fnv1a64-a00c77fab4dabfd5"
+          "projectId": "0f0a0faf-030b-45e3-bac4-67899ea3ef97",
+          "stateDigest": "fnv1a64-541b9dfeaf6c5f70",
+          "commandId": "fde-021-step4-export-png-01",
+          "appliedRevision": 1,
+          "exportId": "6fc84fc2-3c0e-4204-b949-f7cd2eaa0287",
+          "artifactRef": "blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082",
+          "format": "png"
         }
       },
       "sourceEventSeqs": [
@@ -226,44 +239,44 @@
     {
       "type": "tool/call",
       "seq": 54,
-      "time": 1793864690342,
+      "time": 1793865663367,
       "data": {
-        "turn": 2,
-        "step": 3,
-        "callId": "call_00_HdGUr3IQwqJfHJ12fCSh8937",
-        "name": "media_image_export_start",
-        "arguments": "{\"commandId\": \"fde-export-png-003\", \"editorKind\": \"image\", \"expectedRevision\": 1, \"format\": \"png\", \"instanceId\": \"594bcefa-6eb6-44ac-8314-bce3b6910b52\", \"projectId\": \"a550ef3f-de20-4901-b726-9e3965e20c43\"}"
+        "turn": 1,
+        "step": 5,
+        "callId": "call_00_oQITkVJTOuAbp64YlOr60428",
+        "name": "media_image_export_status",
+        "arguments": "{\"editorKind\": \"image\", \"exportId\": \"6fc84fc2-3c0e-4204-b949-f7cd2eaa0287\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\"}"
       },
       "fixtureOrigin": "probe:samples/tool/call"
     },
     {
       "type": "tool/result",
       "seq": 55,
-      "time": 1793864691674,
+      "time": 1793865663549,
       "data": {
-        "turn": 2,
-        "step": 3,
+        "turn": 1,
+        "step": 5,
         "message": {
           "role": "tool",
           "source": {
             "kind": "tool",
-            "callId": "call_00_HdGUr3IQwqJfHJ12fCSh8937"
+            "callId": "call_00_oQITkVJTOuAbp64YlOr60428"
           },
-          "toolCallId": "call_00_HdGUr3IQwqJfHJ12fCSh8937",
+          "toolCallId": "call_00_oQITkVJTOuAbp64YlOr60428",
           "content": [
             {
               "type": "text",
-              "text": "applied · fde-export-png-003 · R1 · exportId a0196778-e614-45bf-9e94-88a1f5dc0ba5 · artifactRef blob:http://127.0.0.1:59302/621b9acb-8983-492d-84a9-bfd42d52319d"
+              "text": "applied · 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · exportId 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · artifactRef blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
             }
           ],
           "isError": false,
-          "id": "dfdec930-7589-4fe2-9cfb-c6fe1478e4e7"
+          "id": "eaaf1dd2-9ecf-435a-aa22-506289ad60e2"
         },
         "meta": {
           "status": "applied",
           "editorKind": "image",
-          "projectId": "a550ef3f-de20-4901-b726-9e3965e20c43",
-          "stateDigest": "fnv1a64-a00c77fab4dabfd5"
+          "exportId": "6fc84fc2-3c0e-4204-b949-f7cd2eaa0287",
+          "artifactRef": "blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
         }
       },
       "sourceEventSeqs": [
@@ -275,42 +288,44 @@
     {
       "type": "tool/call",
       "seq": 60,
-      "time": 1793864693441,
+      "time": 1793865666622,
       "data": {
-        "turn": 2,
-        "step": 4,
-        "callId": "call_00_3p0zZM6tcDCOLqPxXMcw4690",
+        "turn": 1,
+        "step": 6,
+        "callId": "call_00_Pa19hfzujYO6YRY77f9s9427",
         "name": "media_image_export_status",
-        "arguments": "{\"editorKind\": \"image\", \"exportId\": \"a0196778-e614-45bf-9e94-88a1f5dc0ba5\", \"instanceId\": \"594bcefa-6eb6-44ac-8314-bce3b6910b52\", \"projectId\": \"a550ef3f-de20-4901-b726-9e3965e20c43\"}"
+        "arguments": "{\"editorKind\": \"image\", \"exportId\": \"6fc84fc2-3c0e-4204-b949-f7cd2eaa0287\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\"}"
       },
       "fixtureOrigin": "probe:samples/tool/call"
     },
     {
       "type": "tool/result",
       "seq": 61,
-      "time": 1793864693622,
+      "time": 1793865666858,
       "data": {
-        "turn": 2,
-        "step": 4,
+        "turn": 1,
+        "step": 6,
         "message": {
           "role": "tool",
           "source": {
             "kind": "tool",
-            "callId": "call_00_3p0zZM6tcDCOLqPxXMcw4690"
+            "callId": "call_00_Pa19hfzujYO6YRY77f9s9427"
           },
-          "toolCallId": "call_00_3p0zZM6tcDCOLqPxXMcw4690",
+          "toolCallId": "call_00_Pa19hfzujYO6YRY77f9s9427",
           "content": [
             {
               "type": "text",
-              "text": "applied · a0196778-e614-45bf-9e94-88a1f5dc0ba5 · exportId a0196778-e614-45bf-9e94-88a1f5dc0ba5 · artifactRef blob:http://127.0.0.1:59302/621b9acb-8983-492d-84a9-bfd42d52319d"
+              "text": "applied · 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · exportId 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · artifactRef blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
             }
           ],
           "isError": false,
-          "id": "80052e84-3b04-43b7-a7b1-d5112def73a3"
+          "id": "8061e155-e18c-44cb-88c3-6da1461fd2d4"
         },
         "meta": {
           "status": "applied",
-          "editorKind": "image"
+          "editorKind": "image",
+          "exportId": "6fc84fc2-3c0e-4204-b949-f7cd2eaa0287",
+          "artifactRef": "blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
         }
       },
       "sourceEventSeqs": [
@@ -321,10 +336,10 @@
     },
     {
       "type": "tool/call",
-      "seq": 70,
-      "time": 1793865341884,
+      "seq": 900,
+      "time": 1793865846673,
       "data": {
-        "turn": 3,
+        "turn": 9,
         "step": 1,
         "callId": "call-fixture-unknown",
         "name": "media_image_apply_command",
@@ -334,10 +349,10 @@
     },
     {
       "type": "tool/result",
-      "seq": 71,
-      "time": 1793865341885,
+      "seq": 901,
+      "time": 1793865846674,
       "data": {
-        "turn": 3,
+        "turn": 9,
         "step": 1,
         "message": {
           "role": "tool",
@@ -356,87 +371,6 @@
         }
       },
       "fixtureOrigin": "synthetic:explicit-unknown"
-    },
-    {
-      "type": "tool/call",
-      "seq": 80,
-      "time": 1793865341884,
-      "data": {
-        "turn": 4,
-        "step": 1,
-        "callId": "call-fixture-meta",
-        "name": "media_image_apply_command",
-        "arguments": "{}"
-      },
-      "fixtureOrigin": "synthetic:meta-credentials"
-    },
-    {
-      "type": "tool/result",
-      "seq": 81,
-      "time": 1793865341885,
-      "data": {
-        "turn": 4,
-        "step": 1,
-        "message": {
-          "role": "tool",
-          "toolCallId": "call-fixture-meta",
-          "isError": false,
-          "content": [
-            {
-              "type": "text",
-              "text": "applied · c-meta · R3"
-            }
-          ]
-        },
-        "meta": {
-          "status": "applied",
-          "operation": "layer.add_text",
-          "commandId": "c-meta",
-          "appliedRevision": 3,
-          "afterDigest": "fnv1a64-0000000000000003"
-        }
-      },
-      "fixtureOrigin": "synthetic:meta-credentials"
-    },
-    {
-      "type": "tool/call",
-      "seq": 90,
-      "time": 1793865341884,
-      "data": {
-        "turn": 4,
-        "step": 2,
-        "callId": "call-fixture-export",
-        "name": "media_image_export_start",
-        "arguments": "{}"
-      },
-      "fixtureOrigin": "synthetic:meta-credentials"
-    },
-    {
-      "type": "tool/result",
-      "seq": 91,
-      "time": 1793865341885,
-      "data": {
-        "turn": 4,
-        "step": 2,
-        "message": {
-          "role": "tool",
-          "toolCallId": "call-fixture-export",
-          "isError": false,
-          "content": [
-            {
-              "type": "text",
-              "text": "applied · c-export · R3 · exportId exp-meta · artifactRef blob:…"
-            }
-          ]
-        },
-        "meta": {
-          "status": "applied",
-          "exportId": "exp-meta",
-          "artifactRef": "blob:http://127.0.0.1:8819/fixture-export",
-          "format": "png"
-        }
-      },
-      "fixtureOrigin": "synthetic:meta-credentials"
     }
   ]
 }

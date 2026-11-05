@@ -620,18 +620,33 @@ test('real captured events render with meta.status and callId-linked names', asy
   const rows = reduce({ type: 'snapshot', header: { id: 's1' }, records: fixture.events.map(event => ({ event })) });
   const plan = client.chat.buildDialogPlan(rows);
   const tools = plan.filter(item => item.kind === 'tool');
-  // 前 14 条全部来自 FDE 的抓包原文（含 seq 48/49 那条 REVISION_CONFLICT）；后 4 条是 synthetic。
-  assert.deepEqual(tools.map(item => item.badge), ['pending', 'applied', 'pending', 'applied', 'pending', 'applied', 'pending', 'rejected', 'pending', 'applied', 'pending', 'applied', 'pending', 'unknown', 'pending', 'applied', 'pending', 'applied']);
-  assert.deepEqual(tools.map(item => item.card.name), ['读取工程', '读取工程', '执行编辑', '执行编辑', '读取工程', '读取工程', '执行编辑', '执行编辑', '开始导出', '开始导出', '查询导出', '查询导出', '执行编辑', '执行编辑', '执行编辑', '执行编辑', '开始导出', '开始导出']);
-  // REVISION_CONFLICT：0.2.0 抓包里 meta.errorCode 还没上线 → 显示"未执行（回执里没有错误码）"
-  assert.equal(tools[7].badge, 'rejected');
-  assert.match(tools[7].card.line, /未执行/);
-  assert.match(tools[7].card.line, /没有错误码/);
-  // 抓包原文里没有结构化凭据：前 14 条都不该出现撤销/导出按钮
-  assert.equal(tools.slice(0, 14).some(item => item.actions.length > 0), false);
-  // synthetic:meta-credentials 两条：撤销与导出各出现一次
-  assert.deepEqual(tools[15].actions.map(action => action.kind), ['fill-undo']);
-  assert.deepEqual(tools[17].actions.map(action => action.kind), ['download-export']);
+  // 前 14 条全部是 FDE 在 0.2.1 上抓的原文（meta 已带凭据）；最后 2 条是 synthetic:explicit-unknown。
+  assert.deepEqual(tools.map(item => item.badge), ['pending', 'applied', 'pending', 'applied', 'pending', 'rejected', 'pending', 'applied', 'pending', 'applied', 'pending', 'applied', 'pending', 'unknown']);
+  assert.deepEqual(tools.map(item => item.card.name), ['读取工程', '读取工程', '执行编辑', '执行编辑', '执行编辑', '执行编辑', '开始导出', '开始导出', '查询导出', '查询导出', '查询导出', '查询导出', '执行编辑', '执行编辑']);
+  // stale 写入：meta.status=rejected + meta.errorCode=REVISION_CONFLICT → 未执行 + 具体中文原因
+  assert.equal(tools[5].badge, 'rejected');
+  assert.match(tools[5].card.line, /版本已变化/);
+  assert.doesNotMatch(tools[5].card.line, /没有错误码/);
+  // 正常写入那条：meta 带 commandId/appliedRevision/afterDigest → 必须出现「填入撤销指令」
+  assert.deepEqual(tools[3].actions.map(action => action.kind), ['fill-undo']);
+  assert.equal(tools[3].actions[0].undo.commandId, 'fde-021-step2-addtext-01');
+  assert.equal(tools[3].actions[0].undo.appliedRevision, 1);
+  assert.match(tools[3].actions[0].prompt, /fde-021-step2-addtext-01/);
+  assert.match(tools[3].actions[0].prompt, /HISTORY_CONFLICT/);
+  // 导出那三条：meta 带 exportId/artifactRef → 必须出现下载动作
+  for (const index of [7, 9, 11]) {
+    assert.deepEqual(tools[index].actions.map(action => action.kind), ['download-export'], `第 ${index} 条导出应可下载`);
+    assert.equal(tools[index].actions[0].export.exportId, '6fc84fc2-3c0e-4204-b949-f7cd2eaa0287');
+    assert.match(tools[index].actions[0].export.artifactRef, /^blob:/);
+  }
+  // 其余工具行没有凭据 → 不出现按钮
+  assert.deepEqual([0, 1, 2, 4, 6, 8, 10, 12, 13].filter(index => tools[index].actions.length > 0), []);
+  // 真实 0.2.1 样本（前 12 条工具行）里 unknown 必须是 0：unknown 只能来自显式 meta.status='unknown'，
+  // 而那条只有末尾的 synthetic 显式 unknown 样例（第 14 条）。isError 在 rejected 上是 false，
+  // 因此判定只看 meta.status / meta.errorCode，不把 isError 当失败判据。
+  assert.equal(tools.slice(0, 12).filter(item => item.badge === 'unknown').length, 0);
+  assert.equal(tools.filter(item => item.badge === 'unknown').length, 1);
+  assert.equal(tools[13].badge, 'unknown');
   assertNoRawJsonInPlan(client, plan);
 });
 
@@ -654,7 +669,10 @@ test('fixture samples still match the captured probe file (source guard)', async
     assert.deepEqual(JSON.parse(JSON.stringify(event.data)), JSON.parse(JSON.stringify(source.data)), `seq ${event.seq} 与抓包原文不一致`);
     checked += 1;
   }
-  assert.ok(checked >= 8, '至少要比对到 8 条真实样本');
+  assert.ok(checked >= 14, '至少要比对到 14 条真实样本');
+  // 夹具 16 条 = 14 条 probe 原文 + 2 条 synthetic（显式 unknown 那一对）；这 16 条里只有 2 条不是原文。
+  assert.ok(fixture.events.length >= 16, '夹具事件总数应不少于 16');
+  assert.equal(fixture.events.filter(event => !String(event.fixtureOrigin || '').startsWith('probe:')).length, 2);
 });
 
 test('unknown only from explicit status; pending only from call without result; parse failure falls back', async () => {
