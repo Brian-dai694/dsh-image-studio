@@ -8,7 +8,7 @@ export async function startBrowserRelay({ transport, accessToken, baseUrl = '/ed
   let wake;
   async function post(action, data, signal = abort.signal) {
     const response = await fetchImpl(`${baseUrl}/${action}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}`, 'x-dsh-media-relay': '1' },
       body: JSON.stringify(data), signal, credentials: 'same-origin',
     });
     const value = await response.json();

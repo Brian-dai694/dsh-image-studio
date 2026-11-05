@@ -87,18 +87,39 @@ async function serveFile(res, root, name) {
   }
 }
 
-// A relay request is accepted only from the same origin that serves this page, with the
-// per-process bearer token. The iframe never sees the token; only the wrapper page does.
+const RELAY_HEADER = 'x-dsh-media-relay';
+
+/**
+ * 接力请求（relay）的同源判据，与 boot 同一思路：不依赖桌面端拿不到的 `Origin`。
+ *
+ * - `Sec-Fetch-Site` 显式为 `cross-site` / `same-site` → 拒；
+ * - 带 `Origin` 时仍要求与 `Host` 一致（普通浏览器路径）；
+ * - 缺 `Origin`（桌面 Electron 的真实形状）→ 要求自定义头 `x-dsh-media-relay: 1`：
+ *   跨源页面想带自定义头必先过 CORS 预检，本服务不响应预检 ⇒ 只有同源页能带；
+ * - 令牌仍走 `Authorization: Bearer`，页面之外的源读不到。
+ *
+ * 返回 `null` 表示放行，否则返回 `{ reason, message, observed }`，403 正文原样带出。
+ */
 function authorizeRelay(req, token) {
-  const host = req.headers.host;
-  const origin = req.headers.origin;
-  if (typeof host !== 'string' || typeof origin !== 'string') return 'Origin required';
-  let originHost;
-  try { originHost = new URL(origin).host; } catch { return 'Invalid Origin'; }
-  if (originHost !== host) return 'Cross-origin relay request rejected';
-  if (req.headers.authorization !== `Bearer ${token}`) return 'Relay authentication failed';
-  if (req.headers['content-type']?.split(';')[0] !== 'application/json') return 'JSON content type required';
-  if (req.method !== 'POST') return 'POST required';
+  const h = req?.headers || {};
+  const host = h.host;
+  const origin = h.origin;
+  const site = h['sec-fetch-site'];
+  const mode = h['sec-fetch-mode'];
+  const hasRelayHeader = h[RELAY_HEADER] === '1';
+  const observed = { origin: origin ?? null, site: site ?? null, mode: mode ?? null, hasRelayHeader };
+  if (site === 'cross-site' || site === 'same-site') return { reason: 'sec-fetch-site', message: 'Cross-site relay request rejected', observed };
+  if (typeof host !== 'string') return { reason: 'missing-host', message: 'Host required', observed };
+  if (typeof origin === 'string') {
+    let originHost;
+    try { originHost = new URL(origin).host; } catch { return { reason: 'invalid-origin', message: 'Invalid Origin', observed }; }
+    if (originHost !== host) return { reason: 'origin-mismatch', message: 'Cross-origin relay request rejected', observed };
+  } else if (!hasRelayHeader) {
+    return { reason: 'missing-relay-header', message: 'Relay header required when Origin is absent', observed };
+  }
+  if (h.authorization !== `Bearer ${token}`) return { reason: 'relay-auth-failed', message: 'Relay authentication failed', observed };
+  if (h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
+  if (req.method !== 'POST') return { reason: 'method', message: 'POST required', observed };
   return null;
 }
 
@@ -106,7 +127,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   const action = pathname.slice(prefix.length);
   if (!RELAY_ACTIONS.has(action)) { send(res, 404, { code: 'INVALID_REQUEST', message: 'Unknown relay route' }); return true; }
   const rejection = authorizeRelay(req, token);
-  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection }); return true; }
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
   try {
     const body = await readJsonBody(req);
     send(res, 200, relay[action](body));
