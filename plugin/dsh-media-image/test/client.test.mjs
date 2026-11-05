@@ -757,6 +757,149 @@ test('locate 只从 meta 的 changedObjectIds + objectKind 来；缺一项就整
   }
 });
 
+test('工程授权四态：未授权 / 待激活（票据）/ 已授权 / 已过期', async () => {
+  const client = await loadClient();
+  const now = 1_800_000_000_000;
+  const binding = { sessionId: 's-1', projectId: 'p-1', editorInstanceId: 'i-1' };
+  // 什么都没签
+  assert.equal(client.chat.fromBindingStatus({ ok: true, ticket: null, grant: null }, binding, now).authorized, false);
+  assert.equal(client.chat.authorizationState(null, now).code, 'unauthorized');
+  // 只有票据：还没被会话消费 → 「待激活」，不能显示成已授权（契约 §3：票据 ≠ 授权）
+  const pending = client.chat.fromBindingStatus({ ok: true, ticket: { ticketId: 't1', projectId: 'p-1', expiresAt: now + 300_000 }, grant: null }, binding, now);
+  assert.equal(pending.pending, true);
+  assert.equal(pending.authorized, false);
+  assert.equal(client.chat.authorizationState(pending, now).label, '待激活');
+  // 会话消费后才有 grant
+  const granted = client.chat.fromBindingStatus({ ok: true, ticket: null, grant: { source: 'panel', projectId: 'p-1', grantedAt: now - 1_000, expiresAt: now + 3_600_000 } }, binding, now);
+  assert.equal(granted.authorized, true);
+  assert.equal(granted.source, 'panel');
+  assert.equal(granted.editorInstanceId, 'i-1');
+  assert.equal(client.chat.authorizationState(granted, now).code, 'authorized');
+  // 过期：grant 到期时刻本身即失效；只有过期票据也归过期
+  assert.equal(client.chat.authorizationState({ ...granted, expiresAt: now }, now).code, 'expired');
+  const staleTicket = client.chat.fromBindingStatus({ ok: true, ticket: { ticketId: 't1', expiresAt: now - 1 }, grant: null }, binding, now);
+  assert.equal(client.chat.authorizationState(staleTicket, now).code, 'expired');
+});
+
+test('授权摘要写清范围、来源与有效期；票据阶段不说"已授权"', async () => {
+  const client = await loadClient();
+  const now = 1_800_000_000_000;
+  const granted = { authorized: true, source: 'panel', projectId: '6b41471f-3ba2-4958', editorInstanceId: 'c9f97101-db91-4c73', grantedAt: now - 60_000, expiresAt: now + 222_000 };
+  const summary = client.chat.authorizationSummary(granted, now);
+  assert.match(summary, /范围：本会话 × 工程 6b41471f…/);
+  assert.match(summary, /实例 c9f97101…/);
+  assert.match(summary, /来源：面板授权/);
+  assert.match(summary, /还剩 3:42/);
+  const pending = client.chat.authorizationSummary({ authorized: false, pending: true, ticketId: 'tkt-abcdef123456', ticketExpiresAt: now + 90_000 }, now);
+  assert.match(pending, /已签发票据 tkt-abcd…/);
+  assert.match(pending, /还剩 1:30/);
+  assert.doesNotMatch(pending, /已授权/);
+  assert.match(client.chat.authorizationSummary({ authorized: true, source: 'native' }, now), /来源：原生审批/);
+  assert.match(client.chat.authorizationSummary({ authorized: true }, now), /有效期：未提供/);
+  assert.match(client.chat.authorizationSummary({ authorized: true, expiresAt: now - 90_000 }, now), /有效期已于/);
+  assert.match(client.chat.authorizationSummary(null, now), /还没有读写这个工程的授权/);
+});
+
+test('面板授权按 Host 真实线协议：先取页面令牌，再带 Bearer + 同源头签票据', async () => {
+  const client = await loadClient();
+  const binding = { sessionId: 's-1', projectId: 'p-1', editorInstanceId: 'i-1' };
+  const calls = [];
+  const stub = async (url, init) => {
+    calls.push({ url, init });
+    if (url === client.chat.AUTH.boot) return { ok: true, status: 200, json: async () => ({ accessToken: 'page-token-1' }) };
+    return { ok: true, status: 200, json: async () => ({ ok: true, ticket: { ticketId: 'tkt-1', sessionId: 's-1', projectId: 'p-1', instanceId: 'i-1', expiresAt: 1_800_000_300_000, ttlMs: 300000 } }) };
+  };
+  const record = await client.chat.requestAuthorization(binding, stub);
+  assert.equal(calls[0].url, '/media-image/boot');
+  assert.equal(calls[0].init.headers['x-dsh-media-boot'], '1');
+  assert.equal(calls[1].url, '/media-image/bind');
+  assert.equal(calls[1].init.method, 'POST');
+  assert.equal(calls[1].init.headers.authorization, 'Bearer page-token-1');
+  assert.equal(calls[1].init.headers['x-dsh-media-relay'], '1');
+  assert.equal(calls[1].init.headers['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(calls[1].init.body), { sessionId: 's-1', instanceId: 'i-1' });
+  // 签出来的是票据，不是授权
+  assert.equal(record.authorized, false);
+  assert.equal(record.pending, true);
+  assert.equal(record.ticketId, 'tkt-1');
+  assert.equal(record.ticketExpiresAt, 1_800_000_300_000);
+  // 页面令牌缓存：第二次不会再取 boot
+  await client.chat.requestAuthorization(binding, stub);
+  assert.equal(calls.filter(call => call.url === '/media-image/boot').length, 1);
+
+  // 身份缺一项：一个字节都不发（连 boot 都不取）
+  const fresh = await loadClient();
+  const noCall = async () => { throw new Error('不应发起请求'); };
+  await assert.rejects(() => fresh.chat.requestAuthorization({ sessionId: 's-1' }, noCall), /无法授权：instanceId/);
+  // Host 明确拒绝：稳定错误码 → 中文，不重试
+  const denied = async (url) => url.endsWith('/boot')
+    ? { ok: true, status: 200, json: async () => ({ accessToken: 't' }) }
+    : { ok: false, status: 403, json: async () => ({ code: 'BIND_UNAVAILABLE', message: 'nope' }) };
+  await assert.rejects(() => fresh.chat.requestAuthorization(binding, denied), /没有面板授权能力/);
+  // 200 但没有票据：不能当成功
+  const empty = async (url) => url.endsWith('/boot')
+    ? { ok: true, status: 200, json: async () => ({ accessToken: 't' }) }
+    : { ok: true, status: 200, json: async () => ({ ok: true }) };
+  await assert.rejects(() => fresh.chat.requestAuthorization(binding, empty), /没有返回票据/);
+});
+
+test('授权状态读取与解绑走真实路由；解绑失败不谎报已解绑', async () => {
+  const client = await loadClient();
+  const binding = { sessionId: 's-1', projectId: 'p-1', editorInstanceId: 'i-1' };
+  const calls = [];
+  const stub = async (url, init) => {
+    calls.push({ url, init });
+    if (url === client.chat.AUTH.boot) return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    if (url.startsWith(client.chat.AUTH.status)) return { ok: true, status: 200, json: async () => ({ ok: true, ticket: null, grant: { source: 'panel', projectId: 'p-1', grantedAt: 1_799_999_999_000, expiresAt: 1_800_003_600_000 } }) };
+    return { ok: true, status: 200, json: async () => ({ ok: true, revoked: true }) };
+  };
+  const status = await client.chat.readAuthorizationStatus(binding, stub);
+  assert.equal(status.authorized, true);
+  assert.equal(status.source, 'panel');
+  // 页面令牌可能已被同进程内的模块缓存复用，所以按 URL 找调用，不假设固定下标。
+  const statusCall = calls.find(call => call.url.startsWith(client.chat.AUTH.status));
+  assert.ok(statusCall, '必须请求 bind-status');
+  assert.equal(statusCall.url, '/media-image/bind-status?sessionId=s-1');
+  assert.equal(statusCall.init.method, 'GET');
+  assert.equal(statusCall.init.body, undefined, 'GET 不带 body');
+
+  const sent = [];
+  const revokeStub = async (url, init) => {
+    sent.push({ url, init });
+    if (url === client.chat.AUTH.boot) return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    return { ok: true, status: 200, json: async () => ({ ok: true, revoked: true }) };
+  };
+  assert.deepEqual(await client.chat.releaseAuthorization(binding, revokeStub), { authorized: false });
+  const revokeCall = sent.find(call => call.url === client.chat.AUTH.bind);
+  assert.ok(revokeCall, '解绑必须 POST /bind');
+  assert.deepEqual(JSON.parse(revokeCall.init.body), { action: 'revoke', sessionId: 's-1' });
+  const broken = async (url) => url.endsWith('/boot')
+    ? { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) }
+    : { ok: false, status: 500, json: async () => null };
+  await assert.rejects(() => client.chat.releaseAuthorization(binding, broken), /解绑失败/);
+  // 旧 Host 没有面板授权接口
+  const missing = async (url) => url.endsWith('/boot')
+    ? { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) }
+    : { ok: false, status: 404, json: async () => null };
+  assert.equal((await client.chat.readAuthorizationStatus(binding, missing)).unsupported, true);
+});
+
+test('授权不会被自动触发：只在用户点击路径里签发', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve: resolvePath, dirname: dirOf } = await import('node:path');
+  const { fileURLToPath: fileOf } = await import('node:url');
+  const source = readFileSync(resolvePath(dirOf(fileOf(import.meta.url)), '../lib/client.js'), 'utf8');
+  // 定义 1 处 + authorize() 里 1 处（canRequestAuthorization 不算请求）
+  assert.equal((source.match(/\brequestAuthorization\(/g) || []).length, 2);
+  assert.match(source, /onClick: function \(\) \{ void authorize\(\) \}/, '确认授权必须是用户点击');
+  assert.match(source, /onClick: function \(\) \{ setAuthConfirm\(true\) \}/, '首次点击只展开确认卡片，不直接签发');
+  // 副作用里不得出现签发调用：逐个 useEffect 看开头 600 字符（订阅/清理都在这个窗口里）
+  for (const match of source.matchAll(/React\.useEffect\(/g)) {
+    const body = source.slice(match.index, match.index + 600);
+    assert.equal(/requestAuthorization\(|authorize\(\)/.test(body), false, 'useEffect 里不能触发授权');
+  }
+});
+
 test('a missing slots service degrades instead of throwing', async () => {
   const client = await loadClient();
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));

@@ -469,6 +469,220 @@ window.__ModuleLoader__.load({
       INVALID_REQUEST: '参数不符合编辑器要求',
       HUMAN_CONFIRMATION_REQUIRED: '这一步是破坏性操作，需要你单独确认',
     }
+
+    // ---------- 工程授权（panel 通道）----------
+    // 事实链：工具都注册了，但编辑器没有"已授权实例"时 gate 回 EDITOR_NOT_READY / APPROVAL_DENIED；
+    // 桌面端 approval=never 把原生审批这条路堵死，模型读不到画布就只能靠自己猜。所以面板需要一条
+    // **本人点击**的授权通道：Host 签发一次性票据（5 分钟，绑定 会话×工程×实例），gate 校验后写审计。
+    // 铁律（契约）：不得静默授权、Agent 不得代点、票据不可重放、解绑同样要本人点。
+    //
+    // 线协议按 Host 的实现（docs/project-grant-v1.md 的落地版）：
+    //   POST /media-image/bind        {sessionId, instanceId}          → {ok, ticket:{ticketId,projectId,expiresAt,ttlMs}}
+    //   POST /media-image/bind        {action:'revoke', sessionId}     → {ok, revoked:true}
+    //   GET  /media-image/bind-status ?sessionId=…                     → {ok, ticket|null, grant:null|{source,projectId,grantedAt,expiresAt}}
+    // 鉴权：同源 + `authorization: Bearer <pageToken>`；桌面端没有 Origin，还要带 `x-dsh-media-relay: 1`。
+    // pageToken 从 /media-image/boot 取（同源页面才拿得到）。
+    var AUTH = {
+      boot: '/media-image/boot',
+      bind: '/media-image/bind',
+      status: '/media-image/bind-status',
+      bootHeader: 'x-dsh-media-boot',
+      relayHeader: 'x-dsh-media-relay',
+      ttlMs: 5 * 60 * 1000,
+    }
+    var AUTH_SOURCES = { native: '原生审批', panel: '面板授权' }
+    var pageTokenCache = null
+
+    /** 页面令牌：同源页面才拿得到；缓存到本页面生命周期，401/403 时清空重取。 */
+    async function readPageToken(fetchImpl) {
+      if (pageTokenCache) return pageTokenCache
+      var call = fetchImpl || (typeof fetch === 'function' ? fetch : null)
+      if (!call) throw Object.assign(new Error('当前环境没有同源请求能力，无法授权'), { code: 'AUTH_UNAVAILABLE' })
+      var headers = {}
+      headers[AUTH.bootHeader] = '1'
+      var response = await call(AUTH.boot, { credentials: 'same-origin', headers: headers })
+      if (!response.ok) throw Object.assign(new Error('无法取得页面令牌（HTTP ' + response.status + '）'), { code: 'AUTH_UNAVAILABLE' })
+      var body = await response.json().catch(function () { return null })
+      if (!body || typeof body.accessToken !== 'string' || !body.accessToken) throw Object.assign(new Error('页面令牌格式不对'), { code: 'AUTH_UNAVAILABLE' })
+      pageTokenCache = body.accessToken
+      return pageTokenCache
+    }
+
+    /** 带页面令牌的同源请求：GET 不带 body；401/403 视为令牌失效，下次重取。 */
+    async function authorizationCall(path, options, fetchImpl) {
+      var call = fetchImpl || (typeof fetch === 'function' ? fetch : null)
+      if (!call) throw Object.assign(new Error('当前环境没有同源请求能力，无法授权'), { code: 'AUTH_UNAVAILABLE' })
+      var token = await readPageToken(fetchImpl)
+      var method = (options && options.method) || 'POST'
+      var headers = { authorization: 'Bearer ' + token }
+      headers[AUTH.relayHeader] = '1'
+      var init = { method: method, credentials: 'same-origin', headers: headers }
+      if (method !== 'GET') {
+        headers['content-type'] = 'application/json'
+        init.body = JSON.stringify((options && options.body) || {})
+      }
+      var response = await call(path, init)
+      var body = null
+      try { body = await response.json() } catch (_) { body = null }
+      if (response.status === 401 || response.status === 403) pageTokenCache = null
+      return { response: response, body: body }
+    }
+
+
+    /** 授权三态：未授权 / 已授权 / 已过期。票据已签发但还没被会话消费时，如实显示「待激活」。 */
+    function authorizationState(record, now) {
+      var at = Number.isFinite(now) ? now : Date.now()
+      if (!record || typeof record !== 'object') return { code: 'unauthorized', label: '未授权' }
+      if (record.authorized === true) {
+        if (Number.isFinite(record.expiresAt) && record.expiresAt <= at) return { code: 'expired', label: '已过期' }
+        return { code: 'authorized', label: '已授权' }
+      }
+      if (record.pending === true) return { code: 'unauthorized', label: '待激活', pending: true }
+      if (record.expired === true) return { code: 'expired', label: '已过期' }
+      return { code: 'unauthorized', label: '未授权' }
+    }
+    function shortRef(value) {
+      var text = typeof value === 'string' ? value : ''
+      return text.length > 10 ? text.slice(0, 8) + '…' : (text || '—')
+    }
+    function remainingText(ms) {
+      var total = Math.max(0, Math.floor(ms / 1000))
+      return Math.floor(total / 60) + ':' + (total % 60 < 10 ? '0' : '') + (total % 60)
+    }
+    function clockText(stamp) {
+      var date = new Date(stamp)
+      return (date.getHours() < 10 ? '0' : '') + date.getHours() + ':' + (date.getMinutes() < 10 ? '0' : '') + date.getMinutes()
+    }
+    /** 授权范围与有效期：写清"授了什么、到什么时候、是不是已经激活"；缺的字段标"未提供"。 */
+    function authorizationSummary(record, now) {
+      var at = Number.isFinite(now) ? now : Date.now()
+      var state = authorizationState(record, at)
+      if (state.code === 'unauthorized' && !state.pending) {
+        return '当前会话还没有读写这个工程的授权；此时模型调用会回「未授权」，编辑器不会被改动。'
+      }
+      // 票据 ≠ 授权：票据要等会话里第一次 read_state 才算激活（契约 §3）。
+      if (state.pending) {
+        var left = (record.ticketExpiresAt || 0) - at
+        return '已签发票据 ' + shortRef(record.ticketId) + '，等待会话里第一次「读取工程」激活'
+          + (Number.isFinite(record.ticketExpiresAt) ? '（' + (left > 0 ? '还剩 ' + remainingText(left) : '已过期') + '）' : '')
+          + '；票据一次性，重复使用会被拒。'
+      }
+      var parts = ['范围：本会话 × 工程 ' + shortRef(record.projectId)]
+      if (record.editorInstanceId) parts.push('实例 ' + shortRef(record.editorInstanceId))
+      parts.push('来源：' + (AUTH_SOURCES[record.source] || '未提供'))
+      if (Number.isFinite(record.expiresAt)) {
+        var remain = record.expiresAt - at
+        parts.push(remain > 0
+          ? '有效期至 ' + clockText(record.expiresAt) + '（还剩 ' + remainingText(remain) + '）'
+          : '有效期已于 ' + clockText(record.expiresAt) + ' 结束')
+      } else parts.push('有效期：未提供')
+      if (record.grantedAt && Number.isFinite(record.grantedAt)) parts.push('授权于 ' + clockText(record.grantedAt))
+      return parts.join(' · ')
+    }
+    /** 授权请求体：会话与编辑器实例两项缺一不发（工程由 Host 从页面实时读，不信调用方）。 */
+    function authorizationRequest(binding) {
+      if (!binding || typeof binding !== 'object') throw Object.assign(new Error('还没有绑定会话，无法授权'), { code: 'AUTH_NO_BINDING' })
+      var fields = { sessionId: binding.sessionId, instanceId: binding.editorInstanceId }
+      for (var key in fields) {
+        if (typeof fields[key] !== 'string' || !fields[key]) {
+          throw Object.assign(new Error('会话或编辑器实例缺失，无法授权：' + key), { code: 'AUTH_NO_BINDING' })
+        }
+      }
+      return fields
+    }
+    /**
+     * bind-status 回执 → 本地记录。
+     * grant 存在即已授权；只有 ticket 时是「票据已签发、还没被会话消费」；两者都过期就标 expired。
+     * 只取白名单字段：令牌、票据密文都不落到面板状态里。
+     */
+    function fromBindingStatus(body, binding, now) {
+      var at = Number.isFinite(now) ? now : Date.now()
+      var grant = body && body.grant
+      if (grant && typeof grant === 'object' && (!Number.isFinite(grant.expiresAt) || grant.expiresAt > at)) {
+        return {
+          authorized: true,
+          ...(grant.source === 'native' || grant.source === 'panel' ? { source: grant.source } : {}),
+          ...(typeof grant.projectId === 'string' ? { projectId: grant.projectId } : {}),
+          ...(Number.isFinite(grant.grantedAt) ? { grantedAt: grant.grantedAt } : {}),
+          ...(Number.isFinite(grant.expiresAt) ? { expiresAt: grant.expiresAt } : {}),
+          ...(binding && binding.editorInstanceId ? { editorInstanceId: binding.editorInstanceId } : {}),
+        }
+      }
+      var ticket = body && body.ticket
+      if (ticket && typeof ticket === 'object' && Number.isFinite(ticket.expiresAt) && ticket.expiresAt > at) {
+        return {
+          authorized: false, pending: true,
+          ...(typeof ticket.ticketId === 'string' ? { ticketId: ticket.ticketId } : {}),
+          ...(typeof ticket.projectId === 'string' ? { projectId: ticket.projectId } : {}),
+          ticketExpiresAt: ticket.expiresAt,
+          ...(binding && binding.editorInstanceId ? { editorInstanceId: binding.editorInstanceId } : {}),
+        }
+      }
+      if (grant || ticket) return { authorized: false, expired: true, ...(grant && Number.isFinite(grant.expiresAt) ? { expiresAt: grant.expiresAt } : {}) }
+      return { authorized: false }
+    }
+    /** 失败原因：优先用 Host 的稳定错误码，其次才是 HTTP 状态；都要说清"没有签发票据"。 */
+    function authorizationFailure(body, status) {
+      var code = (body && (body.errorCode || body.code)) || ''
+      var text = (body && (body.message || body.error)) || ''
+      if (code === 'APPROVAL_REJECTED' || code === 'APPROVAL_DENIED') return '授权被拒绝；本次没有签发票据。'
+      if (code === 'APPROVAL_UNAVAILABLE' || code === 'SESSION_APPROVAL_UNAVAILABLE') return '当前策略禁用了原生审批；请用面板授权这条通道。'
+      if (code === 'BIND_UNAVAILABLE') return '这个 Host 版本没有面板授权能力；请改用原生审批。'
+      if (code === 'EDITOR_NOT_READY') return text || '编辑器页面还没连上，先打开编辑器再授权。'
+      if (code === 'SCOPE_MISMATCH' || code === 'SESSION_BINDING_STALE') return '授权范围与当前会话/工程/实例不一致，已拒绝；请重新授权。'
+      if (status === 401 || status === 403) return '同源校验或页面令牌失败（HTTP ' + status + '）；请刷新页面后重试。'
+      if (status === 404) return 'Host 还没有提供面板授权接口（版本较旧）；请改用原生审批。'
+      return text || ('授权失败（HTTP ' + status + '），本次没有签发票据。')
+    }
+    /**
+     * 面板授权：**只能由用户点击触发**。签发的是**一次性票据**，不是授权本身——
+     * 会话里第一次 read_state 才会把它换成 grant；这里不做自动重试、不做静默降级。
+     */
+    async function requestAuthorization(binding, fetchImpl) {
+      var identity = authorizationRequest(binding)
+      var result = await authorizationCall(AUTH.bind, {
+        method: 'POST',
+        body: { sessionId: identity.sessionId, instanceId: identity.instanceId },
+      }, fetchImpl)
+      if (!result.response.ok || !result.body || result.body.ok === false) {
+        throw Object.assign(new Error(authorizationFailure(result.body, result.response.status)), { code: 'AUTH_FAILED' })
+      }
+      var ticket = result.body.ticket
+      if (!ticket || typeof ticket.ticketId !== 'string') {
+        throw Object.assign(new Error('Host 没有返回票据，请核对审计记录'), { code: 'AUTH_FAILED' })
+      }
+      return {
+        authorized: false, pending: true, ticketId: ticket.ticketId,
+        ...(typeof ticket.projectId === 'string' ? { projectId: ticket.projectId } : {}),
+        ...(Number.isFinite(ticket.expiresAt) ? { ticketExpiresAt: ticket.expiresAt } : {}),
+        editorInstanceId: identity.instanceId,
+      }
+    }
+    async function releaseAuthorization(binding, fetchImpl) {
+      var identity = authorizationRequest(binding)
+      var result = await authorizationCall(AUTH.bind, {
+        method: 'POST',
+        body: { action: 'revoke', sessionId: identity.sessionId },
+      }, fetchImpl)
+      if (!result.response.ok || (result.body && result.body.ok === false)) {
+        throw Object.assign(new Error((result.body && result.body.message) || ('解绑失败（HTTP ' + result.response.status + '）；授权可能仍然有效')), { code: 'AUTH_FAILED' })
+      }
+      return { authorized: false }
+    }
+    /** 读一次授权状态：接口缺失（404）就标 unsupported，UI 会提示走原生审批。 */
+    async function readAuthorizationStatus(binding, fetchImpl) {
+      var identity = authorizationRequest(binding)
+      var result = await authorizationCall(AUTH.status + '?sessionId=' + encodeURIComponent(identity.sessionId), { method: 'GET' }, fetchImpl)
+      if (result.response.status === 404) return { authorized: false, unsupported: true }
+      if (!result.response.ok || !result.body) return { authorized: false }
+      return fromBindingStatus(result.body, binding)
+    }
+    /** 面板授权按钮可用性：三项身份齐全，且当前不是"已授权"（已授权时按钮变成解绑）。 */
+    function canRequestAuthorization(binding, record, now) {
+      try { authorizationRequest(binding) } catch (_) { return false }
+      return authorizationState(record, now).code !== 'authorized'
+    }
+
     /**
      * 把工具回执压成一张可读卡片：工具中文名、状态、修订号、一行说明。
      * 聊天面板只显示这些结构化字段，绝不把 canonical JSON 原样铺给用户。
@@ -969,6 +1183,19 @@ window.__ModuleLoader__.load({
       var attachNoticeState = React.useState('')
       var attachNotice = attachNoticeState[0]
       var setAttachNotice = attachNoticeState[1]
+      // 工程授权：三态显示（未授权/已授权/已过期）；确认卡片与解绑都必须由本人点。
+      var authState = React.useState(null)
+      var auth = authState[0]
+      var setAuth = authState[1]
+      var authBusyState = React.useState(false)
+      var authBusy = authBusyState[0]
+      var setAuthBusy = authBusyState[1]
+      var authConfirmState = React.useState(false)
+      var authConfirm = authConfirmState[0]
+      var setAuthConfirm = authConfirmState[1]
+      var authErrorState = React.useState('')
+      var authError = authErrorState[0]
+      var setAuthError = authErrorState[1]
 
       /** 绑定/切换会话时把输入区状态清干净：附件、附图提示、失败重试游标。 */
       function resetComposer() {
@@ -996,6 +1223,8 @@ window.__ModuleLoader__.load({
           if (!aliveRef.current) return
           b.sessionId = sessionId
           bindingRef.current = b
+          setAuth(null); setAuthConfirm(false); setAuthError('')
+          void refreshAuthorization(b)
           var reduce = makeTranscript()
           transcriptRef.current = reduce
           if (!activeRef.current) { setStatus('会话已绑定，返回编辑器后恢复订阅；工程尚待授权'); return }
@@ -1049,6 +1278,43 @@ window.__ModuleLoader__.load({
           setChoices({ matched: [], others: [], error: error.message })
           setStatus(error.message)
         } finally { if (aliveRef.current) setBusy(false); sendingRef.current = false }
+      }
+
+      /**
+       * 读一次授权状态。接口不存在（Host 版本旧）就标 unsupported 并提示走原生审批——
+       * 不把"读不到"伪装成"未授权"，也不假装已授权。
+       */
+      async function refreshAuthorization(target) {
+        var b = target || bindingRef.current
+        if (!b) { setAuth(null); return }
+        try { authorizationRequest(b) } catch (_) { setAuth(null); return }
+        try { setAuth(await readAuthorizationStatus(b)) } catch (_) { setAuth({ authorized: false }) }
+      }
+
+      /** 确认卡片点「确认授权」之后才发：这是唯一会签发授权的地方。 */
+      async function authorize() {
+        var b = bindingRef.current
+        if (!b || authBusy) return
+        setAuthBusy(true); setAuthError('')
+        try {
+          setAuth(await requestAuthorization(b))
+          setAuthConfirm(false)
+          setStatus('已签发票据：在会话里让它读取工程（read_state）即可激活；票据一次性，5 分钟内有效')
+        } catch (error) { setAuthError(error.message) }
+        finally { if (aliveRef.current) setAuthBusy(false) }
+      }
+
+      /** 解绑同样要本人点；失败时明确说"授权可能仍然有效"，不假装已解绑。 */
+      async function unbindAuthorization() {
+        var b = bindingRef.current
+        if (!b || authBusy) return
+        setAuthBusy(true); setAuthError('')
+        try {
+          var released = await releaseAuthorization(b)
+          setAuth(released); setAuthConfirm(false)
+          setStatus('已解绑：本会话不再能读写这个工程')
+        } catch (error) { setAuthError(error.message) }
+        finally { if (aliveRef.current) setAuthBusy(false) }
       }
 
       React.useEffect(function () {
@@ -1272,6 +1538,22 @@ window.__ModuleLoader__.load({
         }, tone.label)
       }
 
+      /** 授权状态胶囊：三态、两套色（accent 蓝 / 灰 + 过期用现有 warn 橙），不新增第四种色。 */
+      function authorizationPill() {
+        var React = require('react')
+        var state = authorizationState(auth, Date.now())
+        var tones = {
+          authorized: { color: '#0071e3', background: 'rgba(0,113,227,.10)' },
+          expired: { color: '#b25000', background: 'rgba(255,149,0,.14)' },
+          unauthorized: { color: '#6e6e73', background: '#e8e8ed' },
+        }
+        var tone = tones[state.code] || tones.unauthorized
+        return React.createElement('span', {
+          role: 'status', 'data-authorization-state': state.code,
+          style: { fontSize: 11, fontWeight: 500, color: tone.color, background: tone.background, borderRadius: 999, padding: '2px 8px' },
+        }, state.label)
+      }
+
       function renderActions(item) {
         var React = require('react')
         // 只用计划里的动作数据：不回查原始行（隐式耦合是架构师明确禁止的）。
@@ -1400,6 +1682,7 @@ window.__ModuleLoader__.load({
             btn({ label: busy ? '发送中…' : '发送', variant: 'primary', disabled: !ready || busy, onClick: function () { void submit() } })))
       }
 
+      var authView = authorizationState(auth, Date.now())
       return React.createElement('aside', {
         style: {
           width: props.narrow ? '100%' : (props.width || 340), flex: props.narrow ? '0 0 auto' : '0 0 ' + (props.width || 340) + 'px',
@@ -1427,7 +1710,7 @@ window.__ModuleLoader__.load({
       React.createElement('div', {
         style: { padding: '8px 16px', fontSize: 12, color: '#6e6e73' }, role: 'status',
       },
-        '工程首次授权须本人在原生会话确认。切回编辑器会保留工程；策略禁止时保持未授权。',
+        '工程授权：原生审批可用时优先走它；被策略禁用（如桌面端 approval=never）时用下面的面板授权——只有你本人点击才会签发，Agent 不能代点。切回编辑器会保留工程。',
         React.createElement('button', {
           type: 'button', className: 'dsh-media-btn', disabled: !bindingRef.current || !props.getWorkspace?.(),
           title: bindingRef.current && !props.getWorkspace?.() ? '宿主未提供原生会话导航' : '',
@@ -1437,6 +1720,35 @@ window.__ModuleLoader__.load({
           },
           style: { display: 'block', marginTop: 6 },
         }, '打开原生会话 / 审批')),
+      // 工程授权卡片：范围（会话×工程×实例）、来源、有效期、三态；确认卡片与解绑都由本人点。
+      React.createElement('div', {
+        role: 'region', 'aria-label': '工程授权',
+        'data-authorization': authView.code,
+        style: { margin: '0 16px 10px', padding: '10px 12px', borderRadius: 14, background: '#f5f5f7' },
+      },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          React.createElement('strong', { style: { fontSize: 12.5, fontWeight: 600, color: '#1d1d1f' } }, '工程授权'),
+          authorizationPill()),
+        React.createElement('div', { style: { marginTop: 4, fontSize: 11.5, lineHeight: 1.55, color: '#6e6e73' } },
+          authorizationSummary(auth, Date.now())),
+        auth && auth.unsupported ? React.createElement('div', { role: 'note', style: { marginTop: 4, fontSize: 11, lineHeight: 1.5, color: '#b25000' } },
+          'Host 还没有提供面板授权接口（当前版本较旧），请点上面的「打开原生会话 / 审批」。') : null,
+        authError ? React.createElement('div', { role: 'alert', style: { marginTop: 6, fontSize: 11.5, color: '#ff3b30' } }, authError) : null,
+        React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          authView.code === 'authorized' || authView.pending
+            ? btn({ label: authBusy ? '解绑中…' : (authView.pending ? '撤销票据' : '解绑工程授权'), disabled: authBusy, title: '解绑后本会话立即失去读写权限，模型调用会回「未授权」', onClick: function () { void unbindAuthorization() } })
+            : authConfirm
+              ? [btn({ key: 'confirm', label: authBusy ? '授权中…' : '确认授权（本人点击）', variant: 'primary', disabled: authBusy || !bindingRef.current, onClick: function () { void authorize() } }),
+                 btn({ key: 'cancel', label: '取消', disabled: authBusy, onClick: function () { setAuthConfirm(false) } })]
+              : btn({ label: authView.code === 'expired' ? '重新授权' : '授权此会话读写本工程', variant: 'primary', disabled: authBusy || !bindingRef.current, title: '只授给当前会话 × 这个工程 × 这个编辑器实例；Agent 不能代点', onClick: function () { setAuthConfirm(true) } }),
+          // 会话消费票据后 grant 才出现：面板不轮询（不猜状态），给一个手动刷新入口。
+          btn({ label: '刷新授权状态', disabled: authBusy || !bindingRef.current, title: '会话里执行过 read_state 之后点一下，读取最新授权', onClick: function () { void refreshAuthorization() } })),
+        authConfirm && authView.code !== 'authorized'
+          ? React.createElement('div', { role: 'note', style: { marginTop: 6, fontSize: 11, lineHeight: 1.5, color: '#6e6e73' } },
+            '将签发票据：会话 ' + shortRef(bindingRef.current?.sessionId) + ' · 实例 ' + shortRef(bindingRef.current?.editorInstanceId) + '。票据 5 分钟内一次性有效；会话第一次读取工程时激活为授权（页面关闭或换工程即失效）。')
+          : null,
+        React.createElement('div', { style: { marginTop: 6, fontSize: 10.5, lineHeight: 1.5, color: '#86868b' } },
+          '授权只由你本人点击产生；Host 会记下谁、何时、哪个工程、到什么时候。票据不可重放。')),
       React.createElement('div', { ref: listRef, style: { flex: 1, overflow: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 } },
         busy && plan.length === 0 ? skeletonRows() : null,
         !busy && plan.length === 0 ? emptyState() : null,
@@ -1744,6 +2056,12 @@ window.__ModuleLoader__.load({
       highlightRequest: highlightRequest, suggestionsFor: suggestionsFor, suggestionTable: SUGGESTION_TABLE.slice(),
       // 定位：投影层映射（meta → row.locate）与计划 → DOM 属性。
       locateFromFacts: locateFromFacts, locateAttributes: locateAttributes,
+      // 工程授权：三态、范围/有效期文案、bind-status 解析、面板签发与解绑（纯函数可单独测）。
+      authorizationState: authorizationState, authorizationSummary: authorizationSummary,
+      authorizationRequest: authorizationRequest, fromBindingStatus: fromBindingStatus,
+      readAuthorizationStatus: readAuthorizationStatus,
+      requestAuthorization: requestAuthorization, releaseAuthorization: releaseAuthorization,
+      canRequestAuthorization: canRequestAuthorization, AUTH: AUTH,
       projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
     return module.exports
   },
