@@ -25,7 +25,7 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
 const fieldsOnly = (payload, fields) => {
   const unknown = Object.keys(payload).find(key => !fields.includes(key));
   if (unknown) throw new MediaBridgeError('INVALID_REQUEST', `Unsupported payload field: ${unknown}. Read the operation parameter contract.`);
@@ -35,7 +35,7 @@ export const ALLOWED_COMMANDS = { image: IMAGE_COMMANDS };
 
 // 图片命令校验：白名单 + 逐字段类型/范围检查，必须在发给编辑器之前拒绝。
 // 重点边界：canvas 尺寸 1..16384 像素、crop 的 x/y 非负、transform 必须平铺字段、
-// 带守卫的撤销必须同时给 targetCommandId 与 afterDigest。
+// 带守卫的撤销必须同时给 targetCommandId 与 afterDigest、像素框/羽化/调色的取值域。
 function validateImageCommand(command) {
   const p = command.payload;
   if (!IMAGE_COMMANDS.has(command.type)) throw new MediaBridgeError('UNSUPPORTED_COMMAND', 'Command is not in the image allowlist.');
@@ -46,6 +46,10 @@ function validateImageCommand(command) {
     'layer.add_text': ['text', 'x', 'y', 'style'], 'layer.update_text': ['layerId', 'text'],
     'layer.set_transform': ['layerId', 'x', 'y', 'scaleX', 'scaleY', 'rotationDeg'],
     'layer.set_visibility': ['layerId', 'visible'], 'layer.reorder': ['layerId', 'toIndex'],
+    'layer.add_image': ['sourceRef', 'x', 'y', 'width', 'height', 'fit', 'name'],
+    'layer.set_frame': ['layerId', 'x', 'y', 'width', 'height', 'fit', 'anchor'],
+    'layer.feather': ['layerId', 'radiusPx'],
+    'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
   };
   fieldsOnly(p, fields[command.type]);
   if (command.type === 'history.undo' && (p.targetCommandId !== undefined || p.afterDigest !== undefined)) {
@@ -88,6 +92,81 @@ function validateImageCommand(command) {
     opaqueId(p.layerId, 'layerId');
     if (!Number.isSafeInteger(p.toIndex) || p.toIndex < 0) throw new MediaBridgeError('INVALID_REQUEST', 'toIndex must be a non-negative integer.');
   }
+  // 像素框统一规则：宽高成对出现且在 1..16384；坐标是可正可负的整数（允许出血放置）。
+  const pixelSize = (key) => {
+    if (!Number.isSafeInteger(p[key]) || p[key] < 1 || p[key] > 16384) throw new MediaBridgeError('INVALID_REQUEST', `${key} must be an integer between 1 and 16384 pixels.`);
+  };
+  const pixelPos = (key) => {
+    if (!Number.isSafeInteger(p[key]) || p[key] < -16384 || p[key] > 16384) throw new MediaBridgeError('INVALID_REQUEST', `${key} must be an integer between -16384 and 16384 pixels.`);
+  };
+  const FRAME_FITS = ['stretch', 'contain', 'cover'];
+  if (command.type === 'layer.add_image') {
+    // sourceRef 只有三种合法形态：文档素材表 asset:<id>、复制已有图层 layer:<layerId>、
+    // 或受限内联图 data:image/(png|jpeg|webp);base64,...（解码后 ≤256 KB，超限请走编辑器导入）。
+    // Host 只校验形态，素材是否存在由编辑器判定；像素只在编辑器里，不进模型上下文。
+    validateImageSourceRef(p.sourceRef);
+    if ((p.width === undefined) !== (p.height === undefined)) throw new MediaBridgeError('INVALID_REQUEST', 'layer.add_image needs both width and height, or neither (the source size is kept).');
+    for (const key of ['width', 'height']) if (p[key] !== undefined) pixelSize(key);
+    for (const key of ['x', 'y']) if (p[key] !== undefined) pixelPos(key);
+    if (p.fit !== undefined && !FRAME_FITS.includes(p.fit)) throw new MediaBridgeError('INVALID_REQUEST', `fit must be one of ${FRAME_FITS.join(', ')}.`);
+    if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 120)) throw new MediaBridgeError('INVALID_REQUEST', 'name must be a string up to 120 characters.');
+  }
+  if (command.type === 'layer.set_frame') {
+    // 模型给的是像素框，不是缩放比；至少改一项，不然是无意义写入。
+    opaqueId(p.layerId, 'layerId');
+    if (['x', 'y', 'width', 'height', 'fit'].every(key => p[key] === undefined)) throw new MediaBridgeError('INVALID_REQUEST', 'Provide at least one of x, y, width, height or fit.');
+    if ((p.width === undefined) !== (p.height === undefined)) throw new MediaBridgeError('INVALID_REQUEST', 'Provide both width and height, or neither.');
+    for (const key of ['width', 'height']) if (p[key] !== undefined) pixelSize(key);
+    for (const key of ['x', 'y']) if (p[key] !== undefined) pixelPos(key);
+    if (p.fit !== undefined && !FRAME_FITS.includes(p.fit)) throw new MediaBridgeError('INVALID_REQUEST', `fit must be one of ${FRAME_FITS.join(', ')}.`);
+    if (p.anchor !== undefined && !['top-left', 'center'].includes(p.anchor)) throw new MediaBridgeError('INVALID_REQUEST', 'anchor must be top-left or center.');
+  }
+  if (command.type === 'layer.feather') {
+    // 只改该图层的 alpha 边缘，不新建图层，也不改像素颜色；同样按首次快照幂等重算。
+    opaqueId(p.layerId, 'layerId');
+    if (!Number.isSafeInteger(p.radiusPx) || p.radiusPx < 1 || p.radiusPx > 64) throw new MediaBridgeError('INVALID_REQUEST', 'radiusPx must be an integer between 1 and 64 pixels.');
+  }
+  if (command.type === 'layer.color_match') {
+    // 幂等要求：编辑器内部保存首次应用前的像素快照（不暴露给模型），每次从快照重算再按
+    // strength 插值；Host 只校验参数形状，read_state 只回 derived 的 colorMatch 字段。
+    opaqueId(p.layerId, 'layerId');
+    if (p.method !== 'reinhard') throw new MediaBridgeError('INVALID_REQUEST', 'color_match currently supports method "reinhard" only.');
+    if (p.strength !== undefined) finite(p.strength, 'strength', { min: 0, max: 1 });
+    if (p.reference !== undefined) {
+      if (typeof p.reference === 'string') {
+        if (!['canvas', 'below'].includes(p.reference)) throw new MediaBridgeError('INVALID_REQUEST', 'reference must be canvas, below or a {x,y,width,height} rect.');
+      } else if (isObject(p.reference)) {
+        const rect = p.reference;
+        if (Object.keys(rect).some(key => !['x', 'y', 'width', 'height'].includes(key)) || ['x', 'y', 'width', 'height'].some(key => rect[key] === undefined)) {
+          throw new MediaBridgeError('INVALID_REQUEST', 'reference rect needs x, y, width and height only.');
+        }
+        for (const key of ['x', 'y']) if (!Number.isSafeInteger(rect[key]) || rect[key] < 0) throw new MediaBridgeError('INVALID_REQUEST', `reference.${key} must be a non-negative integer.`);
+        for (const key of ['width', 'height']) if (!Number.isSafeInteger(rect[key]) || rect[key] < 1 || rect[key] > 16384) throw new MediaBridgeError('INVALID_REQUEST', `reference.${key} must be an integer between 1 and 16384 pixels.`);
+      } else {
+        throw new MediaBridgeError('INVALID_REQUEST', 'reference must be canvas, below or a {x,y,width,height} rect.');
+      }
+    }
+  }
+  // layer.drop_shadow 本轮不做：它需要改渲染管线，等单独立项后再进白名单。
+}
+
+// 图片 sourceRef 的三种合法形态，互斥且必须整体匹配：
+//   asset:<id>          文档素材表里的素材（由编辑器在导入/粘贴/PSD 图层时登记）
+//   layer:<layerId>     复制一个已有图层的像素（Agent 可以再放一份）
+//   data:image/...      受限内联图：只允许 png/jpeg/webp，base64 解码后 ≤256 KB
+// 像素本身永不进入模型上下文，read_state 只回素材元数据（id/名称/尺寸）。
+const INLINE_IMAGE = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
+const INLINE_IMAGE_MAX_BYTES = 256 * 1024;
+function validateImageSourceRef(sourceRef) {
+  if (typeof sourceRef !== 'string' || !sourceRef) throw new MediaBridgeError('INVALID_REQUEST', 'sourceRef is required.');
+  if (sourceRef.startsWith('asset:') || sourceRef.startsWith('layer:')) {
+    if (sourceRef.length < 3 || sourceRef.length > 256) throw new MediaBridgeError('INVALID_REQUEST', 'sourceRef must be asset:<id> or layer:<layerId>.');
+    return;
+  }
+  const inline = INLINE_IMAGE.exec(sourceRef);
+  if (!inline) throw new MediaBridgeError('INVALID_REQUEST', 'sourceRef must be asset:<id>, layer:<layerId> or data:image/(png|jpeg|webp);base64,...');
+  // base64 每 4 字符解出 3 字节；用上界判断，避免在 Host 里真正解码大图。
+  if (Math.ceil(inline[2].length * 3 / 4) > INLINE_IMAGE_MAX_BYTES) throw new MediaBridgeError('INVALID_REQUEST', 'Inline image data must be at most 256 KB; import larger images through the editor.');
 }
 
 // 视频命令校验：时间一律整数微秒（1 秒 = 1000000），拒绝 startTime/duration 这类秒字段。
