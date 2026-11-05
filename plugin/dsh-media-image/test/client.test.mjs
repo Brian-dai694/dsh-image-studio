@@ -269,6 +269,31 @@ test('approval audit events show pending and closed outcomes without claiming bi
   assert.match(client.chat.approvalText('other'), /未知/);
 });
 
+test('tool and approval events render as readable cards, never raw JSON', async () => {
+  const client = await loadClient(), reduce = client.chat.makeTranscript();
+  const rows = reduce({ type: 'event', event: { seq: 1, type: 'tool/result', data: {
+    toolName: 'media_image_read_state',
+    result: { status: 'applied', revision: 0, documentId: '04ae7a2b-fec2-4a14-a6e3-c26d3ec0fea1', layersCount: 1, stateDigest: 'fnv1a64-2eaa7dad7ad80f0f' },
+  } } });
+  assert.equal(rows[0].role, 'tool');
+  assert.equal(rows[0].text, '', '聊天文本里不能再出现原始 JSON');
+  assert.equal(rows[0].card.name, '读取工程');
+  assert.equal(rows[0].card.status, 'applied');
+  assert.equal(rows[0].card.revision, 0);
+  assert.doesNotMatch(JSON.stringify(rows[0].card), /fnv1a64|isError|stateDigest/);
+
+  const failed = reduce({ type: 'event', event: { seq: 2, type: 'tool/result', data: {
+    toolName: 'media_image_apply_command', result: { error: { code: 'SESSION_BINDING_REQUIRED' } },
+  } } });
+  assert.match(failed[1].card.line, /授权/);
+  assert.equal(failed[1].card.error, true);
+  assert.equal(failed[1].text, '');
+
+  const approval = reduce({ type: 'event', event: { seq: 3, type: 'approval/decided', data: { outcome: 'rejected' } } });
+  assert.equal(approval[2].role, 'approval');
+  assert.match(approval[2].text, /未获授权/);
+});
+
 test('retained editors follow host panel navigation, hide native conversation and restore on return', async () => {
   const client = await loadClient();
   let activePanelId = 'media-image-editor', listener, disposed = false;

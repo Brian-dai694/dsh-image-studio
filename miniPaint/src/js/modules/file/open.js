@@ -6,6 +6,7 @@ import Dialog_class from './../../libs/popup.js';
 import Helper_class from './../../libs/helpers.js';
 import Clipboard_class from './../../libs/clipboard.js';
 import alertify from './../../../../node_modules/alertifyjs/build/alertify.min.js';
+import { isPsdFile, importPsd } from './../../dsh-psd-import.js';
 import EXIF from './../../../../node_modules/exif-js/exif.js';
 import GUI_tools_class from "../../core/gui/gui-tools";
 import semver_compare from './../../../../node_modules/semver-compare/';
@@ -88,6 +89,8 @@ class File_open_class {
 		a.setAttribute("id", "file_open");
 		a.type = 'file';
 		a.multiple = 'multiple';
+		// .psd 走本项目的 PSD 导入分支（图层映射在 dsh-psd-import.js），其余仍是 miniPaint 原生格式。
+		a.accept = 'image/*,.psd,.psb,application/json';
 		document.getElementById("tmp").appendChild(a);
 		document.getElementById('file_open').addEventListener('change', function (e) {
 			_this.open_handler(e);
@@ -292,8 +295,19 @@ class File_open_class {
 			}
 		}
 
-		for (var i = 0, f; i < files.length; i++) {
-			f = files[i];
+		for (var i = 0, f; f = files[i]; i++) {
+			// PSD 不是位图也不是 miniPaint 的 JSON 工程，必须走自己的图层映射分支，
+			// 否则会落到下面“必须是图像或JSON”的统一拒绝分支里。
+			if (isPsdFile(f)) {
+				importPsd(f).then(result => {
+					if (result.warnings.length) {
+						alertify.warning('PSD 已导入 ' + result.layers.length + ' 个图层，但有 ' + result.warnings.length + ' 处不保真：\n· ' + result.warnings.slice(0, 6).join('\n· ') + (result.warnings.length > 6 ? '\n· …' : ''));
+					} else {
+						alertify.success('PSD 已导入 ' + result.layers.length + ' 个图层');
+					}
+				}).catch(error => alertify.error(error.message || 'PSD 导入失败'));
+				continue;
+			}
 			if (!f.type.match('image.*') && !f.name.match('.json')) {
 				if(dir_opened == false) {
 					alertify.error('Wrong file type, must be image or json.');

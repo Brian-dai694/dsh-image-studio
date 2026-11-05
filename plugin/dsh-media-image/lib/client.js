@@ -239,6 +239,44 @@ window.__ModuleLoader__.load({
       if (outcome === 'unavailable') return '原生审批不可用或没有可回答的界面，本次请求未获授权。'
       return '审批结果未知，请核对原生会话；不能确认授权。'
     }
+    var TOOL_NAMES = { media_image_read_state: '读取工程', media_image_apply_command: '执行编辑', media_image_get_command_result: '查询命令结果', media_image_export_start: '开始导出', media_image_export_status: '查询导出', media_video_read_state: '读取工程', media_video_apply_command: '执行编辑', media_video_get_command_result: '查询命令结果', media_video_export_start: '开始导出', media_video_export_status: '查询导出' }
+    var ERROR_TEXT = {
+      SESSION_BINDING_REQUIRED: '本会话还没有绑定工程，需要本人在原生会话中授权一次',
+      APPROVAL_TIMEOUT: '等待授权超时，本次请求已取消，需要重新发起',
+      APPROVAL_REJECTED: '授权被拒绝，本次请求未执行',
+      APPROVAL_UNAVAILABLE: '当前没有可用的授权界面，本次请求未执行',
+      REVISION_CONFLICT: '工程版本已变化，请重新读取最新状态后再改',
+      HISTORY_CONFLICT: '已有后续修改，不能单独撤销这一步',
+      HISTORY_EMPTY: '没有可撤销的记录',
+      DOCUMENT_MISMATCH: '工程已变化，请重新绑定对话',
+      EDITOR_NOT_READY: '编辑器还没准备好，请稍后重试',
+      EDITOR_INSTANCE_MISMATCH: '编辑器实例已变化，请重新绑定对话',
+      LAYER_NOT_FOUND: '找不到这个图层，可能已被删除',
+      INVALID_REQUEST: '参数不符合编辑器要求',
+      HUMAN_CONFIRMATION_REQUIRED: '这一步是破坏性操作，需要你单独确认',
+    }
+    /**
+     * 把工具回执压成一张可读卡片：工具中文名、状态、修订号、一行说明。
+     * 聊天面板只显示这些结构化字段，绝不把 canonical JSON 原样铺给用户。
+     */
+    function toolCard(data, isCall) {
+      if (!data || typeof data !== 'object') return null
+      var payload = data.arguments || data.result || data.value || data
+      var rawName = data.toolName || data.name || payload.toolName || ''
+      var name = TOOL_NAMES[rawName] || rawName || '工具调用'
+      var status = (isCall ? 'running' : null) || data.status || payload.status || ''
+      var revision = payload.revision ?? data.revision
+      var errorCode = payload.error?.code || payload.code || (Array.isArray(data.content) ? null : null)
+      var line = ''
+      if (!isCall) {
+        if (errorCode) line = ERROR_TEXT[errorCode] || ('操作没有完成：' + errorCode)
+        else if (payload.operation) line = String(payload.operation)
+        else if (payload.exportId) line = '导出任务 ' + payload.exportId + (status ? ' · ' + status : '')
+        else if (payload.documentId) line = '工程 ' + String(payload.documentId).slice(0, 8)
+        else if (payload.layersCount !== undefined) line = payload.layersCount + ' 个图层'
+      }
+      return { name: name, status: status || (isCall ? 'running' : 'unknown'), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
+    }
     function makeTranscript() {
       var events = new Map(), attempts = new Map()
       function add(event) {
@@ -279,7 +317,8 @@ window.__ModuleLoader__.load({
           } else if (e.type === 'approval/decided') {
             rows.push({ id: 'event-'+e.seq, role: 'approval', text: approvalText(d.outcome) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
-            rows.push({ id: 'event-'+e.seq, role: 'tool', issue: e.type === 'tool/result' ? resultIssue(d, 0) : null, exportRef: e.type === 'tool/result' ? exportEvidence(d, 0) : null, undo: e.type === 'tool/result' && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: (e.type === 'tool/call' ? '调用工具：' : '工具返回：') + JSON.stringify(d).slice(0, 3000) })
+            var isCall = e.type === 'tool/call'
+            rows.push({ id: 'event-'+e.seq, role: 'tool', card: toolCard(d, isCall), issue: isCall ? null : resultIssue(d, 0), exportRef: isCall ? null : exportEvidence(d, 0), undo: !isCall && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: '' })
           }
         })
         attempts.forEach(function (a, id) {
@@ -460,6 +499,32 @@ window.__ModuleLoader__.load({
           : messages.map(function (message, index) {
             var mine = message.role === 'user'
             var bad = message.role === 'error'
+            if (message.role === 'tool' || message.role === 'approval') {
+              // 工具与审批只显示结构化卡片：名称、状态、修订号、一行说明，不铺原始 JSON。
+              var card = message.card || { name: '审批', status: message.role === 'approval' ? 'pending' : 'unknown', revision: null, line: message.text || '' }
+              var tone = card.error ? '#ff3b30' : card.status === 'applied' ? '#1d7a3c' : '#6e6e73'
+              return React.createElement('div', {
+                key: message.id,
+                style: { alignSelf: 'flex-start', maxWidth: '92%', padding: '10px 12px', borderRadius: 14, fontSize: 12.5, lineHeight: 1.5,
+                  background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', color: '#1d1d1f' },
+              },
+                React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                  React.createElement('strong', { style: { fontWeight: 600 } }, card.name),
+                  React.createElement('span', { style: { fontSize: 11, color: tone } }, card.status),
+                  card.revision === null ? null : React.createElement('span', { style: { fontSize: 11, color: '#86868b' } }, 'R' + card.revision)),
+                card.line ? React.createElement('div', { style: { marginTop: 4, color: '#6e6e73', wordBreak: 'break-word' } }, card.line) : null,
+                message.issue ? React.createElement('div', { role: 'status', style: { marginTop: 6, color: '#ff3b30' } }, message.issue) : null,
+                message.exportRef ? React.createElement('button', {
+                  type: 'button', onClick: function () { downloadExport(message.exportRef) },
+                  style: { marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#f5f5f7', color: '#0071e3', cursor: 'pointer' },
+                }, '在编辑器中另存为文件') : null,
+                message.undo ? React.createElement('div', { style: { marginTop: 8, fontSize: 11, color: '#86868b' } }, '命令 ' + message.undo.commandId + ' · R' + message.undo.appliedRevision + ' · ' + message.undo.afterDigest) : null,
+                message.undo ? React.createElement('button', {
+                  type: 'button', disabled: true, title: '定向撤销尚待真实页面验收，暂不可用',
+                  onClick: function () { void submit(undoPrompt(message.undo)) },
+                  style: { marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#f5f5f7', color: '#0071e3', cursor: 'pointer' },
+                }, '撤销这一步') : null)
+            }
             return React.createElement('div', {
               key: message.id,
               style: {
@@ -479,7 +544,7 @@ window.__ModuleLoader__.load({
             message.undo ? React.createElement('div', { style: { marginTop: 8, fontSize: 11 } }, '命令：' + message.undo.commandId + '\n修订：' + message.undo.appliedRevision + '\n摘要：' + message.undo.afterDigest) : null,
             message.undo ? React.createElement('button', {
               type: 'button', disabled: true, title: '定向撤销尚待真实页面验收，暂不可用',
-              onClick: function () { void submit(undoPrompt(message.undo)) },
+              onClick: function () { void submit(undoPrompt(props.kind, message.undo)) },
               style: { display: 'block', marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#ffffff', color: '#0071e3', cursor: 'pointer' },
             }, '撤销这一步') : null)
           })),
@@ -647,7 +712,7 @@ window.__ModuleLoader__.load({
     exports.apply = apply
     exports.entries = ENTRIES
     // Exposed for the contract tests; the host only consumes name/inject/apply.
-    exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody }
+    exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody }
     return module.exports
   },
 })
