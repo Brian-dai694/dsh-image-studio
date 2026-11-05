@@ -27,7 +27,15 @@ async function connect() {
   if (connecting) return connecting;
   connecting = (async () => {
     await boot();
-    transport = createIframeTransport({ iframe: $('editor'), origin: location.origin });
+    transport = createIframeTransport({
+      iframe: $('editor'), origin: location.origin,
+      // 只读推送：转给面板渲染建议，不在这里缓存成第二份文档状态。
+      onEvent: frame => {
+        if (frame && frame.type === 'editor.selection_changed') {
+          parent.postMessage({ type: 'media.selection.changed', editorInstanceId: frame.editorInstanceId, revision: frame.revision, selectedObjectIds: frame.selectedObjectIds || [], objectKind: frame.objectKind || null, at: frame.at || Date.now() }, location.origin);
+        }
+      },
+    });
     relay = await startBrowserRelay({
       transport,
       accessToken,
@@ -93,6 +101,20 @@ window.addEventListener('message', async event => {
       parent.postMessage({ type: 'media.export.result', requestId, ok: true, artifactRef: result.artifactRef, bytes: result.bytes ?? null }, location.origin);
     } catch (error) {
       parent.postMessage({ type: 'media.export.result', requestId, ok: false, error: error.message }, location.origin);
+    }
+    return;
+  }
+  if (event.data.type === 'media.highlight.request') {
+    const requestId = event.data.requestId;
+    try {
+      const connection = await connect();
+      const result = await transport.request({
+        type: 'editor.highlight', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
+        objectIds: event.data.objectIds, ttlMs: event.data.ttlMs,
+      }, { timeoutMs: 2000 });
+      parent.postMessage({ type: 'media.highlight.result', requestId, ok: true, matched: result?.matched || [], missing: result?.missing || [] }, location.origin);
+    } catch (error) {
+      parent.postMessage({ type: 'media.highlight.result', requestId, ok: false, error: { code: error.code || 'EDITOR_ERROR', message: error.message } }, location.origin);
     }
     return;
   }
