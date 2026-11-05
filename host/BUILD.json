@@ -1,0 +1,263 @@
+{
+  "format": "dsh-media-studio-image-page",
+  "version": 1,
+  "entry": "index.html",
+  "source": "C:\\Users\\UEFR\\.dsh\\bot\\workspace\\diagram-studio-prototype\\miniPaint\\miniPaint-master",
+  "bundleSha256": "d65205f73875fd23bbb938473695c408291a4588d8b547e3a27b5caf22cf08a8",
+  "fileCount": 42,
+  "totalBytes": 1536206,
+  "files": [
+    {
+      "path": "dist/bundle.js",
+      "bytes": 1409334,
+      "sha256": "d65205f73875fd23bbb938473695c408291a4588d8b547e3a27b5caf22cf08a8",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "dist/bundle.js.LICENSE.txt",
+      "bytes": 1138,
+      "sha256": "9e5986d30ba34559d55217fb3d9fd5d213307da6c66d6bd4565261c6f8c3a141",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "host.html",
+      "bytes": 3697,
+      "sha256": "23c57354845496795ec3b02e5e9252ee467dbd657474d339e8bd9f2dd73677a8",
+      "origin": "plugin"
+    },
+    {
+      "path": "host.js",
+      "bytes": 4043,
+      "sha256": "ce7f67d6e179606991069a10baebc1b95d798a3b9d849a9d3a5874b549f46a3c",
+      "origin": "plugin"
+    },
+    {
+      "path": "images/favicon.png",
+      "bytes": 4557,
+      "sha256": "10f9d4453abcd61027ff3b1887095a51cc07c5be6497b21851c49c73675191c8",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/favicon.svg",
+      "bytes": 1054,
+      "sha256": "03d703d539e877fc7a6aa99923ee9305a3368e42bbd874d13ff2c9cebde8166b",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/animation.svg",
+      "bytes": 1030,
+      "sha256": "9ef703d870f240423e90c7ad7a23b8c55dba6b922e9d1b8304584032b28e114c",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/arrow-down.svg",
+      "bytes": 258,
+      "sha256": "e69175b7efdbb79915f5a439be6d892b4d42079d609eced9e4478eaee5211174",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/blur.svg",
+      "bytes": 1522,
+      "sha256": "7435c5c961c4b6f215ac689ec36ae19dc483fd85b669620ff76d0a738c525bf2",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/bold.svg",
+      "bytes": 491,
+      "sha256": "e6d842750cb6850c2ee27e1b5d038cb6ca96102428f4091b93e4c5549e0d3f52",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/brush.svg",
+      "bytes": 2156,
+      "sha256": "80be86dbd356a60b4fb1e0a4203230f76d4a23a649ab75423841cbf06711af85",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/bulge_pinch.svg",
+      "bytes": 778,
+      "sha256": "448028b946b4337bae70b79151b8d658a581e1996f91d5e3947c8a6a126840c0",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/clone.svg",
+      "bytes": 1752,
+      "sha256": "4fa943415cd3bd8102c4ba200c2215da1f93098c3b8c0d360c79e6795ced8f90",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/crop.svg",
+      "bytes": 1183,
+      "sha256": "d590d30e69af69917db85acf309c886f3c320106f3a6f4c4f61b10060e906d09",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/delete.svg",
+      "bytes": 719,
+      "sha256": "0079b35b9bef597506571c382f20bbfabffebe95fa4151cb3e743fdd5cc1a956",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/desaturate.svg",
+      "bytes": 3833,
+      "sha256": "b4081d88176ad44ff5ed5d92bb2a0dec7b4df4787e633449ea104e113c08ab24",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/erase.svg",
+      "bytes": 1055,
+      "sha256": "ad5fb3322dcaa69b56496a5a3952b59594b699fbefad0f0983c546c714fb037c",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/external.png",
+      "bytes": 122,
+      "sha256": "963dfbe509bdc120d63cedf360444dbdf21bc07a893140054463707e207f98f7",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/fill.svg",
+      "bytes": 1518,
+      "sha256": "caf7ac4dd9c08f73f86c120d516bbba4442f20d089f66efe2e4f942ddeeaa8ae",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/gradient.png",
+      "bytes": 265,
+      "sha256": "46970c34d16330c00d331530ad80e70d08437e0562e30f500ed07f3461a7afd4",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/grid.png",
+      "bytes": 84,
+      "sha256": "bc894cbcd7ed2e435ef168dd287df31ae5073bcdd3179434dc4e6752fb6f373c",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/italic.svg",
+      "bytes": 393,
+      "sha256": "505bdebb21f7097ff886eb151fb1426075aa109af11cb86a7b8f6338c6005f12",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/magic_erase.svg",
+      "bytes": 913,
+      "sha256": "9bb85309f841b38a2a040a903a367e0279206f26399b5a2eea69c32abb6ea941",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/media.svg",
+      "bytes": 1755,
+      "sha256": "175151e56dfd63c0b11cd8d7a9b29463ffca516e42788c4cef1acc5e75fe0c4b",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/menu.svg",
+      "bytes": 797,
+      "sha256": "4c9a372f42bc77b8ba5f007d55002017f9641e5cf323df7c81fb0b5fdfe5a5bd",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/pencil.svg",
+      "bytes": 767,
+      "sha256": "180a839e176f59de4d87961334f8cf6b6f70fba4c2df66cbfa179ff3c88aee0b",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/pick_color.svg",
+      "bytes": 1887,
+      "sha256": "26580a28d09ddee0ed1642f7b578e60777e20fd8cf762600888682282503a1cf",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/redo.svg",
+      "bytes": 330,
+      "sha256": "53064ca5eac246935c90c43997f91252904ec3eaa0434084bc4c07369ad0481a",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/refresh.svg",
+      "bytes": 1008,
+      "sha256": "697845a5f6bd1bda06b66f1906bc409f431a44c7a163e9e3cd6694bb4298bb75",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/select.svg",
+      "bytes": 1172,
+      "sha256": "551f596f569c134ab1c0376cd83d89213e9ef0d3f677341f1edb155770b48f46",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/selection.svg",
+      "bytes": 1689,
+      "sha256": "f50291ea0c98a4f7a33e64ea729dd17f48105580ef580c7d6e17336482ffd0ec",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/shape.svg",
+      "bytes": 514,
+      "sha256": "ca9057d834e41d5564e220e3c7c07df2d7d263bf5c08852864d0755715af43e6",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/sharpen.svg",
+      "bytes": 867,
+      "sha256": "4dc5a230f0a2b06b4a833fcc0206b6552afc639fbdd4af879566816444be4427",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/strikethrough.svg",
+      "bytes": 608,
+      "sha256": "75731bcf33d80ba1a00509127661318252d14922d7fb30b0c350016bbde8d7af",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/text.svg",
+      "bytes": 1069,
+      "sha256": "73022c1f554995703d9cb488919b60cb0d300e8bc3ef030f5b796853fe71b5e4",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/underline.svg",
+      "bytes": 408,
+      "sha256": "01a38ae52c1d02a893b5cc8b2643812b3e36cbe426e5adfc6ddbd59dcd402e06",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/undo.svg",
+      "bytes": 330,
+      "sha256": "883295c6cbb809a184620d7bee1fe175609f07194ba1fb8c23f951ca5d3f94e9",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/icons/view.svg",
+      "bytes": 1092,
+      "sha256": "a22269e7dbe5f3796e88d1003486199519d9078fad86196f26cbdbe84184a5b2",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/logo-colors.png",
+      "bytes": 5665,
+      "sha256": "2879253f9e57d5141e0839c0d941fe40812358808f0dce7cfa3f7672a40e41fe",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/logo.svg",
+      "bytes": 33615,
+      "sha256": "f2cfad58e7f80816247f7daa8831957999f8cd4656278a71ed4063bc881089fe",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "images/test-collection.json",
+      "bytes": 35935,
+      "sha256": "61a393b9298245313a93d7d6ca861a4fcb938a134b871b57e998f7daf2ed7c68",
+      "origin": "miniPaint"
+    },
+    {
+      "path": "index.html",
+      "bytes": 4803,
+      "sha256": "3add5e56f1468e9e750b13f11dab1e0aa2d3061d0c93df48a13acda1ab467f88",
+      "origin": "miniPaint"
+    }
+  ]
+}

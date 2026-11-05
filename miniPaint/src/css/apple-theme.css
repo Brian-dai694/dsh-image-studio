@@ -1,0 +1,324 @@
+/*
+ * Apple-style theme layer for the DSH media editor.
+ *
+ * Loaded last so it wins over the stock palettes without touching DOM, markup or copy.
+ * Rules: two neutrals + one accent (Apple blue); no decorative gradients; hairline
+ * separators; one spring curve for every interaction; press feedback on every control.
+ * Functional gradients (colour picker saturation/value) stay untouched on purpose.
+ */
+
+:root,
+body.theme-light {
+	--background: #f5f5f7;
+	--text-color: #1d1d1f;
+	--text-color-muted: #6e6e73;
+	--text-color-red: #ff3b30;
+	--text-color-green: #34c759;
+	--text-color-blue: #0071e3;
+	--link-color: #0071e3;
+	--section-background-color: #ffffff;
+	--area-background-color: #f5f5f7;
+	--block-background-color: #ffffff;
+	--header-background-color: #ffffff;
+	--button-background-color: #f5f5f7;
+	--button-background-color-hover: #ebebf0;
+	--button-background-color-active: #e5e5ea;
+	--button-shadow-color: rgba(0, 0, 0, 0.05);
+	--button-text-color-active: #ffffff;
+	--button-border-radius: 12px;
+	--button-toggle-background-color: #e5e5ea;
+	--button-toggle-background-color-hover: #dcdce1;
+	--input-background-color: #f5f5f7;
+	--input-background-color-hover: #ebebf0;
+	--input-text-color: #1d1d1f;
+	--input-border-color: transparent;
+	--input-border-color-active: #0071e3;
+	--input-border-radius: 10px;
+	--input-group-border-color: #e5e5ea;
+	--menu-background-color: #ffffff;
+	--menu-icons-filter: none;
+	--menu-icons-filter-active: none;
+	--menu-text-color: #1d1d1f;
+	--menu-dropdown-background-color: #ffffff;
+	--menu-dropdown-border-color: rgba(0, 0, 0, 0.08);
+	--menu-dropdown-text-color: #1d1d1f;
+	--menu-dropdown-text-muted-color: #86868b;
+	--menu-dropdown-hover-background-color: #f5f5f7;
+	--menu-dropdown-hover-text-color: #1d1d1f;
+	--menu-dropdown-divider-color: rgba(0, 0, 0, 0.08);
+	--background-color-active: #0071e3;
+	--background-color-hover: #ebebf0;
+	--text-color-active: #ffffff;
+	--border-color: rgba(0, 0, 0, 0.08);
+	--scrollbar-track-color: #f5f5f7;
+	--scrollbar-thumb-color: #d2d2d7;
+	--mobile-menu-toggle-filter: none;
+	--apple-accent: #0071e3;
+	--apple-accent-hover: #0077ed;
+	--apple-hairline: rgba(0, 0, 0, 0.08);
+	--apple-card-radius: 18px;
+	--apple-control-radius: 10px;
+	--apple-card-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+	--apple-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+	--apple-fast: 180ms;
+	--apple-slow: 320ms;
+}
+
+body {
+	font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+	-webkit-font-smoothing: antialiased;
+	-moz-osx-font-smoothing: grayscale;
+	background: var(--background);
+	color: var(--text-color);
+}
+
+/* ---------- chrome surfaces ---------- */
+
+.main_menu,
+.sidebar_left,
+.sidebar_right,
+.submenu {
+	background: #ffffff;
+	border-color: var(--apple-hairline);
+}
+
+.submenu {
+	box-shadow: inset 0 -1px 0 var(--apple-hairline);
+}
+
+.main_menu {
+	box-shadow: inset -1px 0 0 var(--apple-hairline);
+}
+
+.sidebar_right {
+	box-shadow: inset 1px 0 0 var(--apple-hairline);
+}
+
+.sidebar_left {
+	box-shadow: inset -1px 0 0 var(--apple-hairline);
+}
+
+.middle_area {
+	background: var(--background);
+}
+
+/* ---------- cards ---------- */
+
+.sidebar_right .block,
+.block {
+	background: #ffffff;
+	border-radius: var(--apple-card-radius);
+	box-shadow: var(--apple-card-shadow);
+	margin: 12px;
+	overflow: hidden;
+}
+
+.block h2 {
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--text-color-muted);
+	padding: 14px 16px;
+	transition: color var(--apple-fast) var(--apple-ease);
+}
+
+.block h2:hover {
+	color: var(--text-color);
+}
+
+.block .content {
+	padding: 4px 16px 16px;
+}
+
+.block_section {
+	border-top: 1px solid var(--apple-hairline);
+}
+
+/* ---------- controls ---------- */
+
+button,
+.button,
+.attributes .item > button:not(.ui_icon_button) {
+	border-radius: var(--apple-control-radius);
+	background: var(--button-background-color);
+	color: var(--text-color);
+	font-weight: 500;
+	border: 0;
+	transition: background-color var(--apple-fast) var(--apple-ease),
+		transform var(--apple-fast) var(--apple-ease),
+		box-shadow var(--apple-fast) var(--apple-ease);
+}
+
+button:hover,
+.button:hover {
+	background: var(--button-background-color-hover);
+}
+
+button:active,
+.button:active,
+.ui_icon_button:active {
+	transform: scale(0.98);
+	background: var(--button-background-color-active);
+}
+
+button:focus-visible,
+.button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+	outline: 2px solid var(--apple-accent);
+	outline-offset: 2px;
+}
+
+/* The primary action in the top bar keeps the accent fill. */
+.attributes .item > button,
+.popup .button,
+button.primary {
+	background: var(--apple-accent);
+	color: #ffffff;
+}
+
+.attributes .item > button:hover,
+.popup .button:hover,
+button.primary:hover {
+	background: var(--apple-accent-hover);
+}
+
+/* ---------- inputs ---------- */
+
+input[type="text"],
+input[type="number"],
+input[type="color"],
+select,
+textarea,
+.ui_range {
+	background: var(--input-background-color);
+	border: 1px solid transparent;
+	border-radius: var(--apple-control-radius);
+	color: var(--input-text-color);
+	transition: background-color var(--apple-fast) var(--apple-ease),
+		box-shadow var(--apple-fast) var(--apple-ease);
+}
+
+input[type="text"]:hover,
+input[type="number"]:hover,
+select:hover,
+textarea:hover {
+	background: var(--input-background-color-hover);
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus,
+textarea:focus {
+	background: #ffffff;
+	border-color: transparent;
+	box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.18);
+	outline: none;
+}
+
+/* ---------- menus ---------- */
+
+.main_menu .item,
+.sidebar_left .item {
+	border-radius: var(--apple-control-radius);
+	transition: background-color var(--apple-fast) var(--apple-ease),
+		transform var(--apple-fast) var(--apple-ease);
+}
+
+.main_menu .item:hover,
+.sidebar_left .item:hover {
+	background: var(--background-color-hover);
+}
+
+.main_menu .item:active,
+.sidebar_left .item:active {
+	transform: scale(0.96);
+}
+
+.main_menu .item.active,
+.sidebar_left .item.active {
+	background: rgba(0, 113, 227, 0.1);
+}
+
+/* ---------- undo / redo pair ---------- */
+
+.submenu {
+	padding-right: 28px;
+}
+
+/* Visible on every width: a shared-editing reviewer needs a clickable undo and redo,
+   not only the stock mobile-only undo plus a keyboard shortcut. */
+.undo_button,
+.redo_button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 36px;
+	margin-left: 6px;
+	border-radius: 999px;
+	background-color: transparent;
+	background-position: center;
+	background-size: auto 18px;
+	background-repeat: no-repeat;
+	filter: none;
+	transition: background-color var(--apple-fast) var(--apple-ease),
+		transform var(--apple-fast) var(--apple-ease);
+}
+
+.undo_button {
+	background-image: url(images/icons/undo.svg);
+}
+
+.redo_button {
+	background-image: url(images/icons/redo.svg);
+}
+
+.undo_button:hover,
+.redo_button:hover {
+	background-color: #f5f5f7;
+}
+
+.undo_button:active,
+.redo_button:active {
+	background-color: #e5e5ea;
+	transform: scale(0.96);
+}
+
+/* ---------- scrollbars ---------- */
+
+* {
+	scrollbar-color: var(--scrollbar-thumb-color) var(--scrollbar-track-color);
+}
+
+*::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb-color);
+	border-radius: 999px;
+}
+
+*::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+/* ---------- motion preference ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition-duration: 1ms !important;
+		animation-duration: 1ms !important;
+	}
+
+	button:active,
+	.main_menu .item:active,
+	.sidebar_left .item:active {
+		transform: none;
+	}
+}
