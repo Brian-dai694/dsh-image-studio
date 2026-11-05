@@ -103,7 +103,13 @@ export function mapPsdLayers(psd) {
 export async function importPsd(file) {
   const buffer = await file.arrayBuffer();
   // 按需加载：只有真的导入 PSD 时才拉这个 chunk。
-  const { readPsd } = await import('ag-psd');
+  let readPsd;
+  try {
+    ({ readPsd } = await import('ag-psd'));
+  } catch (error) {
+    // 懒加载 chunk 取不到必须说人话：否则表现就是“调用了、无异常、无提示、画面不变”。
+    throw new Error('PSD 支持模块加载失败（860 分块没取到），请刷新页面后重试');
+  }
   let psd;
   try {
     psd = readPsd(buffer, { useImageData: true, skipThumbnail: true });
