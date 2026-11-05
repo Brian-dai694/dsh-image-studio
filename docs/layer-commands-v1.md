@@ -108,7 +108,29 @@ assets[]                // [{ id, name, width, height, bytes, mime }]
   仅当仍是栈顶且 digest 匹配时允许，否则 `HISTORY_CONFLICT`。
 - **不做宏命令**：Agent 一次「把图放进去并调和谐」= 多条命令、多次 revision、多个可撤销步骤。
 
-## 7. 校验边界（谁负责什么）
+## 8. 工具回执 `meta`（面板读这里，不解析文本）
+
+`tool/result` 的 `data.meta` 由 `presentationMeta` 生成，与 `message.content` 那行人读文本同源同值。
+文本行只供人读，**面板一律读 meta**：
+
+| 字段 | 何时出现 | 含义 |
+| --- | --- | --- |
+| `operation` / `status` / `editorKind` / `projectId` / `stateDigest` | 有值时 | 基础回执 |
+| `commandId` | 写/查询/导出 | 幂等键 |
+| `appliedRevision` | 写入成功 | 写入后的 revision（= 文本行的 `R<n>`） |
+| `afterDigest` | 写入成功 | 写后状态摘要 |
+| `exportId` / `artifactRef` / `format` | 导出 | 导出任务与产物引用 |
+| `errorCode` | 失败 | 稳定错误码，如 `REVISION_CONFLICT` |
+| `changedObjectIds` | **确有对象被改**时 | 字符串数组；**无变化不出现**（不给空数组） |
+| `objectKind` | 与 `changedObjectIds` 同时 | `layer` \| `clip` \| `overlay` \| `track` |
+
+`changedObjectIds` 语义：
+
+- 只列**被修改**的对象 id，**不得把"选中"混进来**；不猜、不从文本行回填。
+- 撤销/重做同样照编辑器回执如实反映（`objectKind` 优先取回执值，因为撤销命令的前缀看不出类型）。
+- 这份数据是卡片 `locate` 高亮的唯一来源；缺失时卡片不可点，属正确降级。
+
+## 9. 校验边界（谁负责什么）
 
 | 检查 | Host | 编辑器 |
 | --- | --- | --- |

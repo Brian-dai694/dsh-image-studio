@@ -29,6 +29,8 @@ const RESULT_SCHEMA = {
     auditRef: { type: 'string' },
     exportId: { type: 'string' },
     artifactRef: { type: 'string' },
+    changedObjectIds: { type: 'array', items: { type: 'string' } },
+    objectKind: { type: 'string', enum: ['layer', 'clip', 'overlay', 'track'] },
     state: { type: 'json' },
     error: {
       type: 'object',
@@ -128,6 +130,19 @@ const renderReadState = (_args, value) => [{
     ].join(' · ')
     : `${value.status} · ${value.commandId}${value.error ? ` · ${value.error.code}` : ''}`,
 }];
+// 被修改对象的 id 只来自编辑器回执，不猜、不拿"选中"凑数；撤销/重做同样照回执如实反映。
+// objectKind 优先取回执里的值（撤销时命令前缀看不出类型），否则按命令前缀推断。
+const OBJECT_KINDS = ['layer', 'clip', 'overlay', 'track'];
+const objectKindOf = (operation, result) => {
+  if (OBJECT_KINDS.includes(result?.objectKind)) return result.objectKind;
+  if (typeof operation !== 'string') return undefined;
+  if (operation.startsWith('layer.')) return 'layer';
+  if (operation.startsWith('media.video.clip.')) return 'clip';
+  if (operation.startsWith('media.video.overlay.')) return 'overlay';
+  if (operation.startsWith('media.video.track.')) return 'track';
+  return undefined;
+};
+
 // 面板不解析那行人读文本：凭据同时以结构化字段进 meta，且与文本行同源同值。
 // 写命令/查询带 commandId、写命令带 appliedRevision（= 新 revision）、afterDigest；
 // 导出带 exportId/artifactRef/format；失败带 errorCode（沿用 REVISION_CONFLICT 等稳定码）。
@@ -146,6 +161,9 @@ const presentationMeta = (args, value) => ({
   ...(typeof value.artifactRef === 'string' && value.artifactRef ? { artifactRef: value.artifactRef } : {}),
   ...(typeof args.format === 'string' ? { format: args.format } : {}),
   ...(value.error?.code ? { errorCode: value.error.code } : {}),
+  ...(Array.isArray(value.changedObjectIds) && value.changedObjectIds.length
+    ? { changedObjectIds: value.changedObjectIds, ...(value.objectKind ? { objectKind: value.objectKind } : {}) }
+    : {}),
 });
 
 const envelope = (kind, extra) => ({ status: 'rejected', commandId: 'unknown', editorKind: kind, ...extra });
@@ -350,6 +368,12 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         revision: result.revision,
         ...(result.stateDigest ? { stateDigest: result.stateDigest } : {}),
         ...(result.afterDigest ? { afterDigest: result.afterDigest } : {}),
+        ...(Array.isArray(result.changedObjectIds) && result.changedObjectIds.length
+          ? {
+            changedObjectIds: result.changedObjectIds.filter(id => typeof id === 'string' && id),
+            ...(objectKindOf(operation, result) ? { objectKind: objectKindOf(operation, result) } : {}),
+          }
+          : {}),
         ...(result.history?.canUndo !== undefined ? { canUndo: result.history.canUndo } : {}),
         ...(result.history?.canRedo !== undefined ? { canRedo: result.history.canRedo } : {}),
         ...(approvalId ? { approvalId } : {}),
