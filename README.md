@@ -3,10 +3,10 @@
 [![License](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](./miniPaint/MIT-LICENSE.txt)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
 [![DSH Plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
-[![Version](https://img.shields.io/badge/version-0.2.1-4D6BFE?style=flat-square)](./plugin/dsh-media-image/package.json)
+[![Version](https://img.shields.io/badge/version-0.2.2-4D6BFE?style=flat-square)](./plugin/dsh-media-image/package.json)
 [![Status](https://img.shields.io/badge/status-原型验证中-f0a92b?style=flat-square)](#状态)
 
-**当前版本 0.2.1**：版本号唯一来源是 `plugin/dsh-media-image/package.json`；编辑器界面（完整模式右下角、极简模式顶栏）显示同一个值，改版本后在插件目录跑 `npm run sync-version` 即可同步页面常量与这里的徽标。
+**当前版本 0.2.2**：版本号唯一来源是 `plugin/dsh-media-image/package.json`；编辑器界面（完整模式右下角、极简模式顶栏）显示同一个值，改版本后在插件目录跑 `npm run sync-version` 即可同步页面常量与这里的徽标。
 
 **在 DSH 里，人和 Agent 编辑同一张画布。** 左侧是真正的 miniPaint 中文编辑器，右侧是真正的 DSH 会话。
 你说一句「把这行字改成红色」，Agent 就通过受控命令改你正在看的这份工程——你能看见、能撤销，它也能回读确认。
@@ -18,6 +18,10 @@
 `docs/fixtures/dialog-fixture.html` 是一个可重复运行的**静态夹具**：它喂样例「会话事件」给真实的
 `makeTranscript → buildDialogPlan → Conversation`，因此渲染路径与线上一致，只差数据来源。
 它**没有连接任何 DSH 会话**，不代表运行时行为，**不计入验收通过**。
+
+事件来源写在 `docs/fixtures/real-events.json` 的每条 `fixtureOrigin` 里：**14 条是 FDE 在 0.2.1 上抓的原文**
+（`probe`，含 `REVISION_CONFLICT` 那对 39/40），**2 条是 `synthetic`**，仅用于证明「只有显式
+`meta.status='unknown'` 才显示结果未知」。来源守卫测试会逐字段比对 `probe` 条目与抓包原文。
 
 覆盖：用户消息、助手 Markdown（标题/列表/代码块/行内代码/引用/链接/内联图片）、助手流式增量、
 工具卡片四态（`applied` / `rejected` / `unknown` / `pending`）、审批四态、会话错误、裸 JSON 兜底

@@ -114,3 +114,36 @@ test('tool meta carries structured credentials so panels never parse the text li
   assert.equal(stale.status, 'rejected');
   assert.equal(meta('media_image_apply_command', staleArgs, stale).errorCode, 'REVISION_CONFLICT');
 });
+
+test('meta.changedObjectIds reports exactly the edited objects, including undo', async () => {
+  const tools = new Map();
+  const bridge = {
+    editorKind: 'image',
+    readState: async () => ({ editorKind: 'image', editorInstanceId: 'i1', documentId: 'p1', revision: 2, stateDigest: 'd2', canvas: { width: 10, height: 10 }, layers: [] }),
+    applyCommand: async input => {
+      const base = { editorKind: 'image', documentId: 'p1', commandId: input.commandId, revision: 3, stateDigest: 'd3', afterDigest: 'd3' };
+      if (input.command.type === 'layer.update_text') return { ...base, changedObjectIds: ['obj-1'] };
+      if (input.command.type === 'media.video.history.undo' || input.command.type === 'history.undo') return { ...base, changedObjectIds: ['obj-2'], objectKind: 'layer' };
+      return { ...base, changedObjectIds: [] };
+    },
+  };
+  registerMediaTools({ tools: { register: definition => tools.set(definition.name, definition), guard: () => {} } }, { bridge, approvals: createApprovalStore(), bindings: fixtureBindings });
+  const meta = (args, value) => tools.get('media_image_apply_command').output.presentationMeta(args, value);
+  const writeArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'c-w', expectedRevision: 2, operation: 'layer.update_text', params: {} };
+  const written = await tools.get('media_image_apply_command').execute(writeArgs, exec);
+  const writeMeta = meta(writeArgs, written);
+  assert.deepEqual(writeMeta.changedObjectIds, ['obj-1']);
+  assert.equal(writeMeta.objectKind, 'layer');
+  assert.equal(writeMeta.changedObjectIds.includes('obj-2'), false);
+  const undoArgs = { ...writeArgs, commandId: 'c-u', operation: 'history.undo', params: {} };
+  const undone = await tools.get('media_image_apply_command').execute(undoArgs, exec);
+  const undoMeta = meta(undoArgs, undone);
+  assert.deepEqual(undoMeta.changedObjectIds, ['obj-2']);
+  assert.equal(undoMeta.objectKind, 'layer');
+  const noopArgs = { ...writeArgs, commandId: 'c-n', operation: 'layer.set_visibility' };
+  const noopMeta = meta(noopArgs, await tools.get('media_image_apply_command').execute(noopArgs, exec));
+  assert.equal('changedObjectIds' in noopMeta, false, 'no empty array');
+  // 与文本行/stateDigest 同源，不互相矛盾
+  assert.equal(writeMeta.stateDigest, written.stateDigest);
+  assert.match(tools.get('media_image_apply_command').output.render(writeArgs, written).map(block => block.text).join('\n'), /applied · c-w · R3/);
+});

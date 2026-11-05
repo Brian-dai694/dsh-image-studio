@@ -26,8 +26,9 @@
 <body>
 <div class="banner">
   <strong>静态夹具 · NON-RUNTIME</strong>
-  <span>数据来自 <code>docs/fixtures/dialog-fixture.mjs</code> 的样例事件；渲染走真实的 <code>buildDialogPlan</code> 与 <code>Conversation</code> 组件。
-  没有连接任何 DSH 会话，不代表运行时行为，也不算验收通过。</span>
+  <span>面板①的事件来自 <code>docs/fixtures/real-events.json</code>：<b>14 条是 FDE 在 0.2.1 上抓的原文</b>（probe，含 rejected 那对 39/40），
+  <b>2 条 synthetic</b> 只用于证明「只有显式 <code>meta.status='unknown'</code> 才显示结果未知」；其余面板是人说话的样例。
+  渲染走真实的 <code>makeTranscript → buildDialogPlan → Conversation</code>，没有连接任何 DSH 会话，不代表运行时行为，也不算验收通过。</span>
 </div>
 <div class="cols">
   <div class="row-solo">

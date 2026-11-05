@@ -276,6 +276,7 @@ export class DshEditorBridge {
       const result = await this.nativeDo(action, options);
       if (result?.status === 'completed' && ['new_file', 'open_json_file'].includes(action.action_id)) this.documentId = randomId();
       this.refreshRevision(result?.status === 'completed');
+      this.emitSelectionChanged();
       return result;
     });
     for (const [method, native] of [['undo_action', this.nativeUndo], ['redo_action', this.nativeRedo]]) {
@@ -283,6 +284,7 @@ export class DshEditorBridge {
         const before = state.action_history_index;
         await native();
         this.refreshRevision(before !== state.action_history_index);
+        this.emitSelectionChanged();
       });
     }
     state.scrap_last_action = () => this.enqueue(async () => {
@@ -290,6 +292,7 @@ export class DshEditorBridge {
       await this.nativeUndo();
       state.action_history.pop();
       this.refreshRevision(true);
+      this.emitSelectionChanged();
     });
     // Direct previews (dragging, typing, sliders) are native miniPaint behavior. Do not
     // allow an agent transaction to interrupt an uncommitted gesture or text session.
@@ -326,6 +329,101 @@ export class DshEditorBridge {
     port.postMessage({ requestId: event.data.requestId, ok: true, result: { editorInstanceId: this.editorInstanceId, contractVersion: 1, ready: true } });
   }
 
+  /**
+   * 高亮只画描边：独立 overlay canvas（不进 config.layers、不进历史、不动 selection、不 bump revision）。
+   * TTL 到期自动移除；没有可绘制的 DOM 时静默降级为"只记状态不画"，但回执仍如实给 matched/missing。
+   */
+  ensureHighlightOverlay() {
+    if (this.highlightOverlay) return this.highlightOverlay;
+    if (typeof document === 'undefined' || !document.body || typeof document.createElement !== 'function') return null;
+    const host = document.createElement('div');
+    host.setAttribute('data-dsh-highlight', 'overlay');
+    host.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none;z-index:2147483000';
+    const canvas = document.createElement('canvas');
+    host.appendChild(canvas);
+    document.body.appendChild(host);
+    this.highlightOverlay = { host, canvas };
+    return this.highlightOverlay;
+  }
+
+  /** 按当前缩放/滚动把对象框换算成屏幕矩形（只读 view 状态）。 */
+  highlightRects(objectIds) {
+    const scale = Number(zoomView.getScale?.() ?? 1) || 1;
+    const position = zoomView.getPosition?.() ?? { x: 0, y: 0 };
+    const canvasNode = typeof document !== 'undefined' && document.querySelector ? document.querySelector('#canvas_minipaint') : null;
+    const bounds = canvasNode && typeof canvasNode.getBoundingClientRect === 'function' ? canvasNode.getBoundingClientRect() : { left: 0, top: 0 };
+    const wanted = new Set(objectIds.map(String));
+    return config.layers.filter(layer => wanted.has(String(layer.id))).map(layer => ({
+      id: String(layer.id),
+      x: Math.round((bounds.left || 0) + (position.x || 0) + (Number(layer.x) || 0) * scale),
+      y: Math.round((bounds.top || 0) + (position.y || 0) + (Number(layer.y) || 0) * scale),
+      width: Math.max(1, Math.round((Number(layer.width) || 0) * scale)),
+      height: Math.max(1, Math.round((Number(layer.height) || 0) * scale)),
+    }));
+  }
+
+  paintHighlight() {
+    const overlay = this.ensureHighlightOverlay();
+    if (!overlay) return;
+    const rects = this.highlightRects(this.highlightState?.objectIds || []);
+    const ctx = overlay.canvas.getContext?.('2d');
+    if (!ctx) return;
+    overlay.canvas.width = Math.max(1, Math.round(overlay.host.ownerDocument?.defaultView?.innerWidth || 1920));
+    overlay.canvas.height = Math.max(1, Math.round(overlay.host.ownerDocument?.defaultView?.innerHeight || 1080));
+    ctx.clearRect?.(0, 0, overlay.canvas.width, overlay.canvas.height);
+    ctx.strokeStyle = '#0071e3';
+    ctx.lineWidth = 3;
+    for (const rect of rects) ctx.strokeRect?.(rect.x + 0.5, rect.y + 0.5, rect.width, rect.height);
+  }
+
+  clearHighlight() {
+    if (this.highlightTimer && typeof clearTimeout === 'function') clearTimeout(this.highlightTimer);
+    this.highlightTimer = null;
+    this.highlightState = null;
+    const overlay = this.highlightOverlay;
+    if (overlay && overlay.host?.parentNode) overlay.host.parentNode.removeChild(overlay.host);
+    this.highlightOverlay = null;
+  }
+
+  /** editor.highlight：只描边，绝不改文档。 */
+  highlightObjects(request) {
+    const ids = request && (request.objectIds ?? request.payload?.objectIds);
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 200 || !ids.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256)) {
+      throw this.error('INVALID_REQUEST', '高亮需要 objectIds（1–200 个非空字符串）');
+    }
+    const ttlRaw = request?.ttlMs ?? request?.payload?.ttlMs;
+    const ttl = Math.max(200, Math.min(5000, Number.isFinite(ttlRaw) ? ttlRaw : 2000));
+    const existing = new Set(config.layers.map(layer => String(layer.id)));
+    const matched = ids.map(String).filter(id => existing.has(id));
+    const missing = ids.map(String).filter(id => !existing.has(id));
+    this.highlightState = { objectIds: matched, ttlMs: ttl, until: Date.now() + ttl };
+    this.paintHighlight();
+    if (typeof setTimeout === 'function') {
+      if (this.highlightTimer) clearTimeout(this.highlightTimer);
+      this.highlightTimer = setTimeout(() => this.clearHighlight(), ttl);
+    }
+    return { ok: true, matched, missing };
+  }
+
+  /** selection_changed：只读通知，≥100ms 节流；不改任何状态，也不落盘。 */
+  emitSelectionChanged(force = false) {
+    const port = this.port;
+    if (!port || typeof port.postMessage !== 'function') return;
+    const now = Date.now();
+    if (!force && this.selectionEmitAt && now - this.selectionEmitAt < 100) return;
+    this.selectionEmitAt = now;
+    const selected = config.layer ? String(config.layer.id) : null;
+    port.postMessage({
+      type: 'editor.selection_changed',
+      editorInstanceId: this.editorInstanceId,
+      revision: this.revision,
+      selectedObjectIds: selected ? [selected] : [],
+      objectKind: selected ? 'layer' : null,
+      at: now,
+    });
+  }
+
+
   async handleRequest(request, port = this.port) {
     if (!plain(request) || typeof request.requestId !== 'string') return;
     try {
@@ -335,6 +433,8 @@ export class DshEditorBridge {
         if (request.type === 'editor.read_state') return this.readState();
         if (request.type === 'editor.get_command_result') return this.getCommandResult(request);
         if (request.type === 'editor.apply_command') return this.applyCommand(request);
+        // highlight 只画描边：不进 revision、不进历史、不改 selection。
+        if (request.type === 'editor.highlight') return this.highlightObjects(request);
         if (request.type === 'editor.export_start') return this.exportStart(request);
         if (request.type === 'editor.export_status') {
           const item = this.exports.get(request.exportId);

@@ -3,9 +3,9 @@
   "version": 1,
   "entry": "index.html",
   "source": "C:\\Users\\UEFR\\.dsh\\bot\\workspace\\dsh-image-studio\\miniPaint",
-  "bundleSha256": "115d188cf4c3e877fba9a57a098b07587e03d5284e8746bfe96cd37f6f22cec2",
+  "bundleSha256": "013d8790bb4b47d955383470bf131066ab531a67aac41ecd5b9e307ade4e6dc5",
   "fileCount": 44,
-  "totalBytes": 1920438,
+  "totalBytes": 1925854,
   "files": [
     {
       "path": "dist/860.bundle.js",
@@ -21,8 +21,8 @@
     },
     {
       "path": "dist/bundle.js",
-      "bytes": 1435407,
-      "sha256": "115d188cf4c3e877fba9a57a098b07587e03d5284e8746bfe96cd37f6f22cec2",
+      "bytes": 1439548,
+      "sha256": "013d8790bb4b47d955383470bf131066ab531a67aac41ecd5b9e307ade4e6dc5",
       "origin": "miniPaint"
     },
     {
@@ -39,8 +39,8 @@
     },
     {
       "path": "host.js",
-      "bytes": 5547,
-      "sha256": "412e4d4e585b248ec530c9ef3dc917a11ca2c7103092f1498104abd4438faf8e",
+      "bytes": 6822,
+      "sha256": "401d1411eb15f293b5f95a47a2079a6b8f0c01e87af8c65c7c68c4f5c9fa85a7",
       "origin": "plugin"
     },
     {

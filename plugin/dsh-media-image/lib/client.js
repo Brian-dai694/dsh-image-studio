@@ -330,6 +330,11 @@ window.__ModuleLoader__.load({
       if (!errorCode) errorCode = stringOf(pickAny(sources, ['errorCode']));
       var revision = pickAny(sources, ['revision', 'appliedRevision']);
       var format = stringOf(pickAny(sources, ['format', 'mimeType']));
+      // 可定位对象：Host 的写命令回执带 changedObjectIds；面板只用它做"点卡片定位"。
+      var changedRaw = pickAny(sources, ['changedObjectIds']);
+      var changedObjectIds = Array.isArray(changedRaw)
+        ? changedRaw.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 256).slice(0, 200)
+        : [];
       // 状态：按层级优先取第一个；若其他层给出不同值，不静默丢弃，交给卡片显示"不一致"。
       var statuses = collectValues(sources, 'status');
       return {
@@ -343,6 +348,9 @@ window.__ModuleLoader__.load({
         exportId: stringOf(pickAny(sources, ['exportId'])),
         artifactRef: stringOf(pickAny(sources, ['artifactRef'])),
         format: format,
+        changedObjectIds: changedObjectIds,
+        // meta.objectKind 与 changedObjectIds 同时出现；这里只取值，白名单校验在 locateFromFacts。
+        objectKind: stringOf(pickAny(sources, ['objectKind'])),
       };
     }
     /** 回执证据优先取 message.content 里的工具输出 JSON，其次才是事件外壳。 */
@@ -543,6 +551,35 @@ window.__ModuleLoader__.load({
       }
       return card
     }
+    // ---------- P1 共生交互：高亮请求与建议表 ----------
+
+    /** 高亮请求：只允许计划里的 locate 触发；TTL 200–5000ms（默认 2000）。 */
+    function highlightRequest(locate, requestId, ttlMs) {
+      if (!locate || !Array.isArray(locate.objectIds) || locate.objectIds.length === 0) return null;
+      const ids = locate.objectIds.filter(id => typeof id === 'string' && id.length > 0 && id.length <= 256).slice(0, 200);
+      if (!ids.length) return null;
+      const ttl = Math.max(200, Math.min(5000, Number.isFinite(ttlMs) ? ttlMs : 2000));
+      return { type: 'media.highlight.request', requestId, objectIds: ids, ttlMs: ttl };
+    }
+
+    // 建议表：只列白名单里有对应命令、且参数能从"选中一个图层"推出来的动作。
+    // 白名单外的动作不显示（不置灰），避免面板变成命令大全。
+    var SUGGESTION_TABLE = [
+      { label: '隐藏这个图层', build: id => `把图层 ${id} 隐藏起来` },
+      { label: '移到画布左上角', build: id => `把图层 ${id} 移到画布左上角（x=0, y=0）` },
+      { label: '宽度设为画布一半', build: id => `把图层 ${id} 的宽度设为画布宽度的一半，保持比例` },
+      { label: '置顶', build: id => `把图层 ${id} 移到最上层（toIndex=0）` },
+    ];
+
+    /** 建议只对"恰好选中一个图层"生效；其他情况返回空表（面板就不显示建议区）。 */
+    function suggestionsFor(selectedObjectIds, objectKind) {
+      if (objectKind !== 'layer' || !Array.isArray(selectedObjectIds) || selectedObjectIds.length !== 1) return [];
+      const id = selectedObjectIds[0];
+      if (typeof id !== 'string' || !id) return [];
+      return SUGGESTION_TABLE.map(item => ({ label: item.label, prompt: item.build(id) }));
+    }
+
+
     // ---------- 对话框 v1：纯函数层 ----------
     //
     // 渲染前先把"会话行"压成可读的计划（plan），组件只负责画。这样两点能被测试钉住：
@@ -704,6 +741,35 @@ window.__ModuleLoader__.load({
       return { objectIds: locate.objectIds.slice(), kind: locate.kind }
     }
 
+    /**
+     * 投影层：回执 meta.changedObjectIds + meta.objectKind → 计划里的 row.locate。
+     *
+     * 两项缺一不可：后端契约里 objectKind 与 changedObjectIds 同时出现，所以
+     * **kind 缺失或越界时整体省略 locate，不按 'layer' 猜**（本文件第三条回归的取舍）。
+     * 理由：猜错类型会把描边落在别的对象上；"卡片不可点"是明确、可解释的降级，
+     * 和"没有 changedObjectIds 就没有 locate"是同一条规则——定位信息只从回执来，不猜。
+     */
+    function locateFromFacts(facts) {
+      if (!facts) return null
+      var ids = facts.changedObjectIds
+      if (!Array.isArray(ids) || ids.length === 0) return null
+      if (!LOCATE_KINDS[facts.objectKind]) return null
+      return { objectIds: ids.slice(), kind: facts.objectKind }
+    }
+
+    /**
+     * 计划 → 卡片可点属性：只有合法 locate 才挂 role=button 与 data-object-ids。
+     * 没有 locate 时连 role 都不挂（不可点、不可聚焦），避免读屏把普通回执卡当按钮。
+     */
+    function locateAttributes(locate) {
+      var target = sanitizeLocate(locate)
+      if (!target) return { 'data-object-ids': '', 'data-object-kind': '' }
+      return {
+        role: 'button', tabIndex: 0, title: '定位到画布对象',
+        'data-object-ids': target.objectIds.join(','), 'data-object-kind': target.kind,
+      }
+    }
+
     /** 会话行 → 界面计划。零原始 JSON：解析不出来就退回一句话摘要。 */
     function buildDialogPlan(rows) {
       var list = Array.isArray(rows) ? rows : []
@@ -814,7 +880,10 @@ window.__ModuleLoader__.load({
             var fallback = (callId && callNames.get(callId)) || lastName
             var card = toolCard(d, isCall, isCall ? null : fallback)
             if (isCall && card) { if (callId) callNames.set(callId, card.name); lastName = card.name }
-            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '', diagnostic: card && card.diagnostic ? card.diagnostic : null })
+            // 可定位对象只从回执 meta 来：changedObjectIds + objectKind 两项齐全才有 locate
+            // （卡片才可点）；缺一项就整体省略，不去文本行里猜 id、也不猜类型。
+            var factsForLocate = isCall ? null : toolFacts(evidenceData(d))
+            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '', diagnostic: card && card.diagnostic ? card.diagnostic : null, locate: locateFromFacts(factsForLocate) })
           }
         })
         attempts.forEach(function (a, id) {
@@ -892,6 +961,10 @@ window.__ModuleLoader__.load({
       var showAllState = React.useState(false)
       var showAll = showAllState[0]
       var setShowAll = showAllState[1]
+      // 编辑器选中通知（只读）：只用于渲染建议，不缓存成第二份文档状态。
+      var selectionState = React.useState(null)
+      var selection = selectionState[0]
+      var setSelection = selectionState[1]
       // 附图相关的提示只能留在输入区，不许污染顶部状态行（上一版出现过"没选文件却报 5MB 超限"）。
       var attachNoticeState = React.useState('')
       var attachNotice = attachNoticeState[0]
@@ -1070,6 +1143,30 @@ window.__ModuleLoader__.load({
         frame.contentWindow.postMessage({ type: 'media.export.download', requestId: requestId, format: evidence.format || 'png' }, location.origin)
       }
 
+      /**
+       * 卡片点击 → 只请求描边高亮。2 秒超时；失败如实报错，不改文档、不改选中。
+       */
+      function requestHighlight(locate) {
+        var frame = props.frameRef.current
+        if (!frame || !frame.contentWindow) { setStatus('编辑器尚未就绪，无法定位对象'); return }
+        var requestId = crypto.randomUUID()
+        var message = highlightRequest(locate, requestId, 2000)
+        if (!message) { setStatus('这条回执没有可定位的对象'); return }
+        function receive(event) {
+          if (event.origin !== location.origin || event.source !== frame.contentWindow || event.data?.type !== 'media.highlight.result' || event.data.requestId !== requestId) return
+          finish()
+          if (!event.data.ok) { setStatus('定位失败：' + (event.data.error?.message || '编辑器未返回原因')); return }
+          var matched = event.data.matched || [], missing = event.data.missing || []
+          if (!matched.length) { setStatus('画布上找不到这些对象（可能已被删除或替换）'); return }
+          setStatus('已在画布上描边 ' + matched.length + ' 个对象' + (missing.length ? '，另有 ' + missing.length + ' 个不存在' : ''))
+        }
+        function finish() { window.removeEventListener('message', receive); clearTimeout(timer) }
+        var timer = setTimeout(function () { finish(); setStatus('定位请求超时（2 秒），未做任何改动') }, 2000)
+        window.addEventListener('message', receive)
+        frame.contentWindow.postMessage(message, location.origin)
+      }
+
+
       function onKeyDown(event) {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing && !event.isComposing) { event.preventDefault(); void submit() }
       }
@@ -1092,6 +1189,15 @@ window.__ModuleLoader__.load({
         '@keyframes dsh-media-shimmer{from{background-position:0 0}to{background-position:-200% 0}}',
         '@media(prefers-reduced-motion:reduce){.dsh-media-btn,.dsh-media-chip-x{transition:none}.dsh-media-skeleton{animation:none}}',
       ].join('')
+      React.useEffect(function () {
+        function receive(event) {
+          if (event.origin !== location.origin || event.source !== parent || event.data?.type !== 'media.selection.changed') return
+          setSelection({ selectedObjectIds: event.data.selectedObjectIds || [], objectKind: event.data.objectKind || null })
+        }
+        window.addEventListener('message', receive)
+        return function () { window.removeEventListener('message', receive) }
+      }, [])
+
       React.useEffect(function () {
         if (typeof document === 'undefined' || document.getElementById('dsh-media-dialog-style')) return
         var el = document.createElement('style'); el.id = 'dsh-media-dialog-style'; el.textContent = DIALOG_CSS
@@ -1199,20 +1305,15 @@ window.__ModuleLoader__.load({
         if (item.kind === 'tool') {
           var locate = item.locate || null
           // 规则：有 locate 才可点。不做"按 key 回查原始行"那种隐式耦合。
-          var locateProps = locate ? {
-            role: 'button', tabIndex: 0, title: '定位到画布对象',
-            'data-object-ids': locate.objectIds.join(','), 'data-object-kind': locate.kind,
-            onClick: function () {
-              if (typeof props.onLocate === 'function') props.onLocate(locate)
-              else setStatus('定位通道（editor.highlight）属于 P1，尚未接入')
-            },
-            onKeyDown: function (event) {
+          var locateProps = locateAttributes(locate)
+          if (locate) {
+            locateProps.onClick = function () { requestHighlight(locate) }
+            locateProps.onKeyDown = function (event) {
               if (event.key !== 'Enter' && event.key !== ' ') return
               event.preventDefault()
-              if (typeof props.onLocate === 'function') props.onLocate(locate)
-              else setStatus('定位通道（editor.highlight）属于 P1，尚未接入')
-            },
-          } : { 'data-object-ids': '', 'data-object-kind': '' }
+              requestHighlight(locate)
+            }
+          }
           return React.createElement('div', {
             key: item.key, ...locateProps,
             style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f', cursor: locate ? 'pointer' : 'default' },
@@ -1267,7 +1368,13 @@ window.__ModuleLoader__.load({
 
       function composer() {
         var React = require('react')
+        var suggestions = suggestionsFor(selection?.selectedObjectIds, selection?.objectKind)
         return React.createElement('div', { style: { padding: 12, boxShadow: 'inset 0 1px 0 rgba(0,0,0,.08)', background: '#ffffff' } },
+          suggestions.length ? React.createElement('div', { role: 'group', 'aria-label': '基于当前选中对象的建议', style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            suggestions.map(function (suggestion) {
+              return btn({ key: suggestion.label, label: suggestion.label, style: { background: '#eef4ff' }, title: suggestion.prompt,
+                onClick: function () { setDraft(suggestion.prompt) } })
+            })) : null,
           attach.length ? React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
             attach.map(function (item, index) {
               return React.createElement('span', { key: item.name + index, className: 'dsh-media-chip' },
@@ -1633,6 +1740,10 @@ window.__ModuleLoader__.load({
       // 会话挂接：严格契约解析、工程标记提取、隐私过滤（纯函数，便于测试）。
       sessionListItems: normalizeSessionItems, normalizeSessionItems: normalizeSessionItems, listSessions: listSessions,
       sessionAnnotations: sessionAnnotations, filterSessionsForProject: filterSessionsForProject, peekProjectId: peekProjectId,
+      // P1 共生：高亮请求与静态建议表（纯函数，便于测试）。
+      highlightRequest: highlightRequest, suggestionsFor: suggestionsFor, suggestionTable: SUGGESTION_TABLE.slice(),
+      // 定位：投影层映射（meta → row.locate）与计划 → DOM 属性。
+      locateFromFacts: locateFromFacts, locateAttributes: locateAttributes,
       projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
     return module.exports
   },
