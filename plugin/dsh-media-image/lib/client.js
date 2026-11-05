@@ -349,6 +349,8 @@ window.__ModuleLoader__.load({
         artifactRef: stringOf(pickAny(sources, ['artifactRef'])),
         format: format,
         changedObjectIds: changedObjectIds,
+        // meta.objectKind 与 changedObjectIds 同时出现；这里只取值，白名单校验在 locateFromFacts。
+        objectKind: stringOf(pickAny(sources, ['objectKind'])),
       };
     }
     /** 回执证据优先取 message.content 里的工具输出 JSON，其次才是事件外壳。 */
@@ -739,6 +741,35 @@ window.__ModuleLoader__.load({
       return { objectIds: locate.objectIds.slice(), kind: locate.kind }
     }
 
+    /**
+     * 投影层：回执 meta.changedObjectIds + meta.objectKind → 计划里的 row.locate。
+     *
+     * 两项缺一不可：后端契约里 objectKind 与 changedObjectIds 同时出现，所以
+     * **kind 缺失或越界时整体省略 locate，不按 'layer' 猜**（本文件第三条回归的取舍）。
+     * 理由：猜错类型会把描边落在别的对象上；"卡片不可点"是明确、可解释的降级，
+     * 和"没有 changedObjectIds 就没有 locate"是同一条规则——定位信息只从回执来，不猜。
+     */
+    function locateFromFacts(facts) {
+      if (!facts) return null
+      var ids = facts.changedObjectIds
+      if (!Array.isArray(ids) || ids.length === 0) return null
+      if (!LOCATE_KINDS[facts.objectKind]) return null
+      return { objectIds: ids.slice(), kind: facts.objectKind }
+    }
+
+    /**
+     * 计划 → 卡片可点属性：只有合法 locate 才挂 role=button 与 data-object-ids。
+     * 没有 locate 时连 role 都不挂（不可点、不可聚焦），避免读屏把普通回执卡当按钮。
+     */
+    function locateAttributes(locate) {
+      var target = sanitizeLocate(locate)
+      if (!target) return { 'data-object-ids': '', 'data-object-kind': '' }
+      return {
+        role: 'button', tabIndex: 0, title: '定位到画布对象',
+        'data-object-ids': target.objectIds.join(','), 'data-object-kind': target.kind,
+      }
+    }
+
     /** 会话行 → 界面计划。零原始 JSON：解析不出来就退回一句话摘要。 */
     function buildDialogPlan(rows) {
       var list = Array.isArray(rows) ? rows : []
@@ -849,10 +880,10 @@ window.__ModuleLoader__.load({
             var fallback = (callId && callNames.get(callId)) || lastName
             var card = toolCard(d, isCall, isCall ? null : fallback)
             if (isCall && card) { if (callId) callNames.set(callId, card.name); lastName = card.name }
-            // 可定位对象只从回执里来：没有 changedObjectIds 就没有 locate（卡片不可点）。
+            // 可定位对象只从回执 meta 来：changedObjectIds + objectKind 两项齐全才有 locate
+            // （卡片才可点）；缺一项就整体省略，不去文本行里猜 id、也不猜类型。
             var factsForLocate = isCall ? null : toolFacts(evidenceData(d))
-            var locateIds = factsForLocate && factsForLocate.changedObjectIds && factsForLocate.changedObjectIds.length ? factsForLocate.changedObjectIds : null
-            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '', diagnostic: card && card.diagnostic ? card.diagnostic : null, locate: locateIds ? { objectIds: locateIds, kind: 'layer' } : null })
+            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '', diagnostic: card && card.diagnostic ? card.diagnostic : null, locate: locateFromFacts(factsForLocate) })
           }
         })
         attempts.forEach(function (a, id) {
@@ -1274,16 +1305,15 @@ window.__ModuleLoader__.load({
         if (item.kind === 'tool') {
           var locate = item.locate || null
           // 规则：有 locate 才可点。不做"按 key 回查原始行"那种隐式耦合。
-          var locateProps = locate ? {
-            role: 'button', tabIndex: 0, title: '定位到画布对象',
-            'data-object-ids': locate.objectIds.join(','), 'data-object-kind': locate.kind,
-            onClick: function () { requestHighlight(locate) },
-            onKeyDown: function (event) {
+          var locateProps = locateAttributes(locate)
+          if (locate) {
+            locateProps.onClick = function () { requestHighlight(locate) }
+            locateProps.onKeyDown = function (event) {
               if (event.key !== 'Enter' && event.key !== ' ') return
               event.preventDefault()
               requestHighlight(locate)
-            },
-          } : { 'data-object-ids': '', 'data-object-kind': '' }
+            }
+          }
           return React.createElement('div', {
             key: item.key, ...locateProps,
             style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f', cursor: locate ? 'pointer' : 'default' },
@@ -1712,6 +1742,8 @@ window.__ModuleLoader__.load({
       sessionAnnotations: sessionAnnotations, filterSessionsForProject: filterSessionsForProject, peekProjectId: peekProjectId,
       // P1 共生：高亮请求与静态建议表（纯函数，便于测试）。
       highlightRequest: highlightRequest, suggestionsFor: suggestionsFor, suggestionTable: SUGGESTION_TABLE.slice(),
+      // 定位：投影层映射（meta → row.locate）与计划 → DOM 属性。
+      locateFromFacts: locateFromFacts, locateAttributes: locateAttributes,
       projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
     return module.exports
   },

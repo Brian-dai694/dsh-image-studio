@@ -129,6 +129,7 @@ assets[]                // [{ id, name, width, height, bytes, mime }]
 - 只列**被修改**的对象 id，**不得把"选中"混进来**；不猜、不从文本行回填。
 - 撤销/重做同样照编辑器回执如实反映（`objectKind` 优先取回执值，因为撤销命令的前缀看不出类型）。
 - 这份数据是卡片 `locate` 高亮的唯一来源；缺失时卡片不可点，属正确降级。
+- 面板侧规则（`lib/client.js` 的 `locateFromFacts`）：`objectIds` 非空**且** `objectKind` 在白名单内，两项缺一就整体省略 `locate`——**不按 `layer` 猜类型**（猜错会把描边画到别的对象上）。没有 `locate` 的卡片不挂 `role=button`、不可聚焦。
 
 ## 9. 校验边界（谁负责什么）
 

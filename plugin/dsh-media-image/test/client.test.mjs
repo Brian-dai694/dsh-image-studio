@@ -712,23 +712,49 @@ test('unknown only from explicit status; pending only from call without result; 
   assert.equal(tools[1].badge, 'applied');
 });
 
-test('locate comes from the receipt changedObjectIds; without it the card stays unclickable', async () => {
+test('locate 只从 meta 的 changedObjectIds + objectKind 来；缺一项就整卡不可点', async () => {
   const client = await loadClient();
   const reduce = client.chat.makeTranscript();
+  const result = (seq, callId, meta) => ({
+    seq, type: 'tool/result',
+    data: { turn: 1, step: seq, message: { toolCallId: callId, isError: false, content: [{ type: 'text', text: 'applied · c · R1' }] }, meta },
+  });
   const events = [
     { seq: 1, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'media_image_apply_command', arguments: '{}' } },
-    { seq: 2, type: 'tool/result', data: { turn: 1, step: 2, message: { toolCallId: 'c1', isError: false, content: [{ type: 'text', text: 'applied · c-1 · R1' }] },
-      meta: { status: 'applied', operation: 'layer.add_text', commandId: 'c-1', appliedRevision: 1, afterDigest: 'fnv1a64-0000000000000001', changedObjectIds: ['layer-9'] } } },
+    // ① meta 两项齐全（后端 7e55a0f 起的真实形状）→ 出 locate，卡片可点
+    result(2, 'c1', { status: 'applied', commandId: 'c-1', appliedRevision: 1, changedObjectIds: ['layer-a', 'layer-b'], objectKind: 'layer' }),
     { seq: 3, type: 'tool/call', data: { turn: 1, step: 3, callId: 'c2', name: 'media_image_read_state', arguments: '{}' } },
-    { seq: 4, type: 'tool/result', data: { turn: 1, step: 4, message: { toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'image · R1' }] }, meta: { status: 'applied' } } },
+    // ② 没有 changedObjectIds（0.2.1 的 read_state 就是这样）→ 不给 locate，属正确降级
+    result(4, 'c2', { status: 'applied' }),
+    { seq: 5, type: 'tool/call', data: { turn: 1, step: 5, callId: 'c3', name: 'media_image_apply_command', arguments: '{}' } },
+    // ③ 有 ids 但没有 objectKind → 整体省略（不按 layer 猜类型）
+    result(6, 'c3', { status: 'applied', changedObjectIds: ['layer-c'] }),
+    { seq: 7, type: 'tool/call', data: { turn: 1, step: 7, callId: 'c4', name: 'media_image_apply_command', arguments: '{}' } },
+    // ④ kind 越界 → 整体省略
+    result(8, 'c4', { status: 'applied', changedObjectIds: ['layer-d'], objectKind: 'gizmo' }),
+    { seq: 9, type: 'tool/call', data: { turn: 1, step: 9, callId: 'c5', name: 'media_image_apply_command', arguments: '{}' } },
+    // ⑤ 空数组等价于"没有对象被改"
+    result(10, 'c5', { status: 'applied', changedObjectIds: [], objectKind: 'layer' }),
   ];
   const plan = client.chat.buildDialogPlan(reduce({ type: 'snapshot', header: { id: 's' }, records: events.map(event => ({ event })) }));
   const tools = plan.filter(item => item.kind === 'tool');
-  assert.deepEqual(tools[1].locate, { objectIds: ['layer-9'], kind: 'layer' });
-  assert.equal('locate' in tools[3], false, '没有 changedObjectIds 就不给 locate（不可点）');
-  // 用 locate 生成的高亮请求只含这些 id
+  assert.deepEqual(tools[1].locate, { objectIds: ['layer-a', 'layer-b'], kind: 'layer' });
+  // 可点：role=button，且 data-object-ids 与 meta.changedObjectIds 逐字相等
+  const props = client.chat.locateAttributes(tools[1].locate);
+  assert.equal(props.role, 'button');
+  assert.equal(props['data-object-kind'], 'layer');
+  assert.equal(props['data-object-ids'], 'layer-a,layer-b');
+  // 高亮请求只带这些 id，不附带任何写语义
   const request = client.chat.highlightRequest(tools[1].locate, 'r1');
-  assert.deepEqual(request.objectIds, ['layer-9']);
+  assert.deepEqual(request.objectIds, ['layer-a', 'layer-b']);
+  assert.deepEqual(Object.keys(request).sort(), ['objectIds', 'requestId', 'ttlMs', 'type']);
+  // ②③④⑤ 一律不可点：没有 locate，也不挂 role=button
+  for (const index of [3, 5, 7, 9]) {
+    assert.equal('locate' in tools[index], false, `第 ${index} 条定位信息不完整，不能给 locate`);
+    const none = client.chat.locateAttributes(tools[index].locate || null);
+    assert.equal('role' in none, false, '不可点的卡片不能挂 role=button');
+    assert.equal(none['data-object-ids'], '');
+  }
 });
 
 test('a missing slots service degrades instead of throwing', async () => {
