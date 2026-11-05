@@ -1,8 +1,8 @@
 {
   "name": "dsh-media-image",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
-  "description": "DSH Host plugin: shared image editing tools plus the packaged miniPaint page.",
+  "description": "DSH 图片编辑器插件：人和 Agent 共用一份 miniPaint 工程，通过受控命令协作编辑（中文界面、原生撤销、版本校验）。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -35,6 +35,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "sync-version": "node scripts/gen-version.mjs",
     "pack:image": "node scripts/pack-image.mjs"
   }
 }
