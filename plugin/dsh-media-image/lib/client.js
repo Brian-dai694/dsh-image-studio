@@ -188,7 +188,21 @@ window.__ModuleLoader__.load({
     // 真实会话里 tool/result 的外壳比契约示例深一层（例如 {result:{ok,value}}、或回执正文
     // 放在 content[{type:'text',text:'{...}'}] 里）。所以不写死某条路径，而是把所有"可能是回执"
     // 的层收集起来再按字段取第一个可用值：少一层/多一层/纯文本 JSON 都能解析。
-    var FACT_KEYS = ['result', 'value', 'output', 'data', 'call', 'payload', 'response', 'content', 'parts', 'blocks', 'items', 'messages'];
+    var FACT_KEYS = ['result', 'value', 'output', 'data', 'call', 'payload', 'response', 'content', 'parts', 'blocks', 'items', 'messages', 'meta', 'error'];
+    /** 分层顺序 = 取值优先级：先外层再内层，契约层（result.value / call.result.value）紧跟其后。 */
+    function orderedSources(root) {
+      var layers = [];
+      function add(value) { if (value && typeof value === 'object' && layers.indexOf(value) < 0) layers.push(value) }
+      add(root);
+      add(root.result); add(root.result && root.result.value);
+      add(root.call);
+      var callResult = root.call && root.call.result;
+      add(callResult); add(callResult && callResult.value);
+      add(root.value); add(root.output); add(root.meta); add(root.error); add(root.data); add(root.payload); add(root.response);
+      // 低优先级：content/parts 里再包一层的对象，以及文本形态的 JSON 回执
+      factSources(root).forEach(add);
+      return layers;
+    }
     function factSources(root) {
       var out = [], queue = [root], seen = new Set();
       while (queue.length && out.length < 64) {
@@ -219,10 +233,21 @@ window.__ModuleLoader__.load({
       }
       return undefined;
     }
+    /** 收集某个字段在各层出现的不同取值；第一个是优先级最高的那个，其余用于"不一致"诊断。 */
+    function collectValues(sources, key) {
+      var seen = [], values = [];
+      for (var index = 0; index < sources.length; index += 1) {
+        var value = sources[index][key];
+        if (typeof value !== 'string' || !value) continue;
+        if (seen.indexOf(value) >= 0) continue;
+        seen.push(value); values.push(value);
+      }
+      return values;
+    }
     var stringOf = value => typeof value === 'string' && value ? value : undefined;
     /** 一次把回执里所有用得到的字段抽出来：状态、修订、错误码、撤销凭据、导出引用。 */
     function toolFacts(data) {
-      var sources = factSources(data);
+      var sources = orderedSources(data);
       var error = pickAny(sources, ['error']);
       var errorCode;
       if (typeof error === 'string') errorCode = error;
@@ -234,9 +259,12 @@ window.__ModuleLoader__.load({
       if (!errorCode && pickAny(sources, ['ok']) === false) errorCode = 'TOOL_ERROR';
       var revision = pickAny(sources, ['revision', 'appliedRevision']);
       var format = stringOf(pickAny(sources, ['format', 'mimeType']));
+      // 状态：按层级优先取第一个；若其他层给出不同值，不静默丢弃，交给卡片显示"不一致"。
+      var statuses = collectValues(sources, 'status');
       return {
         toolName: stringOf(pickAny(sources, ['toolName'])) || '',
-        status: stringOf(pickAny(sources, ['status'])) || '',
+        status: statuses[0] || '',
+        statusConflicts: statuses.slice(1),
         revision: Number.isSafeInteger(revision) ? revision : undefined,
         errorCode: errorCode,
         commandId: stringOf(pickAny(sources, ['commandId', 'targetCommandId'])),
@@ -377,6 +405,11 @@ window.__ModuleLoader__.load({
         else if (facts.exportId) line = '导出任务 ' + facts.exportId + (status ? ' · ' + status : '')
         else if (facts.artifactRef) line = '导出文件已就绪'
         else if (revision !== undefined) line = '修订 R' + revision
+      }
+      // 同一回执里出现多个不一致的状态：按外层取值，但必须把"不一致"说出来，不能静默挑一个。
+      if (facts.statusConflicts.length) {
+        var all = [facts.status].concat(facts.statusConflicts).filter(Boolean).join(' / ')
+        line = (line ? line + ' ' : '') + '（回执里有多处状态不一致：' + all + '，已按外层取值）'
       }
       return { name: name, status: status || (isCall ? 'running' : (errorCode ? 'rejected' : 'unknown')), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
     }

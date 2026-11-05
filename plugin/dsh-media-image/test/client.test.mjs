@@ -492,6 +492,32 @@ test('real tool/result envelopes map to applied/rejected/undo/export instead of 
   assertNoRawJsonInPlan(client, plan);
 });
 
+test('status priority: outer layer wins, inner-only status still resolves, conflicts are spoken not silenced', async () => {
+  const client = await loadClient();
+  // 外层 applied、内层 rejected：按外层取值，且卡片必须写明"不一致"，不许静默挑一个
+  const outer = client.chat.toolCard({ status: 'applied', revision: 2, value: { status: 'rejected' } }, false, '执行编辑');
+  assert.equal(outer.status, 'applied');
+  assert.equal(outer.revision, 2);
+  assert.match(outer.line, /不一致/);
+  assert.match(outer.line, /applied \/ rejected/);
+  // 只有内层有状态：照样取得到
+  const inner = client.chat.toolCard({ value: { status: 'rejected', revision: 3 } }, false, '执行编辑');
+  assert.equal(inner.status, 'rejected');
+  assert.equal(inner.revision, 3);
+  assert.doesNotMatch(inner.line, /不一致/);
+  // 契约层 {result:{ok,value}} 优先于更深的 content 文本
+  const contract = client.chat.toolCard({ result: { ok: true, value: { status: 'applied', revision: 4 } }, content: [{ type: 'text', text: JSON.stringify({ status: 'unknown', revision: 99 }) }] }, false, '执行编辑');
+  assert.equal(contract.status, 'applied');
+  assert.equal(contract.revision, 4);
+  assert.match(contract.line, /不一致/);
+  // meta.status 也能认
+  const meta = client.chat.toolCard({ meta: { status: 'rejected', revision: 5 } }, false, '执行编辑');
+  assert.equal(meta.status, 'rejected');
+  // 完全没有任何状态或错误码 → 才是 unknown（显式未知，不是解析失败）
+  const none = client.chat.toolCard({ result: { ok: true, value: { revision: 6 } } }, false, '执行编辑');
+  assert.equal(none.status, 'unknown');
+});
+
 test('a missing slots service degrades instead of throwing', async () => {
   const client = await loadClient();
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));
