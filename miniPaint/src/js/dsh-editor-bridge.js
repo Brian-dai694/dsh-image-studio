@@ -2,7 +2,7 @@ import app from './app.js';
 import config from './config.js';
 import zoomView from './libs/zoomView.js';
 
-const COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.set_frame', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -34,6 +34,9 @@ export class DshEditorBridge {
     this.composing = false;
     this.commandResults = new Map();
     this.exports = new Map();
+    // 羽化/色彩匹配的首帧快照与已应用参数：只活在编辑器内，不进图层字段、不进 read_state。
+    this.pixelBases = new Map();
+    this.pixelApplied = new Map();
     this.lastFingerprint = this.fingerprint();
     this.forcedFingerprint = null;
     this.observeMutations();
@@ -168,9 +171,16 @@ export class DshEditorBridge {
   }
 
   readState() {
-    const layers = app.Layers.get_sorted_layers().map(layer => ({ id: String(layer.id), name: String(layer.name || ''), type: String(layer.type || 'empty'),
-      visible: layer.visible !== false, x: layer.x, y: layer.y, width: layer.width, height: layer.height,
-      rotationDeg: layer.rotate || 0, ...(layer.type === 'text' ? { text: textOf(layer) } : {}) }));
+    const layers = app.Layers.get_sorted_layers().map(layer => {
+      const applied = this.pixelApplied.get(String(layer.id)) || {};
+      return { id: String(layer.id), name: String(layer.name || ''), type: String(layer.type || 'empty'),
+        visible: layer.visible !== false, x: layer.x, y: layer.y, width: layer.width, height: layer.height,
+        rotationDeg: layer.rotate || 0,
+        // 只在真的应用过时出现；快照本身留在编辑器内部，模型看不到原始像素。
+        ...(applied.feather ? { feather: applied.feather } : {}),
+        ...(applied.colorMatch ? { colorMatch: applied.colorMatch } : {}),
+        ...(layer.type === 'text' ? { text: textOf(layer) } : {}) };
+    });
     const selectedLayerId = config.layer ? String(config.layer.id) : null;
     const selectedLayer = layers.find(layer => layer.id === selectedLayerId) || null;
     const historyIndex = app.State.action_history_index;
@@ -300,6 +310,29 @@ export class DshEditorBridge {
     if (command.type === 'layer.remove') {
       if (!keysOnly(p, ['layerId']) || typeof p.layerId !== 'string' || !config.layers.some(layer => String(layer.id) === p.layerId)) throw this.error('LAYER_NOT_FOUND');
       return { action: new app.Actions.Delete_layer_action(p.layerId), ids: () => [p.layerId] };
+    }
+    if (command.type === 'layer.set_frame') {
+      // 像素框定位：模型给的是坐标/尺寸而不是缩放比，set_transform 表达不了。
+      // 只给一边时按 fit 保持比例推算另一边；两边都给就是这一帧的最终尺寸。
+      if (!keysOnly(p, ['layerId', 'x', 'y', 'width', 'height', 'fit', 'anchor'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      const fit = p.fit === undefined ? 'contain' : p.fit;
+      if (!['stretch', 'contain', 'cover'].includes(fit)) throw this.error('INVALID_REQUEST');
+      for (const key of ['x', 'y']) if (p[key] !== undefined && !Number.isSafeInteger(p[key])) throw this.error('INVALID_REQUEST');
+      for (const key of ['width', 'height']) if (p[key] !== undefined && (!Number.isSafeInteger(p[key]) || p[key] < 1 || p[key] > 16384)) throw this.error('INVALID_REQUEST');
+      if (p.width === undefined && p.height === undefined) throw this.error('INVALID_REQUEST');
+      const current = { width: layer.width || layer.width_original || 1, height: layer.height || layer.height_original || 1 };
+      const ratio = current.width / current.height;
+      let width = p.width, height = p.height;
+      if (width === undefined) width = Math.max(1, Math.round(height * ratio));
+      if (height === undefined) height = Math.max(1, Math.round(width / ratio));
+      let x = p.x, y = p.y;
+      if (x === undefined) x = layer.x || 0;
+      if (y === undefined) y = layer.y || 0;
+      if (p.anchor === 'center') { x = Math.round(x - width / 2); y = Math.round(y - height / 2); }
+      else if (p.anchor !== undefined && p.anchor !== 'top-left') throw this.error('INVALID_REQUEST');
+      return { action: new app.Actions.Update_layer_action(layer.id, { x, y, width, height }), ids: () => [String(layer.id)] };
     }
     const fields = {
       'layer.add_text': ['text', 'x', 'y', 'style'], 'layer.update_text': ['layerId', 'text'],

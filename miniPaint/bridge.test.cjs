@@ -183,6 +183,26 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     assert.equal(rejected.error.code,'HISTORY_CONFLICT');
     assert.equal(bridge.revision,next.result.revision);
   });
+  await test('layer.set_frame positions by pixel box and derives the missing side', async () => {
+    const created = await send({type:'layer.add_text',payload:{text:'像素框'}});
+    const layerId = created.result.changedObjectIds[0];
+    const layer = config.layers.find(item => String(item.id) === layerId);
+    const ratio = (layer.width || layer.width_original) / (layer.height || layer.height_original);
+    const oneSided = await send({type:'layer.set_frame',payload:{layerId, x: 30, y: 40, width: 200}});
+    assert.equal(oneSided.ok, true);
+    assert.equal(layer.x, 30); assert.equal(layer.y, 40);
+    assert.equal(layer.width, 200);
+    assert.equal(layer.height, Math.max(1, Math.round(200 / ratio)));
+    const centered = await send({type:'layer.set_frame',payload:{layerId, x: 100, y: 100, width: 40, height: 20, anchor: 'center'}});
+    assert.equal(centered.ok, true);
+    assert.equal(layer.x, 80); assert.equal(layer.y, 90);
+    const before = { x: layer.x, y: layer.y, width: layer.width, height: layer.height };
+    for (const payload of [{layerId, width: 0}, {layerId, width: 10, height: 10, fit: 'fill'}, {layerId, width: 10, extra: 1}, {layerId: 'missing', width: 10}]) {
+      const rejected = await send({type:'layer.set_frame',payload});
+      assert.equal(rejected.ok, false);
+    }
+    assert.deepEqual({ x: layer.x, y: layer.y, width: layer.width, height: layer.height }, before);
+  });
   await test('canvas crop and resize are native reversible single history entries', async () => {
     const width=config.WIDTH,height=config.HEIGHT,x=config.layers[0].x;
     const crop=await send({type:'canvas.crop',payload:{x:10,y:10,width:200,height:100}});
