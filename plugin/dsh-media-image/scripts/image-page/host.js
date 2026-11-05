@@ -16,8 +16,18 @@ let connecting = null;
 
 async function boot() {
   if (accessToken) return accessToken;
-  const response = await fetch('/media-image/boot', { credentials: 'same-origin' });
-  if (!response.ok) throw Object.assign(new Error(`无法获取同源令牌（HTTP ${response.status}）`), { code: 'BOOT_FAILED' });
+  // 自定义头是同源判据：跨源页要带它必须先过 CORS 预检，而服务端不响应预检。
+  // 桌面端（Electron/webview）不带 Sec-Fetch-*，只靠那几个头会把同源页自己挡成 403。
+  const response = await fetch('/media-image/boot', { credentials: 'same-origin', headers: { 'x-dsh-media-boot': '1' } });
+  if (!response.ok) {
+    // 403 正文带着服务端观测到的请求头：只报状态码的话，用户没法把真实原因告诉我们。
+    let detail = '';
+    try {
+      const body = await response.json();
+      detail = [body.reason, body.observed ? JSON.stringify(body.observed) : ''].filter(Boolean).join(' · ');
+    } catch { /* 响应不是 JSON 就只报状态码 */ }
+    throw Object.assign(new Error(`无法获取同源令牌（HTTP ${response.status}）${detail ? '：' + detail : ''}`), { code: 'BOOT_FAILED' });
+  }
   accessToken = (await response.json()).accessToken;
   return accessToken;
 }

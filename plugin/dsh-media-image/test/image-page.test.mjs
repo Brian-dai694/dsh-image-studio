@@ -109,8 +109,22 @@ test('packaged wrapper binds the editor to the image relay only', async () => {
   assert.equal(script.status, 200);
   assert.match(script.body, /baseUrl: '\/media-image\/relay'/);
   assert.match(script.body, /editorKind: 'image'/);
+  // 桌面端（Electron）不带 Sec-Fetch-*：取令牌必须自己带同源自定义头，
+  // 并且 403 时把服务端观测字段显示出来，否则用户只能看到一个状态码。
+  assert.match(script.body, /'x-dsh-media-boot': '1'/, '取令牌需要带同源自定义头');
+  assert.match(script.body, /body\.reason/, '403 正文的 reason 要显示');
+  assert.match(script.body, /body\.observed/, '403 正文的观测字段要显示');
+  assert.match(script.body, /BOOT_FAILED/);
   // The page must not pretend it can call the model tool surface.
   assert.equal(/\/media\/(?:image-)?tools/.test(script.body), false);
+});
+
+test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {
+  // 这个坑真踩过：源码改了 highlight 转发，包内 public/image/host.js 还是旧副本，
+  // 部署后页面行为与仓库对不上。两边必须逐字节相同。
+  const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/image-page/host.js'));
+  const packaged = readFileSync(join(publicImage, 'host.js'));
+  assert.deepEqual(packaged, source, 'public/image/host.js 必须与 scripts/image-page/host.js 一致（跑 pack:image 或同步复制）');
 });
 
 test('packaged wrapper is valid ESM (node --check on .js would miss it)', () => {
