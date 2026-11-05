@@ -1,0 +1,6 @@
+# dsh-media-image bundle patch: insert one Host plugin row.
+- insert:
+    - id: dsh-media-image
+      name: dsh-media-image
+      config:
+        dataDir: !!js dshHomePath('image-studio')

@@ -49,6 +49,18 @@ flowchart LR
 - Host 负责白名单命令、`expectedRevision`、`commandId` 防重、写后审计与会话↔工程绑定。
 - 绑定走宿主原生审批：用户本人点「允许一次」，Host 复验页面与工程快照未变才登记。
 
+## 插件包
+
+`plugin/dsh-media-image/` 是可独立安装的 DSH 插件包，只注册图片这一次工具集：
+
+| 工具 | 作用 |
+| --- | --- |
+| `media_image_read_state` | 读工程状态；首次带 `bind:true` 触发原生审批绑定 |
+| `media_image_apply_command` | 提交白名单命令（`layer.*` / `canvas.*` / `history.*`），带 `expectedRevision` 与 `commandId` |
+| `media_image_get_command_result` | 结果未知时回查，避免盲目重放 |
+| `media_image_export_start` / `media_image_export_status` | PNG / JPEG 导出与状态 |
+
+路由前缀 `/media-image`，与视频插件包（`/media-video`）互不依赖、可同时安装。
 ## 快速开始
 
 ```bash
@@ -63,6 +75,7 @@ node host/pack-image.mjs                       # 生成插件内图片页产物
 | 路径 | 内容 |
 | --- | --- |
 | `miniPaint/` | miniPaint 底座：中文界面、Apple 主题、原生历史桥、PNG/JPEG 导出 |
+| `plugin/dsh-media-image/` | 独立插件包：Host 工具、命令门控、relay 与图片页产物 |
 | `host/` | 图片宿主页、同源 iframe transport、图片页打包脚本 |
 | `contracts/` | `editor-bridge.v1` 命令/状态契约、DSH 会话接口核查记录 |
 
@@ -78,3 +91,4 @@ node host/pack-image.mjs                       # 生成插件内图片页产物
 视频侧见 [dsh-video-studio](https://github.com/Brian-dai694/dsh-video-studio)。
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
