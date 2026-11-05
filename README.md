@@ -19,6 +19,10 @@
 `makeTranscript → buildDialogPlan → Conversation`，因此渲染路径与线上一致，只差数据来源。
 它**没有连接任何 DSH 会话**，不代表运行时行为，**不计入验收通过**。
 
+事件来源写在 `docs/fixtures/real-events.json` 的每条 `fixtureOrigin` 里：**14 条是 FDE 在 0.2.1 上抓的原文**
+（`probe`，含 `REVISION_CONFLICT` 那对 39/40），**2 条是 `synthetic`**，仅用于证明「只有显式
+`meta.status='unknown'` 才显示结果未知」。来源守卫测试会逐字段比对 `probe` 条目与抓包原文。
+
 覆盖：用户消息、助手 Markdown（标题/列表/代码块/行内代码/引用/链接/内联图片）、助手流式增量、
 工具卡片四态（`applied` / `rejected` / `unknown` / `pending`）、审批四态、会话错误、裸 JSON 兜底
 （「这一步已执行（无法解析摘要）」+ 仅剪贴板诊断）、三种空状态（未绑定 / 已绑定无消息 / 解析失败）。
