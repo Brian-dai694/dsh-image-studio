@@ -56,7 +56,7 @@ function makeContext() {
 
 test('client bundle exports the Cordis contract', async () => {
   const client = await loadClient();
-  assert.equal(client.name, 'dsh-media-studio');
+  assert.equal(client.name, 'dsh-media-image');
   assert.deepEqual(client.inject, ['slots', 'layout', 'remote', 'remote.session', 'uiWorkspace']);
   assert.equal(typeof client.apply, 'function');
 });
@@ -130,7 +130,7 @@ test('main keyed panels only own anchors and one root overlay owns retained edit
   client.apply(ctx); flush();
   const retained = registered.filter(item => item.definition.name === 'shell.overlay');
   assert.equal(retained.length, 1);
-  assert.equal(retained[0].definition.id, 'media-retained-editors');
+  assert.equal(retained[0].definition.id, 'media-image-retained-editors');
   for (const main of registered.filter(item => item.definition.name === 'main')) assert.equal(main.component.name, 'EditorAnchor');
 });
 
@@ -287,12 +287,12 @@ test('retained editors follow host panel navigation, hide native conversation an
   }
   activePanelId = 'media-image-editor'; listener();
   assert.equal(visible('media-image-editor'), true, 'returning to the editor must restore the pane');
-  assert.equal(client.chat.retainedVisible(activePanelId, 'media-video-editor', node, rect), false);
+  assert.equal(client.chat.retainedVisible(activePanelId, 'media-other-panel', node, rect), false);
   assert.equal(client.chat.retainedVisible(activePanelId, activePanelId, {...node,isConnected:false}, rect), false);
   assert.equal(client.chat.retainedVisible(activePanelId, activePanelId, node, {width:0,height:0}), false);
   assert.equal(client.chat.retainedVisible(activePanelId, activePanelId, null, rect), false);
   assert.equal(client.chat.isEditorPanel('media-image-editor'), true);
-  assert.equal(client.chat.isEditorPanel('plugins'), false);
+  assert.equal(client.chat.isEditorPanel('media-video-editor'), false);
   stop(); assert.equal(disposed, true);
   client.chat.watchPanel({}, id => assert.equal(id, null));
 });
@@ -304,7 +304,7 @@ test('a detached cached anchor is replaced by the live panel anchor instead of b
   globalThis.document = {querySelector: sel => sel === '[data-media-anchor="media-image-editor"]' ? live : null};
   assert.equal(client.chat.resolveAnchor(detached, 'media-image-editor', 'media-image-editor'), live);
   assert.equal(client.chat.resolveAnchor(live, 'media-image-editor', 'media-image-editor'), live);
-  assert.equal(client.chat.resolveAnchor(detached, 'media-image-editor', 'plugins'), null, 'no anchor for a non-editor panel');
+  assert.equal(client.chat.resolveAnchor(detached, 'media-image-editor', 'media-video-editor'), null, 'no anchor for a non-editor panel');
   globalThis.document = {querySelector: () => null};
   assert.equal(client.chat.resolveAnchor(detached, 'media-image-editor', 'media-image-editor'), null);
   delete globalThis.document;
@@ -327,25 +327,32 @@ test('hidden retained layer releases owned focus without blurring other panels',
   delete globalThis.document;
 });
 
-test('video results retain command evidence and expose history conflicts without offering stale undo', async () => {
+test('image results retain command evidence and expose history conflicts without offering stale undo', async () => {
   const client = await loadClient(), reduce = client.chat.makeTranscript();
-  const result = {commandId:'video-edit-1',revision:3,afterDigest:'digest-3'};
-  const rows = reduce({type:'event',event:{seq:1,type:'tool/result',data:{toolName:'media_image_apply',result}}});
-  assert.deepEqual(rows[0].undo,{commandId:'video-edit-1',appliedRevision:3,afterDigest:'digest-3'});
+  const result = {commandId:'image-edit-1',revision:3,afterDigest:'digest-3'};
+  const rows = reduce({type:'event',event:{seq:1,type:'tool/result',data:{toolName:'media_image_apply_command',result}}});
+  assert.deepEqual(rows[0].undo,{commandId:'image-edit-1',appliedRevision:3,afterDigest:'digest-3'});
   const conflict = reduce({type:'event',event:{seq:2,type:'tool/result',data:{result:{...result,error:{code:'HISTORY_CONFLICT'}}}}});
   assert.match(conflict[1].issue,/已有后续人工或 AI 修改/);
   assert.equal(conflict[1].undo,null);
-  const video = client.chat.undoPrompt('video',rows[0].undo);
-  assert.match(video,/operation="media.video.history.undo"/);
-  assert.match(video,/targetCommandId/);
-  assert.match(video,/HISTORY_CONFLICT.*停止/);
-  assert.match(client.chat.undoPrompt('image',rows[0].undo),/operation="history.undo"/);
+  const prompt = client.chat.undoPrompt(rows[0].undo);
+  assert.match(prompt,/operation="history\.undo"/);
+  assert.match(prompt,/targetCommandId/);
+  assert.match(prompt,/HISTORY_CONFLICT.*停止/);
 });
 
-test('video panel visibility uses the same host navigation contract as images', async () => {
+test('image panel visibility uses the host navigation contract', async () => {
   const client = await loadClient(), node = {isConnected:true}, rect = {width:640,height:480};
-  assert.equal(client.chat.retainedVisible('media-video-editor','media-video-editor',node,rect),true);
-  for (const id of [null,'plugins','media-image-editor']) assert.equal(client.chat.retainedVisible(id,'media-video-editor',node,rect),false);
+  assert.equal(client.chat.retainedVisible('media-image-editor','media-image-editor',node,rect),true);
+  for (const id of [null,'plugins','media-video-editor']) assert.equal(client.chat.retainedVisible(id,'media-image-editor',node,rect),false);
+});
+
+test('the image package registers under its own plugin name and overlay id', async () => {
+  const client = await loadClient();
+  assert.equal(client.name, 'dsh-media-image');
+  assert.equal(client.chat.retainedOverlayId, 'media-image-retained-editors');
+  assert.notEqual(client.chat.retainedOverlayId, 'media-video-retained-editors');
+  assert.notEqual(client.chat.retainedOverlayId, 'media-retained-editors', '共用 overlay id 会被 root list 槽位拒绝并吞掉侧栏入口');
 });
 
 test('a missing slots service degrades instead of throwing', async () => {

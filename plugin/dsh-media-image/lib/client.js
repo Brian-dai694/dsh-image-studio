@@ -14,6 +14,9 @@ window.__ModuleLoader__.load({
     var PANEL_LIST = 'sidebar.panellist'
     var MAIN = 'main'
     var ORDER = -3
+    // Rewritten per package by split-packages.mjs: two merged packages sharing one overlay
+    // id would collide in the root list slot and drop one editor's sidebar entry.
+    var RETAINED_OVERLAY_ID = 'media-image-retained-editors'
     var EASE = 'cubic-bezier(.25,.1,.25,1)'
 
     var ENTRIES = [
@@ -73,7 +76,12 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    /** Subscribe to a session stream; returns a disposer, or null when unsupported. */
+    /**
+     * 订阅一个专属会话的消息流，返回取消函数；宿主不支持订阅时返回 null。
+     * 参数：remote 宿主 Remote 服务、sessionId 目标会话、onEvent 逐帧回调、onError 异常回调。
+     * 取消语义：置位标志 → abort 信号 → 调 iterator.return，之后到达的帧一律丢弃，
+     * 避免切页或换绑后旧会话的迟到消息污染当前对话。
+     */
     function followSession(remote, sessionId, onEvent, onError) {
       var session = remote && remote.session
       if (!session || typeof session.follow !== 'function') return null
@@ -141,9 +149,29 @@ window.__ModuleLoader__.load({
       }
       return null
     }
-    function undoPrompt(kind, evidence) {
-      var operation = kind === 'video' ? 'media.video.history.undo' : 'history.undo'
+    /**
+     * 生成「定向撤销」的提示词：把命令 id、修订号、摘要交给模型，要求它先 read_state 核对
+     * 该命令仍在历史栈顶且 digest 一致，再带 targetCommandId+afterDigest 执行；
+     * 不一致或返回 HISTORY_CONFLICT 时必须停止，不允许重试旧命令。
+     */
+    function undoPrompt(evidence) {
+      var operation = 'history.undo'
       return '请撤销这一条修改。先 read_state 核对 history.lastCommandId=' + evidence.commandId + '、history.appliedRevision=' + evidence.appliedRevision + '、history.afterDigest=' + evidence.afterDigest + ' 与当前 revision/stateDigest 一致且仍在栈顶；不一致或 HISTORY_CONFLICT 就停止并说明已有后续修改，不重试旧命令。确认后使用 operation="' + operation + '", params=' + JSON.stringify({ targetCommandId: evidence.commandId, afterDigest: evidence.afterDigest }) + '，携带最新 expectedRevision，执行后回读。'
+    }
+    /**
+     * 从工具回执里找导出的artifactRef：只用于在界面上提供真实「另存」入口。
+     * Host 侧通常是合成引用（artifact://…），因此按钮会请编辑器自己再导一次，而不是直接打开该引用。
+     */
+    function exportEvidence(value, depth) {
+      if (!value || typeof value !== 'object' || depth > 6) return null
+      if (typeof value.artifactRef === 'string' || typeof value.exportId === 'string') {
+        return { artifactRef: typeof value.artifactRef === 'string' ? value.artifactRef : null, exportId: typeof value.exportId === 'string' ? value.exportId : null, format: /jpe?g/i.test(String(value.mimeType || value.format || '')) ? 'jpeg' : 'png' }
+      }
+      for (var key of ['result', 'value', 'originalResult', 'output', 'data']) {
+        var found = exportEvidence(value[key], depth + 1)
+        if (found) return found
+      }
+      return null
     }
     function watchPanel(layout, onChange) {
       var store = layout && layout.panelInfo
@@ -153,7 +181,7 @@ window.__ModuleLoader__.load({
       sync()
       return off
     }
-    var EDITOR_IDS = ['media-image-editor', 'media-video-editor']
+    var EDITOR_IDS = ['media-image-editor']
     function isEditorPanel(panelId) { return EDITOR_IDS.indexOf(panelId) >= 0 }
     /** Measured box, or null while the node is absent or not laid out yet. */
     function measureRect(node) {
@@ -168,6 +196,11 @@ window.__ModuleLoader__.load({
      * panel and a return mounts a fresh one, so a cached node can be detached: fall back
      * to the marker the anchor renders, never to a cached detached node.
      */
+    /**
+     * 取当前面板对应的锚点节点：切页时 keyed main 面板会卸载重挂，缓存节点可能已脱离文档，
+     * 因此失效时按 data-media-anchor 重新查询存活节点，绝不继续用旧引用（否则 overlay 永久隐藏）。
+     * 参数：node 缓存节点、nodeId 缓存节点所属入口 id、panelId 宿主当前激活的 main key。
+     */
     function resolveAnchor(node, nodeId, panelId) {
       if (!isEditorPanel(panelId)) return null
       if (node && node.isConnected === true && nodeId === panelId) return node
@@ -177,7 +210,10 @@ window.__ModuleLoader__.load({
         return found && found.isConnected === true ? found : null
       } catch (_) { return null }
     }
-    /** Visible only when the host says this panel is active and its anchor is laid out. */
+    /**
+     * 是否显示常驻编辑器：必须同时满足「宿主激活的 main key 就是本入口」「锚点仍在文档中」
+     * 「锚点有实际尺寸」。任一不满足就只隐藏、不卸载，工程与撤销栈因此保留。
+     */
     function retainedVisible(panelId, entryId, node, rect) {
       return panelId === entryId && !!node && node.isConnected === true && !!rect && rect.width > 0 && rect.height > 0
     }
@@ -243,7 +279,7 @@ window.__ModuleLoader__.load({
           } else if (e.type === 'approval/decided') {
             rows.push({ id: 'event-'+e.seq, role: 'approval', text: approvalText(d.outcome) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
-            rows.push({ id: 'event-'+e.seq, role: 'tool', issue: e.type === 'tool/result' ? resultIssue(d, 0) : null, undo: e.type === 'tool/result' && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: (e.type === 'tool/call' ? '调用工具：' : '工具返回：') + JSON.stringify(d).slice(0, 3000) })
+            rows.push({ id: 'event-'+e.seq, role: 'tool', issue: e.type === 'tool/result' ? resultIssue(d, 0) : null, exportRef: e.type === 'tool/result' ? exportEvidence(d, 0) : null, undo: e.type === 'tool/result' && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: (e.type === 'tool/call' ? '调用工具：' : '工具返回：') + JSON.stringify(d).slice(0, 3000) })
           }
         })
         attempts.forEach(function (a, id) {
@@ -372,14 +408,31 @@ window.__ModuleLoader__.load({
         try {
           var current = await readBinding(props.frameRef.current, props.kind)
           if (bindingKey(current) !== bindingKey(b)) { setReady(false); stopRef.current?.(); throw new Error('工程已变化，请重新绑定对话') }
-          var videoContract = b.editorKind === 'video' ? '\n视频操作契约：operation="media.video.overlay.add" 时 params={kind:"text",text:用户指定文字,startUs:非负整数,durationUs:正整数}；时间单位微秒，1秒=1000000微秒。图片叠加用 kind:"image",sourceRef，仍须 startUs/durationUs。禁止 startTime/duration 参数。只用对应 media_video_* 工具，先 read_state，再使用读回的 revision/digest 与绑定身份提交，成功后再次 read_state。' : ''
-          var context = '当前编辑工程身份：' + JSON.stringify(b) + '\n首次尚无 Host 授权时，对应 read_state 显式传 bind:true，申请原生审批；等待用户本人在原生会话回答，拒绝/取消/不可用时停止，不修改策略、不重试冒充授权。已授权的后续 read_state 省略 bind。仅操作上述工程；先通过对应 media_' + b.editorKind + '_* 工具读取并核对身份、修订，再执行授权修改。身份不一致时停止。' + videoContract + '\n用户指令：\n'
+          var context = '当前编辑工程身份：' + JSON.stringify(b) + '\n首次尚无 Host 授权时，对应 read_state 显式传 bind:true，申请原生审批；等待用户本人在原生会话回答，拒绝/取消/不可用时停止，不修改策略、不重试冒充授权。已授权的后续 read_state 省略 bind。仅操作上述工程；先通过对应 media_' + b.editorKind + '_* 工具读取并核对身份、修订，再执行授权修改。身份不一致时停止。' + '\n用户指令：\n'
           var result = await sendPrompt(props.getRemote(), b.sessionId, context + text)
           if (!aliveRef.current || bindingRef.current !== b) return
           if (result.ok) { setDraft(''); setStatus('消息已受理，等待真实会话反馈') }
           else { setStatus(result.message); if (result.unknown) setReady(false) }
         } catch (error) { if (aliveRef.current) setStatus(error.message) }
         finally { sendingRef.current = false; if (aliveRef.current) setBusy(false) }
+      }
+
+      // The Host only carries a synthetic artifact ref, so a real file can only be produced by
+      // the page that owns the editor. Ask it to export and hand the download back to the user.
+      function downloadExport(evidence) {
+        var frame = props.frameRef.current
+        if (!frame || !frame.contentWindow) { setStatus('编辑器尚未就绪，无法保存导出文件'); return }
+        var requestId = crypto.randomUUID()
+        function receive(event) {
+          if (event.origin !== location.origin || event.source !== frame.contentWindow || event.data?.type !== 'media.export.result' || event.data.requestId !== requestId) return
+          finish()
+          if (event.data.ok) setStatus('已请求编辑器导出并触发下载；请查看浏览器下载列表。')
+          else setStatus('保存失败：' + (event.data.error || '编辑器未返回原因'))
+        }
+        function finish() { window.removeEventListener('message', receive); clearTimeout(timer) }
+        var timer = setTimeout(function () { finish(); setStatus('编辑器未在 20 秒内完成导出，结果未知，请稍后核对下载列表') }, 20000)
+        window.addEventListener('message', receive)
+        frame.contentWindow.postMessage({ type: 'media.export.download', requestId: requestId, format: evidence.format || 'png' }, location.origin)
       }
 
       function onKeyDown(event) {
@@ -418,10 +471,15 @@ window.__ModuleLoader__.load({
               },
             }, message.text,
             message.issue ? React.createElement('div', { role: 'status', style: { marginTop: 8, fontWeight: 500 } }, message.issue) : null,
+            message.exportRef ? React.createElement('div', { style: { marginTop: 8, fontSize: 11 } }, '导出：' + (message.exportRef.exportId || '') + ' · ' + (message.exportRef.artifactRef || '仅回执，无文件引用')) : null,
+            message.exportRef ? React.createElement('button', {
+              type: 'button', onClick: function () { downloadExport(message.exportRef) },
+              style: { display: 'block', marginTop: 6, border: 0, borderRadius: 12, padding: '8px 12px', background: '#ffffff', color: '#0071e3', cursor: 'pointer' },
+            }, '在编辑器中另存为文件') : null,
             message.undo ? React.createElement('div', { style: { marginTop: 8, fontSize: 11 } }, '命令：' + message.undo.commandId + '\n修订：' + message.undo.appliedRevision + '\n摘要：' + message.undo.afterDigest) : null,
             message.undo ? React.createElement('button', {
               type: 'button', disabled: true, title: '定向撤销尚待真实页面验收，暂不可用',
-              onClick: function () { void submit(undoPrompt(props.kind, message.undo)) },
+              onClick: function () { void submit(undoPrompt(message.undo)) },
               style: { display: 'block', marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#ffffff', color: '#0071e3', cursor: 'pointer' },
             }, '撤销这一步') : null)
           })),
@@ -466,7 +524,7 @@ window.__ModuleLoader__.load({
             ref: frameRef, src: entry.src, title: entry.label,
             style: { flex: 1, border: 0, display: 'block', minWidth: 0, background: '#f5f5f7' },
           }),
-          React.createElement(Conversation, { label: entry.label, kind: entry.id === 'media-image-editor' ? 'image' : 'video', frameRef: frameRef, getRemote: getRemote, getWorkspace: getWorkspace, active: props?.active !== false })
+          React.createElement(Conversation, { label: entry.label, kind: 'image', frameRef: frameRef, getRemote: getRemote, getWorkspace: getWorkspace, active: props?.active !== false })
         )
       }
     }
@@ -549,7 +607,15 @@ window.__ModuleLoader__.load({
           return React.createElement(RetainedLayer, {key:entry.id, entry:entry, page:pages[index], visible:visible, rect:rect})
         }))
       }
-      var offRetained = slots.inject('shell.overlay', function () { return slots.register({ name:'shell.overlay', id:'media-retained-editors', order:0 }, RetainedEditors) })
+      // One overlay entry per client package: `shell.overlay` is a root list slot that
+      // rejects duplicate ids, and a throw here must not abort the sidebar registration
+      // below (a failed overlay would otherwise show up as a silently missing entry).
+      var offRetained = null
+      try {
+        offRetained = slots.inject('shell.overlay', function () { return slots.register({ name:'shell.overlay', id: RETAINED_OVERLAY_ID, order:0 }, RetainedEditors) })
+      } catch (error) {
+        if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 常驻编辑器 overlay 注册失败：', RETAINED_OVERLAY_ID, String(error))
+      }
       if (typeof offRetained === 'function') disposers.push(offRetained)
       // forEach, not a `for (var i ...)`: `slots.inject` runs its factory later, so a
       // function-scoped `entry` would leave both registrations pointing at the last entry.
@@ -576,12 +642,12 @@ window.__ModuleLoader__.load({
       catch (_) { install(ctx) }
     }
 
-    exports.name = 'dsh-media-studio'
+    exports.name = 'dsh-media-image'
     exports.inject = ['slots', 'layout', 'remote', 'remote.session', 'uiWorkspace']
     exports.apply = apply
     exports.entries = ENTRIES
     // Exposed for the contract tests; the host only consumes name/inject/apply.
-    exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, watchPanel: watchPanel, retainedVisible: retainedVisible, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: retainedVisible, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody }
+    exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody }
     return module.exports
   },
 })
