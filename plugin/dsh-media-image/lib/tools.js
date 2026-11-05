@@ -89,7 +89,18 @@ const EXPORT_STATUS_PARAMS = kind => ({
   projectId: { type: 'string', required: true, description: 'Explicit Host-bound project id.' },
 });
 
-const renderSummary = (_args, value) => [{ type: 'text', text: `${value.status} · ${value.commandId}${value.revision === undefined ? '' : ` · R${value.revision}`}${value.error ? ` · ${value.error.code}` : ''}` }];
+// The model only ever sees this text, never the canonical value. An export therefore has
+// to surface `exportId` (the only handle for the follow-up status call) and the finished
+// `artifactRef`; writes keep the compact status/command/revision shape.
+const renderSummary = (_args, value) => [{
+  type: 'text',
+  text: [
+    `${value.status} · ${value.commandId}${value.revision === undefined ? '' : ` · R${value.revision}`}`,
+    ...(value.exportId ? [`exportId ${value.exportId}`] : []),
+    ...(value.artifactRef ? [`artifactRef ${value.artifactRef}`] : []),
+    ...(value.error ? [value.error.code] : []),
+  ].join(' · '),
+}];
 
 // read_state is the only way a model learns projectId / digest / history, so the render
 // must carry them as text; the model never sees the tool's canonical JSON value.

@@ -6,6 +6,11 @@ import { apply } from '../lib/index.js';
 import { TOOL_KINDS } from '../lib/gate.js';
 import { createMediaBridge } from '../lib/bridge.js';
 import { createEditorRelay } from '../lib/relay.js';
+import { registerMediaTools } from '../lib/tools.js';
+import { createApprovalStore } from '../lib/gate.js';
+import { fixtureBindings } from './host-fixture.mjs';
+
+const exec = { agent: { id: 's1', session: { id: 's1' } } };
 
 function makeContext() {
   const tools = new Map();
@@ -57,4 +62,24 @@ test('the bridge defaults to the image kind and still refuses the video kind', (
   const bridge = createMediaBridge({ relay: { request: async () => ({}) } });
   assert.equal(bridge.editorKind, 'image');
   assert.throws(() => createMediaBridge({ relay: { request: async () => ({}) }, editorKind: 'video' }), { name: 'TypeError' });
+});
+
+test('export renders carry the exportId/artifactRef the model needs; writes stay compact', async () => {
+  const tools = new Map();
+  const bridge = {
+    editorKind: 'image',
+    readState: async () => ({ editorKind: 'image', editorInstanceId: 'i1', documentId: 'p1', revision: 2, stateDigest: 'd2', canvas: { width: 10, height: 10 }, layers: [] }),
+    applyCommand: async input => ({ editorKind: 'image', documentId: 'p1', commandId: input.commandId, revision: 3, changedObjectIds: [], stateDigest: 'd3' }),
+    startExport: async input => ({ editorKind: 'image', commandId: input.commandId, exportId: 'exp-1', status: 'ready', artifactRef: 'artifact://exp-1' }),
+    getExportStatus: async () => ({ editorKind: 'image', exportId: 'exp-1', status: 'ready', artifactRef: 'artifact://exp-1' }),
+  };
+  registerMediaTools({ tools: { register: definition => tools.set(definition.name, definition), guard: () => {} } }, { bridge, approvals: createApprovalStore(), bindings: fixtureBindings });
+  const render = (name, args, value) => tools.get(name).output.render(args, value).map(block => block.text).join('\n');
+  const startArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'e-1', expectedRevision: 2, format: 'png' };
+  assert.match(render('media_image_export_start', startArgs, await tools.get('media_image_export_start').execute(startArgs, exec)), /exportId exp-1/);
+  const statusArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', exportId: 'exp-1' };
+  assert.match(render('media_image_export_status', statusArgs, await tools.get('media_image_export_status').execute(statusArgs, exec)), /artifactRef artifact:\/\/exp-1/);
+  const applyArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'c-plain', expectedRevision: 2, operation: 'layer.update_text', params: {} };
+  const applyText = render('media_image_apply_command', applyArgs, await tools.get('media_image_apply_command').execute(applyArgs, exec));
+  assert.doesNotMatch(applyText, /exportId|artifactRef/);
 });
