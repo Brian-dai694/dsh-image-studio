@@ -185,49 +185,96 @@ window.__ModuleLoader__.load({
       })
     }
     function bindingKey(b) { return [b.editorKind, b.projectId, b.pageId, b.editorInstanceId].join(':') }
-    function undoEvidence(value, depth) {
-      if (!value || typeof value !== 'object' || depth > 6) return null
-      if (typeof value.commandId === 'string' && Number.isSafeInteger(value.revision) && typeof value.afterDigest === 'string') return { commandId: value.commandId, appliedRevision: value.revision, afterDigest: value.afterDigest }
-      for (var key of ['result', 'value', 'originalResult', 'output', 'data']) {
-        var found = undoEvidence(value[key], depth + 1)
-        if (found) return found
+    // 真实会话里 tool/result 的外壳比契约示例深一层（例如 {result:{ok,value}}、或回执正文
+    // 放在 content[{type:'text',text:'{...}'}] 里）。所以不写死某条路径，而是把所有"可能是回执"
+    // 的层收集起来再按字段取第一个可用值：少一层/多一层/纯文本 JSON 都能解析。
+    var FACT_KEYS = ['result', 'value', 'output', 'data', 'call', 'payload', 'response', 'content', 'parts', 'blocks', 'items', 'messages'];
+    function factSources(root) {
+      var out = [], queue = [root], seen = new Set();
+      while (queue.length && out.length < 64) {
+        var value = queue.shift();
+        if (value === undefined || value === null) continue;
+        if (typeof value === 'string') {
+          var trimmed = value.trim();
+          if (trimmed.charAt(0) !== '{') continue;
+          try { value = JSON.parse(trimmed) } catch (_) { continue }
+        }
+        if (Array.isArray(value)) { value.forEach(function (item) { queue.push(item) }); continue }
+        if (typeof value !== 'object' || seen.has(value)) continue;
+        seen.add(value); out.push(value);
+        for (var index = 0; index < FACT_KEYS.length; index += 1) {
+          var next = value[FACT_KEYS[index]];
+          if (next !== undefined && next !== null) queue.push(next);
+        }
+        if (typeof value.text === 'string') queue.push(value.text);
       }
-      return null
+      return out;
     }
-    function resultIssue(value, depth) {
-      if (!value || typeof value !== 'object' || depth > 6) return null
-      if (value.code === 'HISTORY_CONFLICT') return '已有后续人工或 AI 修改，不能单独撤销这一步。请回读当前历史；不要重试旧命令。'
-      for (var key of ['error', 'result', 'value', 'originalResult', 'output', 'data']) {
-        var found = resultIssue(value[key], depth + 1)
-        if (found) return found
+    function pickAny(sources, keys) {
+      for (var index = 0; index < sources.length; index += 1) {
+        for (var key = 0; key < keys.length; key += 1) {
+          var value = sources[index][keys[key]];
+          if (value !== undefined && value !== null && value !== '') return value;
+        }
       }
-      return null
+      return undefined;
+    }
+    var stringOf = value => typeof value === 'string' && value ? value : undefined;
+    /** 一次把回执里所有用得到的字段抽出来：状态、修订、错误码、撤销凭据、导出引用。 */
+    function toolFacts(data) {
+      var sources = factSources(data);
+      var error = pickAny(sources, ['error']);
+      var errorCode;
+      if (typeof error === 'string') errorCode = error;
+      else if (error && typeof error === 'object') errorCode = stringOf(error.code);
+      if (!errorCode) {
+        var bareCode = stringOf(pickAny(sources, ['code']));
+        if (bareCode && /^[A-Z][A-Z0-9_]{3,}$/.test(bareCode)) errorCode = bareCode;
+      }
+      if (!errorCode && pickAny(sources, ['ok']) === false) errorCode = 'TOOL_ERROR';
+      var revision = pickAny(sources, ['revision', 'appliedRevision']);
+      var format = stringOf(pickAny(sources, ['format', 'mimeType']));
+      return {
+        toolName: stringOf(pickAny(sources, ['toolName'])) || '',
+        status: stringOf(pickAny(sources, ['status'])) || '',
+        revision: Number.isSafeInteger(revision) ? revision : undefined,
+        errorCode: errorCode,
+        commandId: stringOf(pickAny(sources, ['commandId', 'targetCommandId'])),
+        afterDigest: stringOf(pickAny(sources, ['afterDigest'])),
+        exportId: stringOf(pickAny(sources, ['exportId'])),
+        artifactRef: stringOf(pickAny(sources, ['artifactRef'])),
+        format: format,
+      };
+    }
+    function undoEvidence(value) {
+      var facts = toolFacts(value);
+      if (!facts.commandId || !Number.isSafeInteger(facts.revision) || !facts.afterDigest) return null;
+      return { commandId: facts.commandId, appliedRevision: facts.revision, afterDigest: facts.afterDigest };
     }
     /**
      * 撤销指令：只把带凭据的指令填进输入框，由会话里的 Agent 执行。
      * 凭据缺一项就不生成文案——宁可不给按钮，也不给一个跑不通的指令。
      */
     function undoPrompt(evidence) {
-      var undo = sanitizeUndo(evidence)
-      if (!undo) return ''
+      var undo = sanitizeUndo(evidence);
+      if (!undo) return '';
       return '撤销上一步修改：使用 history.undo，params={"targetCommandId":"' + undo.commandId + '","afterDigest":"' + undo.afterDigest + '"}'
         + '（commandId=' + undo.commandId + '，appliedRevision=' + undo.appliedRevision + '）。'
-        + '先 read_state 确认这一步仍是历史栈顶；若返回 HISTORY_CONFLICT 说明已有后续修改，立即停止并说明，不要重试或绕过。'
+        + '先 read_state 确认这一步仍是历史栈顶；若返回 HISTORY_CONFLICT 说明已有后续修改，立即停止并说明，不要重试或绕过。';
+    }
+    function resultIssue(value) {
+      var facts = toolFacts(value);
+      if (facts.errorCode === 'HISTORY_CONFLICT') return '已有后续人工或 AI 修改，不能单独撤销这一步。请回读当前历史；不要重试旧命令。';
+      return null;
     }
     /**
      * 从工具回执里找导出的artifactRef：只用于在界面上提供真实「另存」入口。
      * Host 侧通常是合成引用（artifact://…），因此按钮会请编辑器自己再导一次，而不是直接打开该引用。
      */
-    function exportEvidence(value, depth) {
-      if (!value || typeof value !== 'object' || depth > 6) return null
-      if (typeof value.artifactRef === 'string' || typeof value.exportId === 'string') {
-        return { artifactRef: typeof value.artifactRef === 'string' ? value.artifactRef : null, exportId: typeof value.exportId === 'string' ? value.exportId : null, format: /jpe?g/i.test(String(value.mimeType || value.format || '')) ? 'jpeg' : 'png' }
-      }
-      for (var key of ['result', 'value', 'originalResult', 'output', 'data']) {
-        var found = exportEvidence(value[key], depth + 1)
-        if (found) return found
-      }
-      return null
+    function exportEvidence(value) {
+      var facts = toolFacts(value);
+      if (!facts.exportId && !facts.artifactRef) return null;
+      return { exportId: facts.exportId || null, artifactRef: facts.artifactRef || null, format: /jpe?g/i.test(String(facts.format || '')) ? 'jpeg' : 'png' };
     }
     function watchPanel(layout, onChange) {
       var store = layout && layout.panelInfo
@@ -315,21 +362,21 @@ window.__ModuleLoader__.load({
      * 把工具回执压成一张可读卡片：工具中文名、状态、修订号、一行说明。
      * 聊天面板只显示这些结构化字段，绝不把 canonical JSON 原样铺给用户。
      */
-    function toolCard(data, isCall) {
+    function toolCard(data, isCall, fallbackName) {
       if (!data || typeof data !== 'object') return null
-      var payload = data.arguments || data.result || data.value || data
-      var rawName = data.toolName || data.name || payload.toolName || ''
+      // 走统一的字段抽取：真实事件的外壳可能多一层（result.value / call.* / content 文本 JSON）。
+      var facts = toolFacts(data)
+      var rawName = facts.toolName || fallbackName || ''
       var name = TOOL_NAMES[rawName] || rawName || '工具调用'
-      var status = (isCall ? 'running' : null) || data.status || payload.status || ''
-      var revision = payload.revision ?? data.revision
-      var errorCode = payload.error?.code || payload.code || (Array.isArray(data.content) ? null : null)
+      var status = isCall ? 'running' : facts.status
+      var revision = facts.revision
+      var errorCode = facts.errorCode
       var line = ''
       if (!isCall) {
         if (errorCode) line = ERROR_TEXT[errorCode] || ('操作没有完成：' + errorCode)
-        else if (payload.operation) line = String(payload.operation)
-        else if (payload.exportId) line = '导出任务 ' + payload.exportId + (status ? ' · ' + status : '')
-        else if (payload.documentId) line = '工程 ' + String(payload.documentId).slice(0, 8)
-        else if (payload.layersCount !== undefined) line = payload.layersCount + ' 个图层'
+        else if (facts.exportId) line = '导出任务 ' + facts.exportId + (status ? ' · ' + status : '')
+        else if (facts.artifactRef) line = '导出文件已就绪'
+        else if (revision !== undefined) line = '修订 R' + revision
       }
       return { name: name, status: status || (isCall ? 'running' : (errorCode ? 'rejected' : 'unknown')), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
     }
@@ -571,6 +618,9 @@ window.__ModuleLoader__.load({
           }
         }
         var rows = []
+        // tool/call 行带工具名，tool/result 行在很多外壳里只有回执、没有名字：
+        // 按顺序把上一条 call 的名字带给结果行，避免整屏都叫「工具调用」。
+        var lastName = null
         Array.from(events.values()).sort(function (a,b) { return a.seq-b.seq }).forEach(function (e) {
           var d = e.data || {}, message = d.message || d
           if (e.type === 'user/message' || e.type === 'assistant/message') {
@@ -595,7 +645,9 @@ window.__ModuleLoader__.load({
             rows.push({ id: 'event-'+e.seq, role: 'error', text: String(failureText) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
             var isCall = e.type === 'tool/call'
-            rows.push({ id: 'event-'+e.seq, role: 'tool', card: toolCard(d, isCall), issue: isCall ? null : resultIssue(d, 0), exportRef: isCall ? null : exportEvidence(d, 0), undo: !isCall && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: '' })
+            var card = toolCard(d, isCall, isCall ? null : lastName)
+            if (isCall && card && card.name) lastName = card.name
+            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '' })
           }
         })
         attempts.forEach(function (a, id) {

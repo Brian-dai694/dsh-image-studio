@@ -457,6 +457,41 @@ test('binding can attach an existing session, and refuses one that belongs to an
   assert.equal(client.chat.projectMismatch([], 'proj-a'), null, '没有标记不拒绝，交给 read_state/审批把关');
 });
 
+test('real tool/result envelopes map to applied/rejected/undo/export instead of unknown', async () => {
+  const client = await loadClient();
+  const reduce = client.chat.makeTranscript();
+  // 真机回执的外壳：{call:{toolName}} + {result:{ok,value}}，也支持回执正文放在 content 文本 JSON 里
+  const envelope = [
+    { seq: 1, type: 'tool/call', data: { call: { toolName: 'media_image_apply_command', arguments: { operation: 'layer.add_text' } } } },
+    { seq: 2, type: 'tool/result', data: { call: { toolName: 'media_image_apply_command' }, result: { ok: true, value: { status: 'applied', revision: 1, commandId: 'fde-acceptance-addtext-001', afterDigest: 'fnv1a64-0000000000000001', operation: 'layer.add_text' } } } },
+    { seq: 3, type: 'tool/result', data: { result: { ok: false, error: { code: 'REVISION_CONFLICT' }, value: { status: 'rejected', revision: 1 } } } },
+    { seq: 4, type: 'tool/result', data: { result: { value: { status: 'applied', revision: 2, exportId: 'a0196778-e614-45bf-9e94-88a1f9d6c0a5', artifactRef: 'blob:http://127.0.0.1:59302/621b9acb' } } } },
+    { seq: 5, type: 'tool/result', data: { result: { content: [{ type: 'text', text: JSON.stringify({ status: 'applied', revision: 3, commandId: 'cmd-text-shape', afterDigest: 'fnv1a64-0000000000000003' }) }] } } },
+    { seq: 6, type: 'tool/result', data: { result: { ok: true, value: { status: 'applied', revision: 4 } } } },
+  ];
+  const rows = reduce({ type: 'snapshot', header: { id: 's1' }, records: envelope.map(event => ({ event })) });
+  const plan = client.chat.buildDialogPlan(rows);
+  const toolRows = plan.filter(item => item.kind === 'tool');
+  assert.deepEqual(toolRows.map(item => item.badge), ['pending', 'applied', 'rejected', 'applied', 'applied', 'applied']);
+  // 名字：结果行沿用上一条 call 的工具名，不再整屏「工具调用」
+  assert.deepEqual(toolRows.slice(1).map(item => item.card.name), ['执行编辑', '执行编辑', '执行编辑', '执行编辑', '执行编辑']);
+  // REVISION_CONFLICT 必须显示"未执行"，并给出中文原因
+  assert.match(toolRows[2].card.line, /版本已变化/);
+  // 撤销：真实回执带 commandId/revision/afterDigest → 动作出现，且 prompt 带 targetCommandId
+  const undo = toolRows[1].actions.find(action => action.kind === 'fill-undo');
+  assert.ok(undo, '带凭据的 applied 回执必须给撤销动作');
+  assert.match(undo.prompt, /fde-acceptance-addtext-001/);
+  assert.ok(toolRows[4].actions.some(action => action.kind === 'fill-undo'), 'content 文本 JSON 里的凭据同样要认');
+  // 导出：真实 artifactRef 必须给下载动作
+  const exported = toolRows[3].actions.find(action => action.kind === 'download-export');
+  assert.ok(exported, '带 exportId 的回执必须给导出动作');
+  assert.equal(exported.export.exportId, 'a0196778-e614-45bf-9e94-88a1f9d6c0a5');
+  assert.match(exported.export.artifactRef, /^blob:/);
+  // 没有凭据的 applied 不给撤销按钮（宁可不给，也不给假按钮）
+  assert.equal(toolRows[5].actions.some(action => action.kind === 'fill-undo'), false);
+  assertNoRawJsonInPlan(client, plan);
+});
+
 test('a missing slots service degrades instead of throwing', async () => {
   const client = await loadClient();
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));
