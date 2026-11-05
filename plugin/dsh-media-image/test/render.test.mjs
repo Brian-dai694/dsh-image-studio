@@ -29,7 +29,7 @@ function makeTools() {
   const bridge = kind => ({
     editorKind: kind,
     readState: async () => state(kind),
-    applyCommand: async input => { calls.push({ kind, op: 'apply', input }); return { editorKind: kind, documentId: input.projectId, commandId: input.commandId, revision: 8, changedObjectIds: [], stateDigest: 'fnv1a32-next', history: { canUndo: true, canRedo: false } }; },
+    applyCommand: async input => { calls.push({ kind, op: 'apply', input }); return { editorKind: kind, documentId: input.projectId, commandId: input.commandId, revision: 8, changedObjectIds: [], stateDigest: 'fnv1a32-next', afterDigest: 'fnv1a32-next', history: { canUndo: true, canRedo: false } }; },
     getCommandResult: async () => ({ status: 'unknown', originalResult: null }),
     startExport: async input => { calls.push({ kind, op: 'export', input }); return { editorKind: kind, commandId: input.commandId, exportId: 'exp-9', status: 'ready', artifactRef: 'artifact://exp-9', stateDigest: 'fnv1a32-next' }; },
     getExportStatus: async () => ({ editorKind: kind, exportId: 'exp-9', status: 'ready', artifactRef: 'artifact://exp-9' }),
@@ -110,6 +110,29 @@ test('export render exposes exportId and artifactRef; a write render stays compa
   const applyText = render('media_image_apply_command', applyArgs, applied);
   assert.doesNotMatch(applyText, /exportId|artifactRef/);
   assert.equal(applyText, 'applied · c-plain · R8');
+});
+
+test('tool meta carries structured credentials so panels never parse the text line', async () => {
+  const { tools } = makeTools();
+  const meta = (name, args, value) => tools.get(name).output.presentationMeta(args, value);
+  const startArgs = { editorKind: 'image', projectId: 'doc-123', instanceId: 'e1', commandId: 'exp-1', expectedRevision: 7, format: 'png' };
+  const startMeta = meta('media_image_export_start', startArgs, await tools.get('media_image_export_start').execute(startArgs, { agent: { id: 'a' } }));
+  assert.equal(startMeta.commandId, 'exp-1');
+  assert.equal(startMeta.exportId, 'exp-9');
+  assert.equal(startMeta.artifactRef, 'artifact://exp-9');
+  assert.equal(startMeta.format, 'png');
+  const applyArgs = { editorKind: 'image', projectId: 'doc-123', instanceId: 'e1', commandId: 'c-meta', expectedRevision: 7, operation: 'layer.update_text', params: {} };
+  const applied = await tools.get('media_image_apply_command').execute(applyArgs, { agent: { id: 'a' } });
+  const applyMeta = meta('media_image_apply_command', applyArgs, applied);
+  assert.equal(applyMeta.commandId, 'c-meta');
+  assert.equal(applyMeta.appliedRevision, 8);
+  assert.equal(applyMeta.afterDigest, 'fnv1a32-next');
+  // 文本行格式保持不变，面板改读 meta。
+  assert.equal(tools.get('media_image_apply_command').output.render(applyArgs, applied).map(block => block.text).join('\n'), 'applied · c-meta · R8');
+  const staleArgs = { ...applyArgs, commandId: 'c-stale', expectedRevision: 5 };
+  const stale = await tools.get('media_image_apply_command').execute(staleArgs, { agent: { id: 'a' } });
+  assert.equal(stale.status, 'rejected');
+  assert.equal(meta('media_image_apply_command', staleArgs, stale).errorCode, 'REVISION_CONFLICT');
 });
 
 test('an explicit projectId still must match the live document', async () => {
