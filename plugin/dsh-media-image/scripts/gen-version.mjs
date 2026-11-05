@@ -28,9 +28,11 @@ export const DSH_IMAGE_VERSION = '${version}';
 
   const readme = await readFile(README_FILE, 'utf8');
   const badge = `https://img.shields.io/badge/version-${version}-4D6BFE?style=flat-square`;
-  const updated = /https:\/\/img\.shields\.io\/badge\/version-[^)\s]+/.test(readme)
+  // 徽标与「当前版本 X」这句话都跟 package.json 走：单源，也避免 README 自己写死后过期。
+  let updated = /https:\/\/img\.shields\.io\/badge\/version-[^)\s]+/.test(readme)
     ? readme.replace(/https:\/\/img\.shields\.io\/badge\/version-[^)\s]+/, badge)
     : readme;
+  updated = updated.replace(/当前版本 \d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/g, `当前版本 ${version}`);
   if (updated !== readme) await writeFile(README_FILE, updated, 'utf8');
   return { version, versionModule: VERSION_MODULE, readmeUpdated: updated !== readme };
 }
