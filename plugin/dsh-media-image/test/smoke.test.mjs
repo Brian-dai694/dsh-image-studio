@@ -132,4 +132,9 @@ test('relay route requires token and same-origin, and rejects unknown actions', 
   assert.match(crossOrigin.body, /Cross-origin/);
   const unknownAction = await call({ url: '/media-image/relay/nope', headers: { host: '127.0.0.1:1', origin: 'http://127.0.0.1:1', 'content-type': 'application/json', authorization: 'Bearer x' } });
   assert.equal(unknownAction.status, 404);
+  // getPage is a Host-only liveness read: it must not be reachable as a relay action and
+  // must never leak page ids or tokens over HTTP.
+  const getPage = await call({ url: '/media-image/relay/getPage', headers: { host: '127.0.0.1:1', origin: 'http://127.0.0.1:1', 'content-type': 'application/json', authorization: 'Bearer x' } });
+  assert.equal(getPage.status, 404);
+  assert.doesNotMatch(getPage.body, /pageId|pageToken/);
 });

@@ -95,6 +95,23 @@ test('duplicate tool invocation returns first outcome without replay', async () 
   assert.equal(reused.error.code, 'COMMAND_ID_REUSED');
 });
 
+test('export render exposes exportId and artifactRef; a write render stays compact', async () => {
+  const { tools } = makeTools();
+  const render = (name, args, value) => tools.get(name).output.render(args, value).map(block => block.text).join('\n');
+  const startArgs = { editorKind: 'image', projectId: 'doc-123', instanceId: 'e1', commandId: 'exp-1', expectedRevision: 7, format: 'png' };
+  const started = await tools.get('media_image_export_start').execute(startArgs, { agent: { id: 'a' } });
+  // Without exportId in the render text the model cannot call export_status at all.
+  assert.match(render('media_image_export_start', startArgs, started), /exportId exp-9/);
+  const statusArgs = { editorKind: 'image', projectId: 'doc-123', instanceId: 'e1', exportId: 'exp-9' };
+  const status = await tools.get('media_image_export_status').execute(statusArgs, { agent: { id: 'a' } });
+  assert.match(render('media_image_export_status', statusArgs, status), /artifactRef artifact:\/\/exp-9/);
+  const applyArgs = { editorKind: 'image', projectId: 'doc-123', instanceId: 'e1', commandId: 'c-plain', expectedRevision: 7, operation: 'layer.update_text', params: {} };
+  const applied = await tools.get('media_image_apply_command').execute(applyArgs, { agent: { id: 'a' } });
+  const applyText = render('media_image_apply_command', applyArgs, applied);
+  assert.doesNotMatch(applyText, /exportId|artifactRef/);
+  assert.equal(applyText, 'applied · c-plain · R8');
+});
+
 test('an explicit projectId still must match the live document', async () => {
   const { tools } = makeTools();
   const definition = tools.get('media_image_read_state');

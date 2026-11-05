@@ -194,6 +194,9 @@ export function toLosslessJson(value) {
   return null;
 }
 
+// 注册本包的全部模型工具（图片 5 个 / 视频 5 个）。
+// 每个 execute 先过 toLosslessJson 再做 schema 快照校验，避免 undefined 导致
+// "non-lossless JSON"；binding 校验与审批在各自 execute 内完成。
 export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }) }) {
   const appliedCommands = new Map();
   const verify = async (kind, bridge, args, exec) => {
@@ -224,6 +227,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     });
   };
 
+  // 首次调用带 bind:true 时走原生审批登记；之后每次读取都复核绑定与工程一致。
   const readState = (kind, bridge) => async (args, exec) => {
     try {
       if (args.bind === true) await bindings.authorize(exec, {
@@ -265,6 +269,8 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     }
   };
 
+  // 写入工具主体：绑定门禁 → 指纹去重 → revision 前置检查 → 高风险审批 → 提交。
+  // 回执带 commandId/revision/afterDigest，供模型做后续定向撤销与冲突判断。
   const applyCommand = (kind, bridge, toolName) => async (args, exec) => {
     const commandId = args.commandId;
     const operation = args.operation;

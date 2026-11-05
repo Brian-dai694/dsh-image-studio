@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createEditorRelay, createRelayHttpHandler } from '../lib/relay.js';
+import { createEditorRelay } from '../lib/relay.js';
 
 test('Host getPage returns immutable live routing without credentials or claimed session', () => {
   const relay = createEditorRelay({ editorKind: 'image' });
@@ -27,15 +27,4 @@ test('Host getPage fails closed after lease expiry and relay close', async () =>
   assert.equal(relay.getPage('expiring'), null);
   relay.close();
   assert.equal(relay.getPage('expiring'), null);
-});
-
-test('HTTP action allowlist never exposes Host getPage', async () => {
-  const relay = createEditorRelay();
-  const handler = createRelayHttpHandler({ relay, origin: 'http://localhost:59301', accessToken: 'x'.repeat(32) });
-  const req = { url: '/editor-relay/getPage', method: 'POST', headers: { host: 'localhost:59301', origin: 'http://localhost:59301', authorization: 'Bearer ' + 'x'.repeat(32), 'content-type': 'application/json' }, async *[Symbol.asyncIterator]() { yield Buffer.from('{}'); } };
-  let status;
-  try {
-    await handler(req, { writeHead(value) { status = value; }, end() {} });
-    assert.equal(status, 404);
-  } finally { relay.close(); }
 });

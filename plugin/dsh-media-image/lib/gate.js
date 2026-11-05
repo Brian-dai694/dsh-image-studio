@@ -3,8 +3,9 @@
 
 const TTL_MS = 5 * 60_000;
 
-// Identity comes only from ToolRunContext, never model arguments or an agent name.
-// dsh-agent Agent.id is a SessionId; runtime Agent.session is its live Session.
+// 会话身份的唯一来源：真实 ToolRunContext。
+// 只认 exec.agent.id，并要求它与运行中的 exec.agent.session.id 一致；
+// 模型参数、Agent 名称或客户端自报的 sessionId 一律不接受。
 export function trustedSessionId(exec) {
   const id = exec?.agent?.id;
   if (typeof id !== 'string' || !id || exec?.agent?.session?.id !== id) {
@@ -13,9 +14,9 @@ export function trustedSessionId(exec) {
   return id;
 }
 
-// Host-only registry. authorize consumes a real native approval and verifies the
-// exact live relay page/snapshot before recording a grant. No HTTP claim surface.
-// register is a legacy Host integration seam requiring independently verified ownership.
+// Host 内部的会话↔页面授权登记表。不暴露任何 HTTP 认领接口，也没有客户端自报入口。
+// authorize 是唯一生产路径：真实会话身份 + 原生人工审批 + 页面/快照复验后才登记。
+// register 只是给宿主集成留的旧接口，要求调用方已独立核实页面归属。
 export function createSessionBindings({ resolvePage } = {}) {
   const bindings = new Map();
   const invalid = new Set();
@@ -23,6 +24,8 @@ export function createSessionBindings({ resolvePage } = {}) {
   const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
   return {
     async authorize(exec, { editorKind, instanceId, projectId, readState, approve }) {
+      // 流程：取可信 session → 锁定 relay 实时页面 → 读文档快照 → 原生审批
+      // → 复验信号/失效/页面/工程/快照 → 原子登记。任一步变化都不登记。
       const sessionId = trustedSessionId(exec);
       if (bindings.has(sessionId) || invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Session already bound or expired; use a new dedicated session.');
       if (pending.has(sessionId)) fail('SESSION_BINDING_PENDING', 'A binding approval is already in progress.');
@@ -56,6 +59,7 @@ export function createSessionBindings({ resolvePage } = {}) {
         return binding;
       } finally { pending.delete(sessionId); }
     },
+    // 旧宿主集成入口：调用方必须已独立证明该页面属于本会话，否则拒绝。
     register(exec, binding) {
       const sessionId = trustedSessionId(exec);
       if (!resolvePage) fail('SESSION_BINDING_UNAVAILABLE', 'Host page ownership resolver is not connected.');
@@ -67,6 +71,8 @@ export function createSessionBindings({ resolvePage } = {}) {
       bindings.set(sessionId, Object.freeze({ ...binding, sessionId }));
       return bindings.get(sessionId);
     },
+    // 每次工具调用前校验：会话已绑定、kind/实例/工程一致、页面仍存活；
+    // 页面断开或换页即作废绑定（保活切页不算断开）。
     assert(exec, kind, args) {
       const sessionId = trustedSessionId(exec);
       const binding = bindings.get(sessionId);
@@ -85,12 +91,12 @@ export function createSessionBindings({ resolvePage } = {}) {
   };
 }
 
-// Autonomous mode may only run reversible, low-risk edits on the current revision.
+// 自主执行白名单：只放行可逆的低风险编辑；其余必须走人工确认。
 export const AUTONOMOUS_CAPABILITIES = {
   image: new Set(['layer.update_text']),
 };
 
-// Always human-confirmed: importing local media, destructive deletes, overwrite export.
+// 高风险操作：导媒体、删数据、覆盖式导出等破坏性动作，必须逐次人工审批。
 export const HIGH_RISK_OPERATIONS = {
   image: new Set(['layer.remove', 'canvas.crop']),
 };
@@ -113,7 +119,9 @@ export function digestOf(value) {
   return `fnv1a32-${hash.toString(16).padStart(8, '0')}`;
 }
 
-/** Synchronous guard: runs after tools/pre-execute and may only deny. */
+// 同步守卫：在 tools/pre-execute 阶段运行，只能拒绝、不能放行或改写参数。
+// 负责本包能静态判断的三件事：工具归属编辑器、operation 前缀、自主模式白名单；
+// 会话绑定与审批属于状态检查，不在这里做。
 export function createGuard() {
   return execution => {
     const name = typeof execution?.name === 'string' ? execution.name : '';
@@ -136,8 +144,9 @@ export function createGuard() {
 }
 
 /**
- * Plugin-side approval binding. A pending record is issued once per commandId and must
- * match projectId, operation, params digest, revision and state digest when consumed.
+ * 插件侧的高风险写审批凭据：先返回 pending + approvalId，用户批准后模型带同一 approvalId 再来。
+ * issue 按 agentId+commandId 去重；take 必须逐项匹配工程、操作、参数摘要、revision 与 digest，
+ * 一次性消费，任何不匹配都作废该凭据，避免批准 A 却执行 B。
  */
 export function createApprovalStore({ ttlMs = TTL_MS, now = () => Date.now() } = {}) {
   const byId = new Map();
@@ -155,7 +164,7 @@ export function createApprovalStore({ ttlMs = TTL_MS, now = () => Date.now() } =
       byCommand.set(key(binding.agentId, binding.commandId), approvalId);
       return { reused: false, record };
     },
-    /** Returns { ok } or { ok:false, code, message }. A failed check consumes the record. */
+    /** 校验并消费凭据；失败也消费，返回 { ok:false, code, message }。 */
     take({ approvalId, agentId, projectId, commandId, operation, paramsDigest, revision, stateDigest }) {
       const record = byId.get(approvalId);
       if (!record) return { ok: false, code: 'APPROVAL_NOT_FOUND', message: 'Approval is missing; request a new pending result.' };
@@ -180,18 +189,15 @@ export function createApprovalStore({ ttlMs = TTL_MS, now = () => Date.now() } =
   };
 }
 
-/**
- * Plugin-side bound for a human decision. The host enforces `ToolDefinition.timeoutMs`
- * over the whole call and turns expiry into TOOL_TIMEOUT, so the approval wait must be
- * shorter than the tool budget (tools.js declares APPROVAL_WAIT_MS + headroom) and much
- * longer than a media round trip (bridge.js keeps 10s). Not infinite, never auto-retried.
- */
+// 人工审批的最长等待（5 分钟）。宿主的 timeoutMs 是整次工具调用的预算，
+// 所以工具侧预算必须高于它（tools.js 加 30 秒余量），而媒体往返仍保持 10 秒；
+// 两者都不允许无限延长，也不自动重试。
 export const APPROVAL_WAIT_MS = 5 * 60_000;
 
 /**
- * Only `allowed-once` proceeds; every other outcome (including `unavailable`) is a denial.
- * The wait is bounded: on expiry the approval signal is aborted (the host resolves it as
- * `cancelled`), APPROVAL_TIMEOUT is returned, and a late grant can never reach the caller.
+ * 请求一次原生人工审批，只接受 `allowed-once`。
+ * 等待有上限（APPROVAL_WAIT_MS）：到期主动中止审批请求并返回 APPROVAL_TIMEOUT，
+ * 迟到放行不会生效；调用方取消同样立即返回 APPROVAL_CANCELLED，均不自动重试。
  */
 export async function requestHumanApproval(ctx, { agent, toolName, callId, reason, signal, timeoutMs = APPROVAL_WAIT_MS }) {
   if (!ctx?.approval?.request) return { allowed: false, code: 'APPROVAL_UNAVAILABLE', message: 'Approval service is not available in this deployment.' };

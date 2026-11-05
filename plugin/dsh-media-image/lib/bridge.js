@@ -33,6 +33,9 @@ const fieldsOnly = (payload, fields) => {
 
 export const ALLOWED_COMMANDS = { image: IMAGE_COMMANDS };
 
+// 图片命令校验：白名单 + 逐字段类型/范围检查，必须在发给编辑器之前拒绝。
+// 重点边界：canvas 尺寸 1..16384 像素、crop 的 x/y 非负、transform 必须平铺字段、
+// 带守卫的撤销必须同时给 targetCommandId 与 afterDigest。
 function validateImageCommand(command) {
   const p = command.payload;
   if (!IMAGE_COMMANDS.has(command.type)) throw new MediaBridgeError('UNSUPPORTED_COMMAND', 'Command is not in the image allowlist.');
@@ -87,8 +90,14 @@ function validateImageCommand(command) {
   }
 }
 
+// 视频命令校验：时间一律整数微秒（1 秒 = 1000000），拒绝 startTime/duration 这类秒字段。
+// 重点边界：track 音量 0..2、track.update 至少改一项、clip 的 inUs/outUs 必须成对、
+// clip.move 至少要给起点或目标轨道；跨轨同类型判断需要轨道状态，留给编辑器。
+
 export const COMMAND_VALIDATORS = { image: validateImageCommand };
 
+// 编辑器状态校验：只要求必需字段存在且类型正确，不禁止额外字段（如 trackClips、
+// capabilities.multitrack），这样编辑器扩展状态时 Host 不用跟着改。
 function validateImageState(state, instanceId) {
   if (!isObject(state) || state.editorKind !== 'image' || state.editorInstanceId !== instanceId ||
       typeof state.documentId !== 'string' || !Number.isSafeInteger(state.revision) || state.revision < 0 ||
@@ -99,8 +108,14 @@ function validateImageState(state, instanceId) {
   return state;
 }
 
+// 视频状态额外要求 timeline/tracks/clips 三个数组都在，避免只给 trackClips 时
+// Host 误当成有效状态；其余扩展字段照旧放行。
+
 export const STATE_VALIDATORS = { image: validateImageState };
 
+// 编辑器适配器：文档状态只由页面持有，这里只做校验、幂等、版本与"结果未知"语义。
+// completed 命中直接回放首份回执；inFlight 合并同 commandId 并发；uncertain 里挂的
+// 命令一律拒绝重放，必须先按 commandId 查询原结果。
 export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (!relay || typeof relay.request !== 'function') throw new TypeError('relay.request is required');
   if (editorKind !== 'image') throw new TypeError('editorKind must be "image"');
@@ -111,6 +126,8 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
   const validateCommand = COMMAND_VALIDATORS[editorKind];
   const keyOf = (instanceId, commandId) => `${instanceId}\0${commandId}`;
 
+  // 单次编辑器请求：超时对只读是 EDITOR_TIMEOUT，对写是 OUTCOME_UNKNOWN，
+  // 后者表示"可能已落盘"，调用方只能查、不能重试。
   async function request(type, payload, mutation = false) {
     const requestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     let timer;
@@ -195,6 +212,8 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
       }
       return result;
     },
+    // 写入：先查 completed/inFlight/uncertain，再按 expectedRevision 提交；写后立刻回读，
+    // revision 必须等于回执里的值，否则降级为 AUDIT_OUTCOME_UNKNOWN 并禁止重放。
     async applyCommand(input) {
       opaqueId(input?.instanceId, 'instanceId');
       opaqueId(input.projectId, 'projectId');

@@ -40,13 +40,16 @@ export function createEditorRelay({ timeoutMs = 10000, leaseMs = 15000, maxPendi
   sweep.unref?.();
 
   return {
-    // Host-only liveness lookup. Never grants session ownership or returns credentials.
+    // 仅供 Host 内部查询页面存活与路由，不授予会话归属、不返回任何凭据。
+    // 结果冻结成 {pageId, editorInstanceId, kind}，模型永远看不到 pageToken。
     getPage(editorInstanceId) {
       if (closed) return null;
       expirePages();
       const page = [...pages.values()].find(item => item.editorInstanceId === editorInstanceId && item.kind === editorKind);
       return page ? Object.freeze({ pageId: page.id, editorInstanceId: page.editorInstanceId, kind: page.kind }) : null;
     },
+    // 页面登记：只允许本中继绑定的编辑器类型，一个实例同时只能有一个页面；
+    // 返回的 pageToken 只交给可信父页面，绝不进入模型上下文。
     register({ editorInstanceId, kind = editorKind }) {
       if (closed) throw fail('EDITOR_NOT_READY', '中继已关闭');
       if (kind !== editorKind) throw fail('EDITOR_KIND_MISMATCH', '编辑器类型与此中继绑定不匹配');
@@ -58,6 +61,7 @@ export function createEditorRelay({ timeoutMs = 10000, leaseMs = 15000, maxPendi
       pages.set(page.id, page);
       return { pageId: page.id, pageToken: page.token, editorInstanceId, kind, leaseMs };
     },
+    // 长轮询取命令：只投递本页未派发过的消息，受轮询频率和响应体积上限约束。
     poll({ pageId, pageToken }) {
       expirePages();
       const page = authenticate(pageId, pageToken);
@@ -80,6 +84,8 @@ export function createEditorRelay({ timeoutMs = 10000, leaseMs = 15000, maxPendi
       }
       return { messages };
     },
+    // 应答回填：只接受已派发给本页的 requestId，迟到/重复/跨页应答一律不生效；
+    // 写入类应答超限按"结果未知"处理，不允许推断未执行。
     respond({ pageId, pageToken, response }) {
       expirePages();
       const page = authenticate(pageId, pageToken);
@@ -105,6 +111,7 @@ export function createEditorRelay({ timeoutMs = 10000, leaseMs = 15000, maxPendi
       else entry.reject(fail(response.error?.code || 'EDITOR_ERROR', response.error?.message || '编辑器拒绝请求', { revision: response.error?.revision, outcomeUnknown: response.error?.outcomeUnknown }));
       return { accepted: true };
     },
+    // 页面主动断开：丢弃该页所有在途请求（写入类标记结果未知）。
     disconnect({ pageId, pageToken }) {
       const page = authenticate(pageId, pageToken);
       dropPage(page, '页面连接已断开；未完成命令的结果未知');
@@ -149,36 +156,3 @@ export function createEditorRelay({ timeoutMs = 10000, leaseMs = 15000, maxPendi
   };
 }
 
-// Mount under an isolated same-origin server or a future explicitly approved Host route.
-// A per-server random bearer token authenticates the trusted parent page, not iframe content.
-export function createRelayHttpHandler({ relay, origin, accessToken, prefix = '/editor-relay' }) {
-  const expectedOrigin = new URL(origin).origin;
-  if (typeof accessToken !== 'string' || accessToken.length < 32) throw new TypeError('Use a random accessToken of at least 32 characters');
-  return async (req, res) => {
-    const path = new URL(req.url, expectedOrigin).pathname;
-    if (!path.startsWith(`${prefix}/`)) return false;
-    const send = (status, value) => {
-      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      res.end(JSON.stringify(value));
-    };
-    if (req.method !== 'POST') { send(405, { code: 'INVALID_REQUEST', message: 'POST required' }); return true; }
-    if (req.headers.host !== new URL(expectedOrigin).host ||
-      req.headers.origin !== expectedOrigin || req.headers.authorization !== `Bearer ${accessToken}` ||
-      req.headers['content-type']?.split(';')[0] !== 'application/json') {
-      send(403, { code: 'INVALID_REQUEST', message: 'Origin or relay authentication failed' }); return true;
-    }
-    try {
-      const chunks = []; let size = 0;
-      for await (const chunk of req) {
-        size += chunk.length;
-        if (size > 262144) { send(413, { code: 'INVALID_REQUEST', message: 'Payload too large' }); return true; }
-        chunks.push(chunk);
-      }
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      const action = path.slice(prefix.length + 1);
-      if (!['register', 'poll', 'respond', 'disconnect'].includes(action)) { send(404, { code: 'INVALID_REQUEST', message: 'Unknown relay route' }); return true; }
-      send(200, relay[action](body));
-    } catch (error) { send(error.code === 'RATE_LIMITED' ? 429 : error.code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { code: error.code || 'INVALID_REQUEST', message: error.message, retryAfterMs: error.retryAfterMs }); }
-    return true;
-  };
-}

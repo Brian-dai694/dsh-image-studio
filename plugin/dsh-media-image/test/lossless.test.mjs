@@ -107,7 +107,7 @@ test('every tool value, render result and presentationMeta is strict-lossless', 
   }
 });
 
-test('the failure path �?every optional field absent �?is also strict-lossless', async () => {
+test('the failure path — every optional field absent — is also strict-lossless', async () => {
   const failing = { readState: async () => { throw Object.assign(new Error('boom'), { code: 'EDITOR_ERROR' }); } };
   const tools = makeTools({ bridge: failing });
   for (const [name, definition] of tools) {

@@ -1,5 +1,5 @@
 // Contract tests for the image editor: pre-validation of layer.add_text, tolerance for
-// the legacy changedLayerIds field, and �?most important �?never reporting a write that
+// the legacy changedLayerIds field, and — most important — never reporting a write that
 // advanced the revision as a clean `rejected`.
 import test from 'node:test';
 import { fixtureBindings } from './host-fixture.mjs';
