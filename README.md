@@ -61,6 +61,15 @@ flowchart LR
 | `media_image_export_start` / `media_image_export_status` | PNG / JPEG 导出与状态 |
 
 路由前缀 `/media-image`，与视频插件包（`/media-video`）互不依赖、可同时安装。
+## 下载安装
+
+预打包插件（可直接装进 DSH profile）：[v0.0.1 · dsh-media-image-0.0.1.tgz](https://github.com/Brian-dai694/dsh-image-studio/releases/download/v0.0.1/dsh-media-image-0.0.1.tgz)
+
+```powershell
+dsh plugin --profile <你的profile> add <下载路径>\dsh-media-image-0.0.1.tgz
+```
+
+包里已含 PSD 导入所需的 `public/image/dist/860.bundle.js`（ag-psd 懒加载 chunk），无需另外构建。
 ## 快速开始
 
 ```bash
@@ -91,4 +100,5 @@ node host/pack-image.mjs                       # 生成插件内图片页产物
 视频侧见 [dsh-video-studio](https://github.com/Brian-dai694/dsh-video-studio)。
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 
