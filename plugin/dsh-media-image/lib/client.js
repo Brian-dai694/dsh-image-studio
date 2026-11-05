@@ -525,8 +525,8 @@ window.__ModuleLoader__.load({
         else if (facts.artifactRef) line = '导出文件已就绪'
         else if (revision !== undefined) line = '修订 R' + revision
         else if (status === 'rejected') line = '未执行（编辑器拒绝了这次修改，回执里没有错误码）'
-        // 成功但拿不到结构化摘要：明确说出来，既不猜状态也不清空正文。
-        if (!output && status === 'applied') line = (line ? line + ' ' : '') + '已执行（摘要无法解析）'
+        // 成功但没有结构化摘要（导出/撤销凭据本身就算摘要，不叠加这句话）。
+        if (!output && status === 'applied' && !facts.exportId && !facts.artifactRef) line = (line ? line + ' ' : '') + '已执行（摘要无法解析）'
       }
       // 同一回执里出现多个不一致的状态：按外层取值，但必须把"不一致"说出来，不能静默挑一个。
       if (facts.statusConflicts.length) {

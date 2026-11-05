@@ -620,18 +620,18 @@ test('real captured events render with meta.status and callId-linked names', asy
   const rows = reduce({ type: 'snapshot', header: { id: 's1' }, records: fixture.events.map(event => ({ event })) });
   const plan = client.chat.buildDialogPlan(rows);
   const tools = plan.filter(item => item.kind === 'tool');
-  // 前 8 条是 FDE 抓包原文（含按形状重建的 rejected 那条）；后面 4 条是 synthetic:meta-credentials，
-  // 用来演示"后端补 meta 凭据后按钮出现"的状态。
-  assert.deepEqual(tools.slice(0, 8).map(item => item.badge), ['pending', 'rejected', 'pending', 'applied', 'pending', 'applied', 'pending', 'unknown']);
-  assert.deepEqual(tools.slice(0, 8).map(item => item.card.name), ['执行编辑', '执行编辑', '开始导出', '开始导出', '查询导出', '查询导出', '执行编辑', '执行编辑']);
-  // REVISION_CONFLICT 那条：未执行 + 中文说明（真实回执 meta 里没有 errorCode，不能编）
-  assert.match(tools[1].card.line, /未执行/);
-  // 抓包原文的 6 条结果里没有结构化凭据：按钮不出现才是正确行为
-  assert.equal(tools.slice(0, 8).some(item => item.actions.some(action => action.kind === 'fill-undo')), false);
-  assert.equal(tools.slice(0, 8).some(item => item.actions.some(action => action.kind === 'download-export')), false);
-  // 后端补了 meta 凭据的合成样例：撤销与导出各出现一次
-  assert.ok(tools[9].actions.some(action => action.kind === 'fill-undo'), 'meta 带凭据的写入给撤销');
-  assert.ok(tools[11].actions.some(action => action.kind === 'download-export'), 'meta 带 exportId 的导出给下载');
+  // 前 14 条全部来自 FDE 的抓包原文（含 seq 48/49 那条 REVISION_CONFLICT）；后 4 条是 synthetic。
+  assert.deepEqual(tools.map(item => item.badge), ['pending', 'applied', 'pending', 'applied', 'pending', 'applied', 'pending', 'rejected', 'pending', 'applied', 'pending', 'applied', 'pending', 'unknown', 'pending', 'applied', 'pending', 'applied']);
+  assert.deepEqual(tools.map(item => item.card.name), ['读取工程', '读取工程', '执行编辑', '执行编辑', '读取工程', '读取工程', '执行编辑', '执行编辑', '开始导出', '开始导出', '查询导出', '查询导出', '执行编辑', '执行编辑', '执行编辑', '执行编辑', '开始导出', '开始导出']);
+  // REVISION_CONFLICT：0.2.0 抓包里 meta.errorCode 还没上线 → 显示"未执行（回执里没有错误码）"
+  assert.equal(tools[7].badge, 'rejected');
+  assert.match(tools[7].card.line, /未执行/);
+  assert.match(tools[7].card.line, /没有错误码/);
+  // 抓包原文里没有结构化凭据：前 14 条都不该出现撤销/导出按钮
+  assert.equal(tools.slice(0, 14).some(item => item.actions.length > 0), false);
+  // synthetic:meta-credentials 两条：撤销与导出各出现一次
+  assert.deepEqual(tools[15].actions.map(action => action.kind), ['fill-undo']);
+  assert.deepEqual(tools[17].actions.map(action => action.kind), ['download-export']);
   assertNoRawJsonInPlan(client, plan);
 });
 
@@ -654,7 +654,7 @@ test('fixture samples still match the captured probe file (source guard)', async
     assert.deepEqual(JSON.parse(JSON.stringify(event.data)), JSON.parse(JSON.stringify(source.data)), `seq ${event.seq} 与抓包原文不一致`);
     checked += 1;
   }
-  assert.ok(checked >= 6, '至少要比对到 6 条真实样本');
+  assert.ok(checked >= 8, '至少要比对到 8 条真实样本');
 });
 
 test('unknown only from explicit status; pending only from call without result; parse failure falls back', async () => {
