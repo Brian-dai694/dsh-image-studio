@@ -30,18 +30,30 @@ context.Helper_class = function () {this.is_input = () => false;};
 app.State = new (load('core/base-state.js', 'Base_state_class'))();
 app.Actions.Update_config_action = load('actions/update-config.js', 'Update_config_action');
 // test-only 画布桩：只让羽化/色匹的结构可测（路由、校验、快照、撤销回退、read_state 字段），
-// 不断言像素颜色；真实像素效果由浏览器验收。不进生产包。
-function makeCanvas(w = 8, h = 8) {
-  return {
-    width: w, height: h,
+// 不断言像素颜色；像素摘要用「确定性填充值」模拟内容变化，真实像素效果由浏览器验收。
+function makeCanvas(w = 8, h = 8, content = 1) {
+  const canvas = {
+    width: w, height: h, _content: content, _drawn: null,
     getContext() {
       return {
         globalAlpha: 1,
-        drawImage() {}, putImageData() {},
-        getImageData: (x, y, cw, ch) => ({ width: cw, height: ch, data: new Uint8ClampedArray(cw * ch * 4) }),
+        clearRect() {},
+        drawImage(source) { if (source && (source._drawn !== undefined || source._content !== undefined)) canvas._drawn = source._drawn ?? source._content; },
+        putImageData(image) {
+          // 用抽样和代表「内容」：只要像素内容变了，这个值就会变，用来观察摘要是否跟随。
+          const data = image && image.data;
+          let sum = 0;
+          if (data) for (let index = 0; index < data.length; index += 97) sum += data[index];
+          canvas._drawn = sum & 0xff;
+        },
+        getImageData: (x, y, cw, ch) => {
+          const value = Number(canvas._drawn ?? canvas._content) & 0xff;
+          return { width: cw, height: ch, data: new Uint8ClampedArray(cw * ch * 4).fill(value) };
+        },
       };
     },
   };
+  return canvas;
 }
 context.document = Object.assign(context.document || {}, { createElement: () => makeCanvas() });
 // 与原生 Update_layer_image_action 同形的桩：只做 link/尺寸写回，验证历史与状态同步。
@@ -290,6 +302,39 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       const rejected = await send({type:'layer.color_match', payload});
       assert.equal(rejected.ok, false, JSON.stringify(payload));
     }
+  });
+  await test('contentDigest covers pixels, ignores selection and survives a cold cache', async () => {
+    // 专用图层：让「处理前后像素不同」在桩里也成立（内容值 77，处理后抽样和不同）。
+    const target = { id: 'img-3', name: '像素层', type: 'image', link: makeCanvas(8, 8, 77), x: 0, y: 0, width: 8, height: 8, width_original: 8, height_original: 8, order: 2, visible: true };
+    config.layers.push(target);
+    bridge.refreshRevision();
+    const before = bridge.readState();
+    assert.match(before.contentDigest, /^fnv1a64-[0-9a-f]{16}$/);
+    assert.equal(before.stateDigest, before.contentDigest, 'stateDigest 保留一版且与 contentDigest 同值');
+    assert.ok(before.viewState && 'selectedLayerId' in before.viewState);
+
+    // ① 羽化改像素后内容摘要必须变化（这是此前真正的漏洞：只比元数据，像素改了摘要不变）。
+    const feather = await send({type:'layer.feather', payload:{layerId:'img-3', radiusPx:5}});
+    assert.equal(feather.ok, true, JSON.stringify(feather));
+    const afterPixels = bridge.readState();
+    assert.notEqual(afterPixels.contentDigest, before.contentDigest, '像素变化必须反映到 contentDigest');
+
+    // ② 仅切换选中层：内容摘要与 revision 都不该变。
+    const other = { id: 'img-2', name: '另一层', type: 'image', link: makeCanvas(4, 4, 2), x: 1, y: 1, width: 4, height: 4, order: 1, visible: true };
+    config.layers.push(other);
+    bridge.refreshRevision();
+    const stable = bridge.readState();
+    const revisionBeforeSelect = bridge.revision;
+    config.layer = other;
+    bridge.refreshRevision();
+    const afterSelect = bridge.readState();
+    assert.equal(afterSelect.contentDigest, stable.contentDigest, '切换选中层不能算内容变化');
+    assert.equal(bridge.revision, revisionBeforeSelect, '切换选中层不能让 revision 增长');
+    assert.equal(afterSelect.viewState.selectedLayerId, 'img-2', '选中层应体现在 viewState');
+
+    // ③ 清掉像素缓存后重算，摘要必须稳定（同一内容不能因重算而变化）。
+    bridge.pixelDigestCache.clear();
+    assert.equal(bridge.readState().contentDigest, afterSelect.contentDigest);
   });
   await test('canvas crop and resize are native reversible single history entries', async () => {
     const width=config.WIDTH,height=config.HEIGHT,x=config.layers[0].x;

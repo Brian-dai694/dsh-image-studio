@@ -69,18 +69,69 @@ export class DshEditorBridge {
     // 羽化/色彩匹配的首帧快照与已应用参数：只活在编辑器内，不进图层字段、不进 read_state。
     this.pixelBases = new Map();
     this.pixelApplied = new Map();
+    // 图层像素摘要缓存：link 或显示尺寸不变就复用，避免每次读状态都重扫大图。
+    this.pixelDigestCache = new Map();
     this.lastFingerprint = this.fingerprint();
     this.forcedFingerprint = null;
     this.observeMutations();
     window.addEventListener('message', this.onConnect.bind(this));
   }
 
+  /**
+   * 内容摘要：只含会改变画面的字段，**不含选中层/视图**。像素层额外带一个 64×64 采样摘要，
+   * 否则羽化、调色这类纯像素修改前后摘要完全相同，"写后回读校验"等于没校验。
+   */
   documentState() {
-    return { width: config.WIDTH, height: config.HEIGHT, selected: config.layer?.id,
-      layers: config.layers.map(layer => ({ id: layer.id, name: layer.name, type: layer.type,
+    return {
+      width: config.WIDTH, height: config.HEIGHT,
+      layers: config.layers.map(layer => ({
+        id: layer.id, name: layer.name, type: layer.type,
         x: layer.x, y: layer.y, width: layer.width, height: layer.height, rotate: layer.rotate,
         visible: layer.visible, order: layer.order, opacity: layer.opacity, color: layer.color,
-        params: layer.params, filters: layer.filters, data: Array.isArray(layer.data) ? layer.data : null })) };
+        params: layer.params, filters: layer.filters,
+        data: Array.isArray(layer.data) ? layer.data : null,
+        pixels: this.layerPixelDigest(layer),
+      })),
+    };
+  }
+
+  /** UI 瞬时态：选中层、缩放、滚动位置。不参与内容摘要，也不该让 revision 增长。 */
+  viewState() {
+    const position = zoomView.getPosition();
+    return { selectedLayerId: config.layer ? String(config.layer.id) : null, scale: zoomView.getScale(), position: { x: position.x, y: position.y } };
+  }
+
+  /**
+   * 单层像素摘要：把图层画到 64×64 的小画布上再算 FNV-1a，成本与图片尺寸无关。
+   * 结果按图层缓存，只有 link 对象或显示尺寸变化才重算，避免每帧全量扫描大图。
+   */
+  layerPixelDigest(layer) {
+    const key = String(layer.id);
+    const link = layer.link || null;
+    const cache = this.pixelDigestCache.get(key);
+    const size = `${layer.width || 0}x${layer.height || 0}`;
+    if (cache && cache.link === link && cache.size === size) return cache.digest;
+    let digest = 'pixels:none';
+    if (link && typeof document !== 'undefined' && document.createElement) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 64; canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        if (ctx && typeof ctx.drawImage === 'function' && typeof ctx.getImageData === 'function') {
+          ctx.clearRect?.(0, 0, 64, 64);
+          ctx.drawImage(link, 0, 0, 64, 64);
+          const image = ctx.getImageData(0, 0, 64, 64);
+          let hash = 0xcbf29ce484222325n;
+          for (let index = 0; index < image.data.length; index += 1) {
+            hash ^= BigInt(image.data[index]);
+            hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+          }
+          digest = `pixels:${hash.toString(16).padStart(16, '0')}`;
+        }
+      } catch (_) { digest = 'pixels:unreadable'; }
+    }
+    this.pixelDigestCache.set(key, { link, size, digest });
+    return digest;
   }
 
   fingerprint() {
@@ -225,8 +276,13 @@ export class DshEditorBridge {
     // never publish a negative dimension to the Host state validator.
     const canvasWidth = Number.isFinite(config.WIDTH) ? Math.max(1, config.WIDTH) : 1;
     const canvasHeight = Number.isFinite(config.HEIGHT) ? Math.max(1, config.HEIGHT) : 1;
+    const contentDigest = currentDigest;
     return { editorKind: 'image', editorInstanceId: this.editorInstanceId, documentId: this.documentId, revision: this.revision,
-      stateDigest: digestOf(this.documentState()),
+      // 内容摘要与视图态分开：选中/缩放不再算内容变化。
+      contentDigest,
+      viewState: this.viewState(),
+      // deprecated：保留一版以稳住旧契约，值与 contentDigest 相同。
+      stateDigest: contentDigest,
       canvas: { width: canvasWidth, height: canvasHeight },
       view: { scale: zoomView.getScale(), position: { x: position.x, y: position.y } },
       history: { ...(validTop ? { lastCommandId: top.commandId, appliedRevision: top.revision, afterDigest: top.afterDigest } : {}), canUndo: app.State.can_undo(), canRedo: app.State.can_redo(),
