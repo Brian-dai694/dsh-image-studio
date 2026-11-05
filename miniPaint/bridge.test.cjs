@@ -334,7 +334,19 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
 
     // ③ 清掉像素缓存后重算，摘要必须稳定（同一内容不能因重算而变化）。
     bridge.pixelDigestCache.clear();
-    assert.equal(bridge.readState().contentDigest, afterSelect.contentDigest);
+    assert.equal(bridge.readState().contentDigest, afterSelect.contentDigest, '同一内容重算两次必须一致');
+
+    // ④ 只改极少像素（模拟一行小字的改动）也必须反映到摘要：这是全分辨率摘要的意义。
+    const tiny = { id: 'img-4', name: '细节层', type: 'image', link: makeCanvas(16, 16, 100), x: 0, y: 0, width: 16, height: 16, order: 3, visible: true };
+    config.layers.push(tiny);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const beforeTiny = bridge.readState().contentDigest;
+    // 同一个 link 对象，只改一个像素并让变更计数自增（等价于一次原生像素动作）。
+    tiny.link._content = 101;
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    assert.notEqual(bridge.readState().contentDigest, beforeTiny, '一个像素的改动也不能被摘要漏掉');
   });
   await test('canvas crop and resize are native reversible single history entries', async () => {
     const width=config.WIDTH,height=config.HEIGHT,x=config.layers[0].x;

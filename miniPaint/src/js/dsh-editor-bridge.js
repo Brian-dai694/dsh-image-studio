@@ -69,8 +69,10 @@ export class DshEditorBridge {
     // 羽化/色彩匹配的首帧快照与已应用参数：只活在编辑器内，不进图层字段、不进 read_state。
     this.pixelBases = new Map();
     this.pixelApplied = new Map();
-    // 图层像素摘要缓存：link 或显示尺寸不变就复用，避免每次读状态都重扫大图。
+    // 图层像素摘要缓存：link + 尺寸 + 像素变更计数都没变就复用，避免重复全量扫描。
     this.pixelDigestCache = new Map();
+    // 每次原生像素动作（含撤销/重做）自增，用于让全分辨率像素摘要失效。
+    this.pixelMutation = 0;
     this.lastFingerprint = this.fingerprint();
     this.forcedFingerprint = null;
     this.observeMutations();
@@ -102,25 +104,28 @@ export class DshEditorBridge {
   }
 
   /**
-   * 单层像素摘要：把图层画到 64×64 的小画布上再算 FNV-1a，成本与图片尺寸无关。
-   * 结果按图层缓存，只有 link 对象或显示尺寸变化才重算，避免每帧全量扫描大图。
+   * 单层像素摘要：按**全分辨率**逐字节算 FNV-1a，缩略图会抹掉小改动，不能用于审计。
+   * 性能靠缓存：键 = 图层像素对象身份 + 显示尺寸 + 像素变更计数，三者都没变就复用。
+   * 像素变更计数由每个原生像素动作（羽化/调色，含其撤销重做）自增。
    */
   layerPixelDigest(layer) {
     const key = String(layer.id);
     const link = layer.link || null;
     const cache = this.pixelDigestCache.get(key);
     const size = `${layer.width || 0}x${layer.height || 0}`;
-    if (cache && cache.link === link && cache.size === size) return cache.digest;
+    if (cache && cache.link === link && cache.size === size && cache.mutation === this.pixelMutation) return cache.digest;
     let digest = 'pixels:none';
     if (link && typeof document !== 'undefined' && document.createElement) {
       try {
+        const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+        const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
         const canvas = document.createElement('canvas');
-        canvas.width = 64; canvas.height = 64;
+        canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
         if (ctx && typeof ctx.drawImage === 'function' && typeof ctx.getImageData === 'function') {
-          ctx.clearRect?.(0, 0, 64, 64);
-          ctx.drawImage(link, 0, 0, 64, 64);
-          const image = ctx.getImageData(0, 0, 64, 64);
+          ctx.clearRect?.(0, 0, width, height);
+          ctx.drawImage(link, 0, 0, width, height);
+          const image = ctx.getImageData(0, 0, width, height);
           let hash = 0xcbf29ce484222325n;
           for (let index = 0; index < image.data.length; index += 1) {
             hash ^= BigInt(image.data[index]);
@@ -130,7 +135,7 @@ export class DshEditorBridge {
         }
       } catch (_) { digest = 'pixels:unreadable'; }
     }
-    this.pixelDigestCache.set(key, { link, size, digest });
+    this.pixelDigestCache.set(key, { link, size, mutation: this.pixelMutation, digest });
     return digest;
   }
 
@@ -455,12 +460,15 @@ export class DshEditorBridge {
       const nativeDo = action.do.bind(action);
       const nativeUndo = action.undo.bind(action);
       const appliedState = this.pixelApplied;
+      const owner = this;
       action.do = async () => {
         await nativeDo();
+        owner.pixelMutation += 1;
         appliedState.set(key, { ...previous, ...applied });
       };
       action.undo = async () => {
         await nativeUndo();
+        owner.pixelMutation += 1;
         if (Object.keys(previous).length) appliedState.set(key, previous);
         else appliedState.delete(key);
       };
