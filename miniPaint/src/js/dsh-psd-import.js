@@ -72,6 +72,7 @@ export function mapPsdLayers(psd) {
       if (layer.adjustment) continue;
 
       // 文字层优先保留可编辑文本：PSD 里它也带栅格像素，直接用像素会丢掉可编辑性。
+      // 没有可用文本元数据时退回栅格（保住视觉），连像素都没有才跳过。
       if (layer.text) {
         const textLayer = textLayerFromPsd(layer, meta);
         if (textLayer) {
@@ -79,7 +80,12 @@ export function mapPsdLayers(psd) {
           layers.push(textLayer);
           continue;
         }
-        warnings.push(`「${name}」是文字层但没有文本内容，已跳过`);
+        if (layer.imageData) {
+          warnings.push(`「${name}」没有可用的文本内容，已退回栅格图层`);
+          layers.push(rasterLayerFromImageData(layer.imageData, meta));
+          continue;
+        }
+        warnings.push(`「${name}」是文字层但既无文本也无像素，已跳过`);
         continue;
       }
       if (layer.imageData) { layers.push(rasterLayerFromImageData(layer.imageData, meta)); continue; }
