@@ -380,6 +380,33 @@ test('the image package registers under its own plugin name and overlay id', asy
   assert.notEqual(client.chat.retainedOverlayId, 'media-retained-editors', '共用 overlay id 会被 root list 槽位拒绝并吞掉侧栏入口');
 });
 
+test('the image package registers a native tool card for each of its five tools', async () => {
+  const client = await loadClient();
+  const { ctx, registered, injected, flush } = makeContext();
+  client.apply(ctx);
+  flush();
+  assert.ok(injected.includes('tool.call.toolview'));
+  const views = registered.filter(item => item.definition.name === 'tool.call.toolview');
+  const keys = views.map(item => item.definition.key).sort();
+  assert.equal(keys.length, 5);
+  assert.deepEqual(keys, [...client.toolViewKeys].sort());
+  for (const key of keys) assert.match(key, /^media_image_/);
+});
+
+test('tool cards show fields instead of the raw JSON body', async () => {
+  const client = await loadClient();
+  const { ctx, registered, flush } = makeContext();
+  client.apply(ctx); flush();
+  const view = registered.find(item => item.definition.name === 'tool.call.toolview').component;
+  const ok = JSON.stringify(view({ block: { kind: 'result', content: [{ text: JSON.stringify({ status: 'applied', result: { revision: 3, layersCount: 2, stateDigest: 'secret-digest' } }) }] } }));
+  assert.match(ok, /applied/);
+  assert.match(ok, /R3/);
+  assert.match(ok, /2 个图层/);
+  assert.doesNotMatch(ok, /secret-digest/);
+  const failed = JSON.stringify(view({ block: { kind: 'result', content: [{ text: JSON.stringify({ result: { error: { code: 'REVISION_CONFLICT' }, revision: 4 } }) }] } }));
+  assert.match(failed, /版本已变化/);
+});
+
 test('a missing slots service degrades instead of throwing', async () => {
   const client = await loadClient();
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));

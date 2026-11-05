@@ -496,7 +496,14 @@ window.__ModuleLoader__.load({
       React.createElement('div', { ref: listRef, style: { flex: 1, overflow: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 } },
         messages.length === 0
           ? React.createElement('p', { style: { margin: 0, fontSize: 13, color: '#86868b' } }, '还没有消息。输入指令后由真实会话处理。')
-          : messages.map(function (message, index) {
+          : messages.filter(function (message) {
+            // 自建面板只保留人类可读的对话；普通工具调用交给原生 conversation 里的
+            // tool.call.toolview 卡片渲染，避免同一份 JSON 在两个地方重复出现。
+            // 例外：带「另存文件」或「定向撤销」凭据的结果卡仍在这里，因为操作按钮属于本面板。
+            if (message.role === 'approval') return false
+            if (message.role === 'tool') return !!(message.exportRef || message.undo)
+            return true
+          }).map(function (message, index) {
             var mine = message.role === 'user'
             var bad = message.role === 'error'
             if (message.role === 'tool' || message.role === 'approval') {
@@ -594,6 +601,101 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ---------- native tool cards (tool.call.toolview) ----------
+    //
+    // 宿主在原生对话里按工具名分派 tool.call.toolview；命中就替换通用工具行，所以模型看到的
+    // canonical JSON 不必进聊天正文。props.block.content 是结果内容片段数组（part.text），
+    // 我们只解析其中的摘要/JSON 字段，渲染中文卡片。本机宿主 0.2.x 已声明该槽位。
+
+    /** 工具结果正文：拼接 content 片段里的可读文本。 */
+    function blockText(block) {
+      if (!block || !Array.isArray(block.content)) return ''
+      return block.content.map(function (part) {
+        if (typeof part === 'string') return part
+        if (part && typeof part.text === 'string') return part.text
+        return ''
+      }).filter(Boolean).join('\n')
+    }
+
+    /** 从结果正文里取出对象：优先整段 JSON，其次首尾花括号之间的 JSON。 */
+    function parseBlockJson(text) {
+      if (!text) return null
+      var trimmed = text.trim()
+      try { if (trimmed[0] === '{') return JSON.parse(trimmed) } catch (_) { /* 继续尝试内嵌 JSON */ }
+      var start = trimmed.indexOf('{'), end = trimmed.lastIndexOf('}')
+      if (start >= 0 && end > start) {
+        try { return JSON.parse(trimmed.slice(start, end + 1)) } catch (_) { return null }
+      }
+      return null
+    }
+
+    /** 摘要文本（`applied · cmd-1 · R2 · exportId exp-1`）解析成字段，作为 JSON 缺失时的降级。 */
+    function parseSummary(text) {
+      if (!text) return {}
+      var out = {}
+      var status = /(applied|rejected|unknown|pending|failed|completed)/.exec(text)
+      if (status) out.status = status[1]
+      var revision = /\bR(\d+)\b/.exec(text)
+      if (revision) out.revision = Number(revision[1])
+      var exportId = /exportId\s+([\w.-]+)/.exec(text)
+      if (exportId) out.exportId = exportId[1]
+      var artifact = /artifactRef\s+(\S+)/.exec(text)
+      if (artifact) out.artifactRef = artifact[1]
+      var command = /\b(cmd-[\w.-]+)/.exec(text)
+      if (command) out.commandId = command[1]
+      return out
+    }
+
+    function toolViewCard(toolName, props) {
+      var text = blockText(props && props.block)
+      var data = parseBlockJson(text) || {}
+      var summary = parseSummary(text)
+      var payload = data.result || data.value || data
+      var status = data.status || payload.status || summary.status || (props && props.block && props.block.kind ? 'completed' : 'pending')
+      var revision = payload.revision ?? data.revision ?? summary.revision
+      var errorCode = (payload.error && payload.error.code) || (data.error && data.error.code) || summary.errorCode
+      var lines = []
+      if (errorCode) lines.push(ERROR_TEXT[errorCode] || ('没有完成：' + errorCode))
+      if (data.exportId || payload.exportId || summary.exportId) lines.push('导出任务 ' + (data.exportId || payload.exportId || summary.exportId))
+      if (data.artifactRef || payload.artifactRef || summary.artifactRef) lines.push('文件引用 ' + (data.artifactRef || payload.artifactRef || summary.artifactRef))
+      if (payload.layersCount !== undefined) lines.push(payload.layersCount + ' 个图层')
+      if (payload.operation) lines.push('操作 ' + payload.operation)
+      if (payload.documentId) lines.push('工程 ' + String(payload.documentId).slice(0, 8))
+      if (payload.trackId) lines.push('轨道 ' + String(payload.trackId).slice(0, 8))
+      if (!lines.length && text) lines.push(text.split('\n')[0].slice(0, 120))
+      if (!lines.length) lines.push('已完成')
+      return {
+        title: TOOL_NAMES[toolName] || toolName,
+        status: String(status || 'unknown'),
+        revision: Number.isSafeInteger(revision) ? revision : null,
+        lines: lines,
+        failed: !!errorCode,
+      }
+    }
+
+    /** 原生对话里的工具卡片：工具名 + 状态 + 修订号 + 关键字段，不显示原始 JSON。 */
+    function makeToolView(toolName) {
+      return function MediaToolView(props) {
+        var React = require('react')
+        var card = toolViewCard(toolName, props)
+        var tone = card.failed ? '#ff3b30' : card.status === 'applied' ? '#1d7a3c' : '#6e6e73'
+        return React.createElement('div', {
+          style: { padding: '10px 12px', borderRadius: 14, background: '#ffffff', fontSize: 12.5, lineHeight: 1.5,
+            boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', color: '#1d1d1f', maxWidth: 520 },
+        },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            React.createElement('strong', { style: { fontWeight: 600 } }, card.title),
+            React.createElement('span', { style: { fontSize: 11, color: tone } }, card.status),
+            card.revision === null ? null : React.createElement('span', { style: { fontSize: 11, color: '#86868b' } }, 'R' + card.revision)),
+          card.lines.map(function (line, index) {
+            return React.createElement('div', { key: index, style: { marginTop: 4, color: '#6e6e73', wordBreak: 'break-word' } }, line)
+          }))
+      }
+    }
+
+    // 每个包只注册自己 5 个工具；split-packages.mjs 会按包名重写这个数组。
+    var TOOL_VIEW_KEYS = ['media_image_read_state', 'media_image_apply_command', 'media_image_get_command_result', 'media_image_export_start', 'media_image_export_status']
+
     // ---------- wiring ----------
 
     function install(ctx) {
@@ -682,6 +784,17 @@ window.__ModuleLoader__.load({
         if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 常驻编辑器 overlay 注册失败：', RETAINED_OVERLAY_ID, String(error))
       }
       if (typeof offRetained === 'function') disposers.push(offRetained)
+      // 原生对话里的工具卡片：注册失败不能连带杀掉侧栏入口，同样单独 try/catch。
+      TOOL_VIEW_KEYS.forEach(function (toolName) {
+        try {
+          var offView = slots.inject('tool.call.toolview', function () {
+            return slots.register({ name: 'tool.call.toolview', key: toolName }, makeToolView(toolName))
+          })
+          if (typeof offView === 'function') disposers.push(offView)
+        } catch (error) {
+          if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 工具卡片注册失败：', toolName, String(error))
+        }
+      })
       // forEach, not a `for (var i ...)`: `slots.inject` runs its factory later, so a
       // function-scoped `entry` would leave both registrations pointing at the last entry.
       ENTRIES.forEach(function (entry, index) {
@@ -711,6 +824,7 @@ window.__ModuleLoader__.load({
     exports.inject = ['slots', 'layout', 'remote', 'remote.session', 'uiWorkspace']
     exports.apply = apply
     exports.entries = ENTRIES
+    exports.toolViewKeys = TOOL_VIEW_KEYS.slice()
     // Exposed for the contract tests; the host only consumes name/inject/apply.
     exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody }
     return module.exports
