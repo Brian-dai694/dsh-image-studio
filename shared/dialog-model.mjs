@@ -4,10 +4,12 @@
 // 不发起任何调用。图片侧 `plugin/dsh-media-image/lib/client.js` 内联实现与本文档语义一致，
 // 由 `plugin/dsh-media-image/test/dialog-parity.test.mjs` 逐函数对照，改一边不改另一边会红。
 //
-// 版本：dialog-model@2（2026-11-05）。@2 相比 @1：
-//   1) tool 分支新增 `locate` 透传（sanitizeLocate 只保留 objectIds + kind 白名单）；
-//   2) 错误行与工具回执改用严格裸 JSON 判定（能 parse 就算，不看长度），散文仍保留 40 字符阈值。
-// 版本号变了就不允许和 @1 混用：同版本号两个不同文件是歧义。
+// 版本：dialog-model@3（2026-11-05）。@3 相比 @2：
+//   1) 动作携带自身所需凭据：fill-undo 带 prompt + undo，download-export 带 export；
+//      渲染层不再回查原始行（@2 的 locate 已按同一原则处理）；
+//   2) 新增 sanitizeUndo / undoPrompt / sanitizeExport（architect 把 undoPrompt 列入共享清单）。
+// @2 相比 @1：tool 计划透传 locate；错误行/工具回执改严格裸 JSON 判定。
+// 版本号变了就不允许跨版本混用：同版本号两个不同文件是歧义。
 //
 // 视频侧 vendor 本文件后，在旁侧 source.json 记录版本 + sha256 + 字节数；升级时整份替换并同步三者。
 
@@ -155,11 +157,41 @@ export function approvalBadge(row) {
   return 'unknown';
 }
 
+/** 撤销凭据校验：三项都必须是非空字符串/安全整数，缺一项就整体省略。 */
+export function sanitizeUndo(undo) {
+  if (!undo || typeof undo !== 'object') return null;
+  if (typeof undo.commandId !== 'string' || !undo.commandId || undo.commandId.length > 256) return null;
+  if (!Number.isSafeInteger(undo.appliedRevision) || undo.appliedRevision < 0) return null;
+  if (typeof undo.afterDigest !== 'string' || !/^fnv1a64-[0-9a-f]{16}$/.test(undo.afterDigest)) return null;
+  return { commandId: undo.commandId, appliedRevision: undo.appliedRevision, afterDigest: undo.afterDigest };
+}
+
+/** 撤销指令文案：只把带凭据的指令填进输入框，由会话里的 Agent 执行。 */
+export function undoPrompt(undo) {
+  const evidence = sanitizeUndo(undo);
+  if (!evidence) return '';
+  return '撤销上一步修改：使用 history.undo，params={"targetCommandId":"' + evidence.commandId + '","afterDigest":"' + evidence.afterDigest + '"}'
+    + '（commandId=' + evidence.commandId + '，appliedRevision=' + evidence.appliedRevision + '）。'
+    + '先 read_state 确认这一步仍是历史栈顶；若返回 HISTORY_CONFLICT 说明已有后续修改，立即停止并说明，不要重试或绕过。';
+}
+
+/** 导出引用校验：exportId 必须存在，其余字段按需保留。 */
+export function sanitizeExport(ref) {
+  if (!ref || typeof ref !== 'object') return null;
+  if (typeof ref.exportId !== 'string' || !ref.exportId || ref.exportId.length > 256) return null;
+  const out = { exportId: ref.exportId };
+  if (typeof ref.artifactRef === 'string' && ref.artifactRef) out.artifactRef = ref.artifactRef;
+  if (typeof ref.format === 'string' && /^[a-z]{2,8}$/i.test(ref.format)) out.format = ref.format;
+  return out;
+}
+
 /**
  * 会话行 → 界面计划。这是两个编辑器唯一的渲染入口约定：
  *   { key, kind: 'user'|'assistant'|'tool'|'approval'|'error', badge, tone,
- *     blocks:[{kind,...}], card?, issue?, diagnostic?, title?, actions:[{kind}] }
- * 规则：裸 JSON 不进 DOM；审批只有 open-native；撤销只有 fill-undo（只填输入框）。
+ *     blocks:[{kind,...}], card?, issue?, diagnostic?, title?, locate?,
+ *     actions:[{kind, label, hint?, prompt?, export?, disabled?}] }
+ * 规则：裸 JSON 不进 DOM；审批只有 open-native；撤销只有 fill-undo（只填输入框）；
+ * 动作需要的凭据（prompt / export）**必须在动作里**，渲染层不许回查原始行。
  */
 export function buildDialogPlan(rows) {
   const list = Array.isArray(rows) ? rows : [];
@@ -179,8 +211,11 @@ export function buildDialogPlan(rows) {
       const card = row.card || { name: '工具调用', status: '', revision: null, line: '' };
       const badge = normalizeToolStatus(card.status, !!card.error);
       const actions = [];
-      if (row.undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT' });
-      if (row.exportRef) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件' });
+      // 凭据随动作一起进计划：渲染层拿到就能用，不需要回查原始行（那属于隐式耦合）。
+      const undo = sanitizeUndo(row.undo);
+      if (undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT', prompt: undoPrompt(undo), undo });
+      const exported = sanitizeExport(row.exportRef);
+      if (exported) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件', export: exported });
       const diagnostic = card.line && isRawPayload(card.line) ? card.line : '';
       return {
         key, kind: 'tool', badge,
@@ -206,4 +241,4 @@ export function buildDialogPlan(rows) {
   });
 }
 
-export const DIALOG_MODEL_VERSION = 'dialog-model@2';
+export const DIALOG_MODEL_VERSION = 'dialog-model@3';

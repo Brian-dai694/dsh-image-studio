@@ -154,13 +154,15 @@ window.__ModuleLoader__.load({
       return null
     }
     /**
-     * 生成「定向撤销」的提示词：把命令 id、修订号、摘要交给模型，要求它先 read_state 核对
-     * 该命令仍在历史栈顶且 digest 一致，再带 targetCommandId+afterDigest 执行；
-     * 不一致或返回 HISTORY_CONFLICT 时必须停止，不允许重试旧命令。
+     * 撤销指令：只把带凭据的指令填进输入框，由会话里的 Agent 执行。
+     * 凭据缺一项就不生成文案——宁可不给按钮，也不给一个跑不通的指令。
      */
     function undoPrompt(evidence) {
-      var operation = 'history.undo'
-      return '请撤销这一条修改。先 read_state 核对 history.lastCommandId=' + evidence.commandId + '、history.appliedRevision=' + evidence.appliedRevision + '、history.afterDigest=' + evidence.afterDigest + ' 与当前 revision/stateDigest 一致且仍在栈顶；不一致或 HISTORY_CONFLICT 就停止并说明已有后续修改，不重试旧命令。确认后使用 operation="' + operation + '", params=' + JSON.stringify({ targetCommandId: evidence.commandId, afterDigest: evidence.afterDigest }) + '，携带最新 expectedRevision，执行后回读。'
+      var undo = sanitizeUndo(evidence)
+      if (!undo) return ''
+      return '撤销上一步修改：使用 history.undo，params={"targetCommandId":"' + undo.commandId + '","afterDigest":"' + undo.afterDigest + '"}'
+        + '（commandId=' + undo.commandId + '，appliedRevision=' + undo.appliedRevision + '）。'
+        + '先 read_state 确认这一步仍是历史栈顶；若返回 HISTORY_CONFLICT 说明已有后续修改，立即停止并说明，不要重试或绕过。'
     }
     /**
      * 从工具回执里找导出的artifactRef：只用于在界面上提供真实「另存」入口。
@@ -411,6 +413,25 @@ window.__ModuleLoader__.load({
       return isJsonStructure(text) || looksLikeRawJson(text)
     }
 
+    /** 撤销凭据校验：三项缺一项就整体省略。 */
+    function sanitizeUndo(undo) {
+      if (!undo || typeof undo !== 'object') return null
+      if (typeof undo.commandId !== 'string' || !undo.commandId || undo.commandId.length > 256) return null
+      if (!Number.isSafeInteger(undo.appliedRevision) || undo.appliedRevision < 0) return null
+      if (typeof undo.afterDigest !== 'string' || !/^fnv1a64-[0-9a-f]{16}$/.test(undo.afterDigest)) return null
+      return { commandId: undo.commandId, appliedRevision: undo.appliedRevision, afterDigest: undo.afterDigest }
+    }
+
+    /** 导出引用校验：exportId 必须存在，其余按需保留。 */
+    function sanitizeExport(ref) {
+      if (!ref || typeof ref !== 'object') return null
+      if (typeof ref.exportId !== 'string' || !ref.exportId || ref.exportId.length > 256) return null
+      var out = { exportId: ref.exportId }
+      if (typeof ref.artifactRef === 'string' && ref.artifactRef) out.artifactRef = ref.artifactRef
+      if (typeof ref.format === 'string' && /^[a-z]{2,8}$/i.test(ref.format)) out.format = ref.format
+      return out
+    }
+
     // 可定位对象：图片侧 layer，视频侧 clip / overlay / track。白名单外的 kind 整体丢弃。
     var LOCATE_KINDS = { layer: true, clip: true, overlay: true, track: true }
 
@@ -447,9 +468,11 @@ window.__ModuleLoader__.load({
           var card = row.card || { name: '工具调用', status: '', revision: null, line: '' }
           var badge = normalizeToolStatus(card.status, !!card.error)
           var actions = []
-          // 撤销只把凭据填进输入框，用户自己确认后发送；绝不自动执行。
-          if (row.undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT' })
-          if (row.exportRef) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件' })
+          // 动作自带凭据：渲染层拿到就能用，不回查原始行。
+          var undo = sanitizeUndo(row.undo)
+          if (undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT', prompt: undoPrompt(undo), undo: undo })
+          var exported = sanitizeExport(row.exportRef)
+          if (exported) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件', export: exported })
           // 解析失败的原始文本只用于复制诊断，不渲染成正文。
           var diagnostic = card.line && isRawPayload(card.line) ? card.line : ''
           var locate = sanitizeLocate(row.locate)
@@ -743,7 +766,6 @@ window.__ModuleLoader__.load({
         pending: { label: '进行中', color: '#6e6e73', background: 'rgba(0,0,0,.05)', weight: 500 },
       }
       var plan = buildDialogPlan(messages)
-      var rawById = new Map(messages.map(function (message) { return [message.id, message] }))
       var lastFailure = lastFailureRef.current
       var retry = retryState(lastFailure)
 
@@ -806,7 +828,7 @@ window.__ModuleLoader__.load({
 
       function renderActions(item) {
         var React = require('react')
-        var raw = rawById.get(item.key) || {}
+        // 只用计划里的动作数据：不回查原始行（隐式耦合是架构师明确禁止的）。
         return item.actions.map(function (action, index) {
           if (action.kind === 'open-native') {
             var workspace = typeof props.getWorkspace === 'function' ? props.getWorkspace() : null
@@ -814,12 +836,12 @@ window.__ModuleLoader__.load({
             return btn({ key: index, label: action.label, disabled: !canOpen, title: canOpen ? '' : '宿主未提供原生会话导航', style: { marginTop: 8 },
               onClick: function () { try { openNativeSession(workspace, bindingRef.current?.sessionId) } catch (error) { setStatus(error.message) } } })
           }
-          if (action.kind === 'fill-undo' && raw.undo) {
+          if (action.kind === 'fill-undo' && action.prompt) {
             return btn({ key: index, label: action.label, title: action.hint, style: { marginTop: 8 },
-              onClick: function () { setDraft(undoPrompt(raw.undo)); setStatus('已填入撤销指令；仅栈顶可撤，已有后续修改会返回 HISTORY_CONFLICT。请确认后再发送。') } })
+              onClick: function () { setDraft(action.prompt); setStatus('已填入撤销指令；仅栈顶可撤，已有后续修改会返回 HISTORY_CONFLICT。请确认后再发送。') } })
           }
-          if (action.kind === 'download-export' && raw.exportRef) {
-            return btn({ key: index, label: action.label, style: { marginTop: 8 }, onClick: function () { downloadExport(raw.exportRef) } })
+          if (action.kind === 'download-export' && action.export) {
+            return btn({ key: index, label: action.label, style: { marginTop: 8 }, onClick: function () { downloadExport(action.export) } })
           }
           return null
         }).filter(Boolean)
@@ -828,7 +850,7 @@ window.__ModuleLoader__.load({
       function renderRow(item) {
         var React = require('react')
         if (item.kind === 'approval') {
-          var approvalBadge = item.badge === 'applied' ? 'applied' : 'pending'
+          var approvalBadge = item.badge || 'pending'
           return React.createElement('div', { key: item.key, style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f' } },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
               React.createElement('strong', { style: { fontWeight: 600 } }, item.title), badge(approvalBadge)),
@@ -1249,8 +1271,8 @@ window.__ModuleLoader__.load({
     exports.toolViewKeys = TOOL_VIEW_KEYS.slice()
     // Exposed for the contract tests; the host only consumes name/inject/apply.
     exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody,
-      // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定、定位透传。
-      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate }
+      // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定、定位透传、动作凭据。
+      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate, sanitizeUndo: sanitizeUndo, sanitizeExport: sanitizeExport }
     return module.exports
   },
 })

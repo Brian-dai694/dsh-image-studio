@@ -368,15 +368,16 @@ test('hidden retained layer releases owned focus without blurring other panels',
 
 test('image results retain command evidence and expose history conflicts without offering stale undo', async () => {
   const client = await loadClient(), reduce = client.chat.makeTranscript();
-  const result = {commandId:'image-edit-1',revision:3,afterDigest:'digest-3'};
+  const result = {commandId:'image-edit-1',revision:3,afterDigest:'fnv1a64-0000000000000003'};
   const rows = reduce({type:'event',event:{seq:1,type:'tool/result',data:{toolName:'media_image_apply_command',result}}});
-  assert.deepEqual(rows[0].undo,{commandId:'image-edit-1',appliedRevision:3,afterDigest:'digest-3'});
+  assert.deepEqual(rows[0].undo,{commandId:'image-edit-1',appliedRevision:3,afterDigest:'fnv1a64-0000000000000003'});
   const conflict = reduce({type:'event',event:{seq:2,type:'tool/result',data:{result:{...result,error:{code:'HISTORY_CONFLICT'}}}}});
   assert.match(conflict[1].issue,/已有后续人工或 AI 修改/);
   assert.equal(conflict[1].undo,null);
   const prompt = client.chat.undoPrompt(rows[0].undo);
-  assert.match(prompt,/operation="history\.undo"/);
+  assert.match(prompt,/history\.undo/);
   assert.match(prompt,/targetCommandId/);
+  assert.match(prompt,/fnv1a64-0000000000000003/);
   assert.match(prompt,/HISTORY_CONFLICT.*停止/);
 });
 
@@ -521,7 +522,7 @@ test('retry is allowed exactly once for a known failure and refused when the out
   assert.equal(client.chat.normalizeToolStatus('unknown', false), 'unknown');
 });
 
-test('undo action only fills the input, never executes by itself', async () => {
+test('undo action carries its own credentials; nothing is looked up from the raw row', async () => {
   const client = await loadClient();
   const plan = client.chat.buildDialogPlan([{ id: 't1', role: 'tool', card: { name: '执行编辑', status: 'applied', revision: 3, line: 'layer.set_frame' },
     undo: { commandId: 'cmd-7', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000001' } }]);
@@ -529,8 +530,31 @@ test('undo action only fills the input, never executes by itself', async () => {
   assert.ok(action, '撤销必须给"填入输入框"动作');
   assert.match(action.hint, /栈顶/);
   assert.match(action.hint, /HISTORY_CONFLICT/);
+  // 凭据必须在动作里：渲染层只 setDraft(action.prompt)，不回查原始行
+  assert.equal(action.undo.commandId, 'cmd-7');
+  assert.equal(action.undo.appliedRevision, 3);
+  assert.equal(action.undo.afterDigest, 'fnv1a64-0000000000000001');
+  assert.match(action.prompt, /cmd-7/);
+  assert.match(action.prompt, /HISTORY_CONFLICT/);
   assert.equal(plan[0].actions.some(item => item.kind === 'undo'), false, '不允许出现直接执行撤销的动作');
-  assert.match(client.chat.undoPrompt({ commandId: 'cmd-7', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000001' }), /cmd-7/);
+  // 非法凭据（缺 digest / 修订号不是整数）→ 整体不给动作，而不是给一个跑不通的按钮
+  for (const bad of [{ commandId: 'cmd-7', appliedRevision: 3 }, { commandId: 'cmd-7', appliedRevision: '3', afterDigest: 'fnv1a64-0000000000000001' },
+    { commandId: '', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000001' }, { commandId: 'c', appliedRevision: 3, afterDigest: 'nope' }]) {
+    const planned = client.chat.buildDialogPlan([{ id: 't2', role: 'tool', card: { name: '执行编辑', status: 'applied', revision: 3, line: 'x' }, undo: bad }]);
+    assert.equal(planned[0].actions.some(item => item.kind === 'fill-undo'), false, `非法凭据不该给动作：${JSON.stringify(bad)}`);
+  }
+  assert.equal(client.chat.undoPrompt({}), '');
+});
+
+test('export action carries the export ref it needs', async () => {
+  const client = await loadClient();
+  const plan = client.chat.buildDialogPlan([{ id: 't1', role: 'tool', card: { name: '开始导出', status: 'completed', revision: 2, line: 'export_start' },
+    exportRef: { exportId: 'exp-1', artifactRef: 'artifact:1', format: 'png' } }]);
+  const action = plan[0].actions.find(item => item.kind === 'download-export');
+  assert.deepEqual(action.export, { exportId: 'exp-1', artifactRef: 'artifact:1', format: 'png' });
+  // 没有 exportId 的引用不产生动作
+  const none = client.chat.buildDialogPlan([{ id: 't2', role: 'tool', card: { name: '开始导出', status: 'completed', revision: 2, line: 'x' }, exportRef: { artifactRef: 'artifact:2' } }]);
+  assert.equal(none[0].actions.some(item => item.kind === 'download-export'), false);
 });
 
 test('locate 透传：合法原样保留，非法整体省略', async () => {

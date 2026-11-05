@@ -90,6 +90,19 @@ test('图片侧内联实现与 shared/dialog-model.mjs 的输出完全一致', a
   for (const locate of locates) {
     assert.equal(JSON.stringify(client.chat.sanitizeLocate(locate)), JSON.stringify(shared.sanitizeLocate(locate)));
   }
+  // 动作凭据：撤销/导出都必须随动作进计划，且两边逐字一致
+  for (const undo of [{ commandId: 'cmd-1', appliedRevision: 1, afterDigest: 'fnv1a64-0000000000000001' }, { commandId: '', appliedRevision: 1, afterDigest: 'x' }, null]) {
+    assert.equal(JSON.stringify(client.chat.sanitizeUndo(undo)), JSON.stringify(shared.sanitizeUndo(undo)));
+    assert.equal(client.chat.undoPrompt(undo), shared.undoPrompt(undo));
+  }
+  for (const ref of [{ exportId: 'e1', artifactRef: 'a', format: 'png' }, { artifactRef: 'a' }, null]) {
+    assert.equal(JSON.stringify(client.chat.sanitizeExport(ref)), JSON.stringify(shared.sanitizeExport(ref)));
+  }
+  const actionPlan = client.chat.buildDialogPlan(ROWS).find(item => item.key === 't5');
+  const sharedActionPlan = shared.buildDialogPlan(ROWS).find(item => item.key === 't5');
+  assert.equal(JSON.stringify(actionPlan.actions), JSON.stringify(sharedActionPlan.actions));
+  assert.equal(actionPlan.actions.find(action => action.kind === 'fill-undo').prompt, sharedActionPlan.actions.find(action => action.kind === 'fill-undo').prompt);
+  assert.deepEqual(actionPlan.actions.find(action => action.kind === 'download-export').export, { exportId: 'exp-1', artifactRef: 'artifact:1' });
 });
 
 test('共享模型产出的计划里没有裸 JSON，这一点两边一起成立', async () => {
