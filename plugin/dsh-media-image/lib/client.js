@@ -81,6 +81,56 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * `remote.session.list` 在不同宿主版本里字段形状不一，这里统一成 `[{sessionId,title}]`。
+     * 拿不到结构就返回 null，调用方据此回退到"只能新建"，绝不假装有会话列表。
+     */
+    function sessionListItems(value) {
+      const raw = value && (value.value || value);
+      if (!raw) return null;
+      const items = raw.sessions || raw.items || (Array.isArray(raw) ? raw : null);
+      if (!Array.isArray(items)) return null;
+      const out = [];
+      for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const id = item.sessionId || item.id;
+        if (typeof id !== 'string' || !id) continue;
+        out.push({ sessionId: id, title: String(item.title || item.name || item.summary || id).slice(0, 80), updatedAt: item.updatedAt || item.updated_at || null });
+      }
+      return out;
+    }
+
+    /** 读最近会话；宿主没有 list 或读失败都返回 null（调用方回退到新建）。 */
+    async function listSessions(remote, limit = 5) {
+      const session = remote && remote.session;
+      const list = session && (session.list || session.listSessions);
+      if (typeof list !== 'function') return null;
+      try { return sessionListItems(await list({ limit })) } catch (_) { return null }
+    }
+
+    /** 从会话记录里找工程身份标记的 projectId；找不到返回 null（只代表"没标记"，不代表匹配）。 */
+    function projectIdFromRecords(records) {
+      if (!Array.isArray(records)) return null;
+      for (const record of records) {
+        const event = record && record.event;
+        const text = event && textOfEvent(event.data?.message || event.data);
+        if (typeof text !== 'string' || text.indexOf('当前编辑工程身份：') < 0) continue;
+        const match = /"projectId"\s*:\s*"([^"]+)"/.exec(text);
+        if (match) return match[1];
+      }
+      return null;
+    }
+
+    /**
+     * 绑定已有会话时的工程校验：会话里带过工程身份、且 projectId 与当前工程不同 → 拒绝绑定。
+     * 没带标记（例如新建后还没发过指令）不拒绝，交给后续 read_state/审批把关。
+     */
+    function projectMismatch(records, projectId) {
+      const found = projectIdFromRecords(records);
+      if (!found || !projectId) return null;
+      return found === projectId ? null : found;
+    }
+
+    /**
      * 订阅一个专属会话的消息流，返回取消函数；宿主不支持订阅时返回 null。
      * 参数：remote 宿主 Remote 服务、sessionId 目标会话、onEvent 逐帧回调、onError 异常回调。
      * 取消语义：置位标志 → abort 信号 → 调 iterator.return，之后到达的帧一律丢弃，
@@ -617,32 +667,81 @@ window.__ModuleLoader__.load({
       // 失败重试只保留"最后一次没发出去的同一条消息"，重试逐字重发，不换参数。
       var lastFailureRef = React.useRef(null)
       var fileRef = React.useRef(null)
-      async function bind() {
+      var choiceState = React.useState(null)
+      var choices = choiceState[0]
+      var setChoices = choiceState[1]
+      // 附图相关的提示只能留在输入区，不许污染顶部状态行（上一版出现过"没选文件却报 5MB 超限"）。
+      var attachNoticeState = React.useState('')
+      var attachNotice = attachNoticeState[0]
+      var setAttachNotice = attachNoticeState[1]
+
+      /** 绑定/切换会话时把输入区状态清干净：附件、附图提示、失败重试游标。 */
+      function resetComposer() {
+        setAttach([]); setAttachNotice(''); lastFailureRef.current = null
+      }
+
+      /**
+       * 绑定会话：sessionId 为空表示新建，否则挂接已有会话。
+       * 绑定前先读工程身份；挂接已有会话时若历史里带过别的 projectId，直接拒绝并说明原因。
+       */
+      async function bindSession(sessionId) {
         if (sendingRef.current) return
-        sendingRef.current = true; setBusy(true); setReady(false)
-        if (stopRef.current) stopRef.current()
-        bindingRef.current = null; transcriptRef.current = null; setMessages([])
+        sendingRef.current = true; setBusy(true); setReady(false); setChoices(null)
+        if (stopRef.current) { stopRef.current(); stopRef.current = null }
+        bindingRef.current = null; transcriptRef.current = null; setMessages([]); resetComposer()
         try {
           var b = await readBinding(props.frameRef.current, props.kind)
           var remote = props.getRemote()
-          if (!remote?.session?.create) throw new Error('宿主未提供会话创建接口')
-          var result = await remote.session.create({})
-          if (!result?.ok || !result.value?.sessionId) throw new Error('创建专属会话失败，请检查宿主会话配置')
+          if (!sessionId) {
+            if (!remote?.session?.create) throw new Error('宿主未提供会话创建接口')
+            var created = await remote.session.create({})
+            if (!created?.ok || !created.value?.sessionId) throw new Error('创建专属会话失败，请检查宿主会话配置')
+            sessionId = created.value.sessionId
+          }
           if (!aliveRef.current) return
-          b.sessionId = result.value.sessionId
+          b.sessionId = sessionId
           bindingRef.current = b
           var reduce = makeTranscript()
           transcriptRef.current = reduce
-          if (!activeRef.current) { setStatus('专属对话已创建，返回编辑器后恢复订阅；工程尚待授权'); return }
-          stopRef.current = followSession(remote, b.sessionId, function (frame) {
+          if (!activeRef.current) { setStatus('会话已绑定，返回编辑器后恢复订阅；工程尚待授权'); return }
+          stopRef.current = followSession(remote, sessionId, function (frame) {
             if (!aliveRef.current || bindingRef.current !== b) return
             if (frame.type === 'snapshot' && frame.header.id !== b.sessionId) { setReady(false); setStatus('会话身份不匹配，已停止'); stopRef.current?.(); return }
+            if (frame.type === 'snapshot') {
+              var other = projectMismatch(frame.records, b.projectId)
+              if (other) {
+                // 拒绝挂接：会话里留着别的工程，继续用会把指令发到错误的画布上。
+                bindingRef.current = null; setReady(false)
+                setStatus('这个会话属于另一个工程（projectId ' + String(other).slice(0, 8) + '…），已拒绝绑定；请选择本工程的会话或新建')
+                stopRef.current?.(); return
+              }
+            }
             setMessages(reduce(frame)); setReady(true); setStatus('已连接对话，工程授权以 Host 回读为准 · ' + b.editorKind)
           }, function (error) { if (aliveRef.current) { setReady(false); setStatus('订阅中断：' + error.message) } })
           if (!stopRef.current) throw new Error('宿主未提供消息订阅接口')
-          setStatus('正在同步专属会话…')
+          setStatus('正在同步会话…')
         } catch (error) { if (aliveRef.current) setStatus(error.message) }
         finally { sendingRef.current = false; if (aliveRef.current) setBusy(false) }
+      }
+
+      /** 绑定入口：宿主支持会话列表就先让用户选（最近几个 + 新建），否则直接新建。 */
+      async function bind() {
+        if (sendingRef.current) return
+        sendingRef.current = true; setBusy(true); setReady(false)
+        if (stopRef.current) { stopRef.current(); stopRef.current = null }
+        bindingRef.current = null; transcriptRef.current = null; setMessages([]); resetComposer()
+        try {
+          var items = await listSessions(props.getRemote(), 5)
+          if (items && items.length) {
+            setChoices(items.slice(0, 5))
+            setStatus('选择要挂接的会话，或新建一个专属会话')
+            return
+          }
+          if (items) setStatus('宿主没有可挂接的历史会话，直接新建专属会话')
+          sendingRef.current = false
+          await bindSession(null)
+        } catch (error) { if (aliveRef.current) setStatus(error.message) }
+        finally { if (aliveRef.current) setBusy(false); sendingRef.current = false }
       }
 
       React.useEffect(function () {
@@ -686,7 +785,7 @@ window.__ModuleLoader__.load({
           var result = await sendPrompt(props.getRemote(), b.sessionId, context + text, attachments)
           if (!aliveRef.current || bindingRef.current !== b) return
           if (result.ok) {
-            setDraft(''); setAttach([]); lastFailureRef.current = null
+            setDraft(''); setAttach([]); setAttachNotice(''); lastFailureRef.current = null
             setStatus('消息已受理，等待真实会话反馈')
           } else {
             // 只记"同一条消息"，重试时逐字重发，绝不改参数重发。
@@ -706,13 +805,15 @@ window.__ModuleLoader__.load({
           var reader = new FileReader()
           reader.onload = function () {
             var parsed = attachmentFromDataUrl(file.name, reader.result)
-            if (!parsed.ok) { setStatus('附图未加入：' + parsed.message); return }
+            // 附图相关提示只进输入区，不进顶部状态行。
+            if (!parsed.ok) { setAttachNotice('附图未加入：' + parsed.message); return }
             setAttach(function (current) {
-              if (current.length >= 3) { setStatus('最多附加 3 张图片'); return current }
+              if (current.length >= 3) { setAttachNotice('最多附加 3 张图片'); return current }
+              setAttachNotice('')
               return current.concat([{ name: parsed.name, bytes: parsed.bytes, part: parsed.part }])
             })
           }
-          reader.onerror = function () { setStatus('读取图片失败：' + (file.name || '未知文件')) }
+          reader.onerror = function () { setAttachNotice('读取图片失败：' + (file.name || '未知文件')) }
           reader.readAsDataURL(file)
         })
       }
@@ -942,6 +1043,7 @@ window.__ModuleLoader__.load({
                   onClick: function () { setAttach(function (current) { return current.filter(function (_, at) { return at !== index }) }) },
                 }, '×'))
             })) : null,
+          attachNotice ? React.createElement('div', { role: 'status', style: { marginBottom: 8, fontSize: 11.5, color: '#ff3b30' } }, attachNotice) : null,
           React.createElement('textarea', {
             value: draft, disabled: !ready || busy, 'aria-label': '编辑指令', rows: 3,
             placeholder: ready ? '输入指令，Enter 发送，Shift+Enter 换行' : '先绑定专属对话',
@@ -966,7 +1068,12 @@ window.__ModuleLoader__.load({
       },
       React.createElement('div', {
         style: { padding: '14px 16px 10px', fontSize: 12, letterSpacing: '.02em', color: '#6e6e73', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,.08)' },
-      }, '对话 · ' + props.label, React.createElement('button', { type: 'button', className: 'dsh-media-btn', disabled: busy, onClick: function () { void bind() }, style: { marginLeft: 12 } }, '绑定专属对话'), React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: status.indexOf('未') === 0 ? '#ff3b30' : '#6e6e73' } }, status)),
+      }, '对话 · ' + props.label, React.createElement('button', { type: 'button', className: 'dsh-media-btn', disabled: busy, onClick: function () { void bind() }, style: { marginLeft: 12 } }, '绑定专属对话'), React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: status.indexOf('未') === 0 ? '#ff3b30' : '#6e6e73' } }, status),
+      choices ? React.createElement('div', { role: 'listbox', 'aria-label': '可挂接的会话', style: { marginTop: 8, display: 'grid', gap: 6, padding: 8, borderRadius: 12, background: '#f5f5f7' } },
+        choices.map(function (item) {
+          return btn({ key: item.sessionId, label: item.title, style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
+        }),
+        btn({ label: '＋ 新建专属会话', variant: 'primary', onClick: function () { void bindSession(null) } })) : null),
       React.createElement('div', {
         style: { padding: '8px 16px', fontSize: 12, color: '#6e6e73' }, role: 'status',
       },
@@ -1279,7 +1386,9 @@ window.__ModuleLoader__.load({
       // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定、定位透传、动作凭据。
       buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate, sanitizeUndo: sanitizeUndo, sanitizeExport: sanitizeExport,
       // 静态夹具复用同一套渲染组件（docs/fixtures/dialog-fixture.html）。
-      Conversation: Conversation }
+      Conversation: Conversation,
+      // 会话挂接：列表归一化、工程标识提取与不匹配判定（纯函数，便于测试）。
+      sessionListItems: sessionListItems, listSessions: listSessions, projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
     return module.exports
   },
 })

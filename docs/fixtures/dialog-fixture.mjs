@@ -34,11 +34,12 @@ function makeFrame(binding) {
   return iframe;
 }
 
-/** 假会话：create 立即成功，follow 只吐固定帧，吐完挂起（直到取消）。 */
-function makeRemote(frames, sessionId) {
+/** 假会话：create 立即成功；给了 list 就模拟"可挂接的历史会话"；follow 只吐固定帧，吐完挂起。 */
+function makeRemote(frames, sessionId, list) {
   return {
     session: {
       async create() { return { ok: true, value: { sessionId } }; },
+      ...(list ? { async list() { return { ok: true, value: { sessions: list } }; } } : {}),
       follow() {
         let index = 0;
         return {
@@ -85,9 +86,9 @@ function snapshot(records) {
   return { type: 'snapshot', header: { id: 'fixture-session' }, records: records.map(event => ({ event })) };
 }
 
-function mount(target, { frames, bind, width = 600 }) {
+function mount(target, { frames, bind, width = 600, list }) {
   const frame = makeFrame(BINDING);
-  const remote = makeRemote(frames, 'fixture-session');
+  const remote = makeRemote(frames, 'fixture-session', list);
   const mountNode = document.createElement('div');
   mountNode.style.cssText = 'flex:1;min-width:0;display:flex;min-height:0;height:100%';
   target.appendChild(mountNode);
@@ -113,6 +114,14 @@ mount(document.getElementById('full'), { frames: [snapshot(EVENTS),  // 助手�
 ], bind: true, width: 1080 });
 mount(document.getElementById('empty'), { frames: [snapshot([])], bind: true, width: 560 });
 mount(document.getElementById('unbound'), { frames: [], bind: false, width: 560 });
+// ④ 绑定已有会话：宿主返回两个历史会话，点「绑定专属对话」应列出它们 + 新建入口
+mount(document.getElementById('sessions'), {
+  frames: [], bind: true, width: 560,
+  list: [
+    { sessionId: 'session-image-a', title: '图片工程：改标题与画布尺寸' },
+    { sessionId: 'session-video-b', title: '视频工程：首次绑定只读状态' },
+  ],
+});
 
 document.documentElement.dataset.fixtureReady = 'pending';
 setTimeout(() => { document.documentElement.dataset.fixtureReady = 'ready'; }, 1200);

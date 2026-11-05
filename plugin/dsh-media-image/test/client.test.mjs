@@ -435,6 +435,28 @@ test('an empty status with an error code defaults to rejected, not unknown', asy
   assert.equal(plain.status, 'unknown', '没有明确结果、也没有错误码时仍然是 unknown');
 });
 
+test('binding can attach an existing session, and refuses one that belongs to another project', async () => {
+  const client = await loadClient();
+  // 列表归一化：字段形状在不同宿主版本里不一致，统一成 {sessionId,title}
+  const items = client.chat.sessionListItems({ value: { sessions: [{ sessionId: 's1', title: '首次绑定视频工程只读状态' }, { id: 's2' }, {}, { sessionId: '' }] } });
+  assert.deepEqual(items.map(item => item.sessionId), ['s1', 's2']);
+  assert.equal(items[0].title, '首次绑定视频工程只读状态');
+  assert.equal(items[1].title, 's2');
+  assert.equal(client.chat.sessionListItems({ value: { sessions: 'nope' } }), null);
+  assert.equal(client.chat.sessionListItems(undefined), null);
+  // 宿主没有 list / 读失败 → null，调用方回退到新建
+  assert.equal(await client.chat.listSessions({ session: {} }), null);
+  assert.equal(await client.chat.listSessions({ session: { list: async () => { throw new Error('no') } } }), null);
+  // 工程标识提取：只认带身份标记的那条用户消息
+  const marked = '当前编辑工程身份：' + JSON.stringify({ editorKind: 'image', projectId: 'proj-a' }) + '\n用户指令：\n改标题';
+  const records = [{ event: { seq: 1, type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: marked }] } } } }];
+  assert.equal(client.chat.projectIdFromRecords(records), 'proj-a');
+  assert.equal(client.chat.projectMismatch(records, 'proj-a'), null);
+  assert.equal(client.chat.projectMismatch(records, 'proj-b'), 'proj-a', '不同工程必须能被识别出来');
+  assert.equal(client.chat.projectIdFromRecords([]), null);
+  assert.equal(client.chat.projectMismatch([], 'proj-a'), null, '没有标记不拒绝，交给 read_state/审批把关');
+});
+
 test('a missing slots service degrades instead of throwing', async () => {
   const client = await loadClient();
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));
