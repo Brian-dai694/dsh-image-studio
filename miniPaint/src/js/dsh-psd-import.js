@@ -71,13 +71,18 @@ export function mapPsdLayers(psd) {
       if (layer.adjustment) warnings.push(`「${name}」是调整层，miniPaint 无对应能力，已跳过`);
       if (layer.adjustment) continue;
 
-      if (layer.imageData) { layers.push(rasterLayerFromImageData(layer.imageData, meta)); continue; }
+      // 文字层优先保留可编辑文本：PSD 里它也带栅格像素，直接用像素会丢掉可编辑性。
       if (layer.text) {
         const textLayer = textLayerFromPsd(layer, meta);
-        if (textLayer) layers.push(textLayer);
-        else warnings.push(`「${name}」是文字层但没有文本内容，已跳过`);
+        if (textLayer) {
+          warnings.push(`「${name}」按可编辑文本导入，字体与排版可能与 Photoshop 不一致`);
+          layers.push(textLayer);
+          continue;
+        }
+        warnings.push(`「${name}」是文字层但没有文本内容，已跳过`);
         continue;
       }
+      if (layer.imageData) { layers.push(rasterLayerFromImageData(layer.imageData, meta)); continue; }
       warnings.push(`「${name}」没有可用的像素数据（可能是空层或未栅格化的智能对象），已跳过`);
     }
   };
