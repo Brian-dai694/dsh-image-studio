@@ -3,6 +3,16 @@
 适用于 `dsh-media-image` Host 工具 `media_image_apply_command`。Host 只做**形状与取值域**校验；
 文档状态（图层、素材、像素快照）唯一由 miniPaint 页面持有，Host 不缓存、不转存像素。
 
+## 0. 源与打包规则（2026-11-05 起生效）
+
+- **唯一来源**：两个独立仓库 `dsh-image-studio`、`dsh-video-studio`。打包一律在各自
+  `plugin/<包名>/` 目录直接 `npm pack`，不经过任何合并包。
+- `diagram-studio-prototype` 降级为**历史参考**，不再是打包输入；其中的
+  `plugin/split-packages.mjs` 标记为 **legacy**，默认拒绝运行，只有在显式设置
+  `SPLIT_ONLY=image|video`、且确认目标仓库已包含最新改动时才可用于对照重建。
+- 由此产生的约束：单包仓库可以领先于合并源；**不要用合并源反向覆盖单包仓库**，
+  也不要把「合并源里没有」当作「单包里没有」。
+
 ## 1. 本轮新增命令
 
 | 命令 | 风险 | 说明 |
