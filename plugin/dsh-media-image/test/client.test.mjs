@@ -610,6 +610,26 @@ test('structured credentials in meta drive the undo and export buttons', async (
   assert.equal(tools[5].actions.some(action => action.kind === 'fill-undo'), false, '缺 appliedRevision 就不出按钮');
 });
 
+test('highlight request is built only from locate and clamps ttl; suggestions stay inside the whitelist', async () => {
+  const client = await loadClient();
+  assert.equal(client.chat.highlightRequest(null, 'r1'), null);
+  assert.equal(client.chat.highlightRequest({ objectIds: [], kind: 'layer' }, 'r1'), null);
+  const message = client.chat.highlightRequest({ objectIds: ['layer-1', 'layer-2'], kind: 'layer' }, 'r1', 99999);
+  assert.equal(message.type, 'media.highlight.request');
+  assert.deepEqual(message.objectIds, ['layer-1', 'layer-2']);
+  assert.equal(message.ttlMs, 5000, 'ttl 上界 5000');
+  assert.equal(client.chat.highlightRequest({ objectIds: ['a'], kind: 'clip' }, 'r2', 1).ttlMs, 200, 'ttl 下界 200');
+  // 非法 id 会被过滤；全部非法时不给请求
+  assert.deepEqual(client.chat.highlightRequest({ objectIds: ['ok', 42, ''], kind: 'layer' }, 'r3').objectIds, ['ok']);
+  // 建议只对"恰好一个图层"生成；白名单外的动作不出现
+  const suggestions = client.chat.suggestionsFor(['layer-1'], 'layer');
+  assert.equal(suggestions.length, 4);
+  for (const suggestion of suggestions) assert.match(suggestion.prompt, /layer-1/);
+  assert.deepEqual(client.chat.suggestionsFor(['a', 'b'], 'layer'), []);
+  assert.deepEqual(client.chat.suggestionsFor(['a'], 'clip'), []);
+  assert.deepEqual(client.chat.suggestionsFor([], null), []);
+});
+
 test('real captured events render with meta.status and callId-linked names', async () => {
   const { readFileSync } = await import('node:fs');
   const { resolve: resolvePath, dirname: dirOf } = await import('node:path');
@@ -690,6 +710,25 @@ test('unknown only from explicit status; pending only from call without result; 
   // 成功但只有人读文本、没有结构化字段：摘要无法解析，但**不是** unknown
   assert.match(tools[1].card.line, /摘要无法解析/);
   assert.equal(tools[1].badge, 'applied');
+});
+
+test('locate comes from the receipt changedObjectIds; without it the card stays unclickable', async () => {
+  const client = await loadClient();
+  const reduce = client.chat.makeTranscript();
+  const events = [
+    { seq: 1, type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'media_image_apply_command', arguments: '{}' } },
+    { seq: 2, type: 'tool/result', data: { turn: 1, step: 2, message: { toolCallId: 'c1', isError: false, content: [{ type: 'text', text: 'applied · c-1 · R1' }] },
+      meta: { status: 'applied', operation: 'layer.add_text', commandId: 'c-1', appliedRevision: 1, afterDigest: 'fnv1a64-0000000000000001', changedObjectIds: ['layer-9'] } } },
+    { seq: 3, type: 'tool/call', data: { turn: 1, step: 3, callId: 'c2', name: 'media_image_read_state', arguments: '{}' } },
+    { seq: 4, type: 'tool/result', data: { turn: 1, step: 4, message: { toolCallId: 'c2', isError: false, content: [{ type: 'text', text: 'image · R1' }] }, meta: { status: 'applied' } } },
+  ];
+  const plan = client.chat.buildDialogPlan(reduce({ type: 'snapshot', header: { id: 's' }, records: events.map(event => ({ event })) }));
+  const tools = plan.filter(item => item.kind === 'tool');
+  assert.deepEqual(tools[1].locate, { objectIds: ['layer-9'], kind: 'layer' });
+  assert.equal('locate' in tools[3], false, '没有 changedObjectIds 就不给 locate（不可点）');
+  // 用 locate 生成的高亮请求只含这些 id
+  const request = client.chat.highlightRequest(tools[1].locate, 'r1');
+  assert.deepEqual(request.objectIds, ['layer-9']);
 });
 
 test('a missing slots service degrades instead of throwing', async () => {

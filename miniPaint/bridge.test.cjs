@@ -384,5 +384,61 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     const resize=await send({type:'canvas.resize',payload:{width:400,height:300}});
     assert.equal(resize.ok,true);assert.equal(config.WIDTH,400);assert.equal(config.layers[0].x,x);
   });
+  async function callEditor(request) {
+    let response;
+    await bridge.handleRequest(request, { postMessage(value) { response = value } });
+    return response;
+  }
+  await test('editor.highlight only paints an outline: revision, digest, history and selection unchanged', async () => {
+    const layerId = String(config.layers[0].id);
+    const before = bridge.readState();
+    const historyBefore = app.State.action_history.length;
+    const selectedBefore = config.layer ? String(config.layer.id) : null;
+    const result = await callEditor({ type: 'editor.highlight', requestId: 'hl-1', editorInstanceId: bridge.editorInstanceId, objectIds: [layerId, 'nope'] });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.result.matched, [layerId]);
+    assert.deepEqual(result.result.missing, ['nope']);
+    const after = bridge.readState();
+    assert.equal(after.revision, before.revision, '高亮不许 bump revision');
+    assert.equal(after.contentDigest, before.contentDigest, '高亮不许改内容摘要');
+    assert.equal(app.State.action_history.length, historyBefore, '高亮不许进历史');
+    assert.equal(config.layer ? String(config.layer.id) : null, selectedBefore, '高亮不许改选中');
+  });
+  await test('editor.highlight rejects malformed objectIds and clamps ttl', async () => {
+    for (const objectIds of [undefined, [], [1], ['', 'x'], new Array(201).fill('a')]) {
+      const bad = await callEditor({ type: 'editor.highlight', requestId: 'hl-bad', editorInstanceId: bridge.editorInstanceId, objectIds });
+      assert.equal(bad.ok, false, JSON.stringify(bad));
+      assert.equal(bad.error.code, 'INVALID_REQUEST');
+    }
+    const layerId = String(config.layers[0].id);
+    const clamped = await callEditor({ type: 'editor.highlight', requestId: 'hl-ttl', editorInstanceId: bridge.editorInstanceId, objectIds: [layerId], ttlMs: 999999 });
+    assert.equal(clamped.ok, true);
+    assert.equal(bridge.highlightState.ttlMs, 5000);
+    const small = await callEditor({ type: 'editor.highlight', requestId: 'hl-ttl2', editorInstanceId: bridge.editorInstanceId, objectIds: [layerId], ttlMs: 1 });
+    assert.equal(small.ok, true);
+    assert.equal(bridge.highlightState.ttlMs, 200);
+    bridge.clearHighlight();
+  });
+  await test('selection_changed is a throttled read-only push', async () => {
+    const sent = [];
+    bridge.port = { postMessage: message => sent.push(message) };
+    bridge.selectionEmitAt = 0;
+    bridge.emitSelectionChanged();
+    bridge.emitSelectionChanged();
+    bridge.emitSelectionChanged();
+    assert.equal(sent.length, 1, '100ms 内只发一条');
+    assert.equal(sent[0].type, 'editor.selection_changed');
+    assert.equal(typeof sent[0].revision, 'number');
+    assert.ok(Array.isArray(sent[0].selectedObjectIds));
+    assert.ok(['layer', null].includes(sent[0].objectKind));
+    bridge.selectionEmitAt = 0;
+    bridge.emitSelectionChanged();
+    assert.equal(sent.length, 2, '超过节流窗口后可以再发');
+    const historyBefore = app.State.action_history.length;
+    const revisionBefore = bridge.revision;
+    assert.equal(app.State.action_history.length, historyBefore, '推送不产生历史');
+    assert.equal(bridge.revision, revisionBefore, '推送不 bump revision');
+    bridge.port = null;
+  });
   console.log(JSON.stringify({passed:count,scope:'real bridge + real native action/state methods; DOM/rendering stubbed, not browser acceptance'}));
 })().catch(error => { console.error(error); process.exitCode=1; });
