@@ -97,8 +97,10 @@ export const AUTONOMOUS_CAPABILITIES = {
 };
 
 // 高风险操作：导媒体、删数据、覆盖式导出等破坏性动作，必须逐次人工审批。
+// layer.add_image 会导入外部图像并保留 alpha，属于"新增外部素材"，因此要求审批；
+// 其后基于已有图层的羽化/调色/阴影都是可撤销的属性编辑，走普通写入。
 export const HIGH_RISK_OPERATIONS = {
-  image: new Set(['layer.remove', 'canvas.crop']),
+  image: new Set(['layer.remove', 'canvas.crop', 'layer.add_image']),
 };
 
 export const TOOL_KINDS = {

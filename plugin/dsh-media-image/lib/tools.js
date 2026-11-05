@@ -50,7 +50,7 @@ const READ_PARAMS = {
 };
 
 const OPERATION_CONTRACT = {
-  image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic}}; layer.update_text {layerId,text}; layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
+  image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic}}; layer.update_text {layerId,text}; layer.add_image {sourceRef,x?,y?,width?,height?,fit?:"stretch"|"contain"|"cover",name?} (approval; keeps alpha, width/height as a pair or omitted for source size). sourceRef is one of asset:<id> (imported document asset), layer:<layerId> (copy an existing layer) or data:image/(png|jpeg|webp);base64,... up to 256 KB decoded; pixels never enter this context, read_state lists assets as id/name/width/height/bytes. layer.set_frame {layerId,x?,y?,width?,height?,fit?,anchor?:"top-left"|"center"} (pixel frame; one side derives the other from the layer ratio; at least one field); layer.feather {layerId,radiusPx 1..64} (alpha edge only, recomputed from the editor-internal pre-edit snapshot, idempotent); layer.color_match {layerId,method:"reinhard",strength? 0..1,reference?:"canvas"|"below"|{x,y,width,height}} (idempotent from the same snapshot; read_state exposes only colorMatch{applied,strength,fromDigest} and feather{radiusPx,fromDigest}); layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). read_state layers carry sourceRef/frame/hasAlpha/maskSource plus the derived feather/colorMatch fields. Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
 };
 
 const WRITE_PARAMS = kind => ({
@@ -107,7 +107,8 @@ const renderSummary = (_args, value) => [{
 const compactState = state => {
   const keys = ['editorKind', 'documentId', 'revision', 'canvas', 'history', 'selectedLayerId', 'selectedObjects', 'timeline', 'capabilities'];
   const result = Object.fromEntries(keys.filter(key => state[key] !== undefined).map(key => [key, state[key]]));
-  for (const key of ['layers', 'clips', 'overlays', 'tracks']) if (Array.isArray(state[key])) {
+  // 只暴露素材元数据（id/名称/尺寸/字节/类型），像素与内部快照不在 read_state 里。
+  for (const key of ['layers', 'assets', 'clips', 'overlays', 'tracks']) if (Array.isArray(state[key])) {
     result[key] = state[key].slice(0, 40);
     result[`${key}Count`] = state[key].length;
     result[`${key}Truncated`] = state[key].length > 40;
