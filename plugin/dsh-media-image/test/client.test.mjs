@@ -435,10 +435,21 @@ function assertNoRawJsonInPlan(client, plan) {
   for (const item of plan) {
     if (item.card?.line) texts.push(item.card.line);
     if (item.issue) texts.push(item.issue);
-    for (const block of item.blocks || []) texts.push(block.text || '');
-    for (const block of item.blocks || []) for (const value of block.items || []) texts.push(value);
+    if (item.title) texts.push(item.title);
+    for (const action of item.actions || []) { if (action.label) texts.push(action.label); if (action.hint) texts.push(action.hint); }
+    for (const block of item.blocks || []) {
+      // 围栏代码块是"用户/助手主动展示的代码"，不算泄漏；其余块必须过裸 JSON 判定。
+      if (block.kind === 'code') continue;
+      texts.push(block.text || '');
+      for (const value of block.items || []) texts.push(value);
+    }
   }
-  for (const text of texts) assert.equal(client.chat.looksLikeRawJson(text), false, `裸 JSON 进了渲染计划：${String(text).slice(0, 40)}`);
+  for (const text of texts) assert.equal(client.chat.isRawPayload(text), false, `裸 JSON 进了渲染计划：${String(text).slice(0, 40)}`);
+  // 诊断原文只能留在 diagnostic 里，不得同时出现在任何渲染文本中
+  for (const item of plan) {
+    if (!item.diagnostic) continue;
+    assert.equal(texts.includes(item.diagnostic), false, '诊断原文泄漏进了渲染文本');
+  }
 }
 
 test('dialog plan maps every message kind and never carries raw JSON into the view', async () => {
@@ -520,5 +531,34 @@ test('undo action only fills the input, never executes by itself', async () => {
   assert.match(action.hint, /HISTORY_CONFLICT/);
   assert.equal(plan[0].actions.some(item => item.kind === 'undo'), false, '不允许出现直接执行撤销的动作');
   assert.match(client.chat.undoPrompt({ commandId: 'cmd-7', appliedRevision: 3, afterDigest: 'fnv1a64-0000000000000001' }), /cmd-7/);
+});
+
+test('locate 透传：合法原样保留，非法整体省略', async () => {
+  const client = await loadClient();
+  const ok = client.chat.buildDialogPlan([{ id: 't1', role: 'tool', card: { name: '执行编辑', status: 'applied', revision: 2, line: 'layer.set_frame' },
+    locate: { objectIds: ['layer-1', 'layer-2'], kind: 'layer' } }]);
+  assert.deepEqual(ok[0].locate, { objectIds: ['layer-1', 'layer-2'], kind: 'layer' });
+  for (const locate of [{ objectIds: [], kind: 'layer' }, { objectIds: ['a'], kind: 'gizmo' }, { objectIds: [1], kind: 'clip' }, null, 'nope']) {
+    const plan = client.chat.buildDialogPlan([{ id: 't2', role: 'tool', card: { name: '执行编辑', status: 'applied', revision: 2, line: 'x' }, locate }]);
+    assert.equal('locate' in plan[0], false, `非法 locate 必须整体省略：${JSON.stringify(locate)}`);
+  }
+  // 视频侧的 clip/track 也在白名单里
+  const track = client.chat.buildDialogPlan([{ id: 't3', role: 'tool', card: { name: '改轨道', status: 'applied', revision: 2, line: 'track.update' }, locate: { objectIds: ['video-track-1'], kind: 'track' } }]);
+  assert.equal(track[0].locate.kind, 'track');
+});
+
+test('错误行与工具回执用严格判定：短 JSON 也不会当正文渲染', async () => {
+  const client = await loadClient();
+  const shortError = '{"code":"REVISION_CONFLICT"}';
+  assert.equal(client.chat.looksLikeRawJson(shortError), false, '散文阈值对短 JSON 是豁免的');
+  assert.equal(client.chat.isRawPayload(shortError), true, '严格判定必须认出它');
+  const plan = client.chat.buildDialogPlan([
+    { id: 'e1', role: 'error', text: shortError },
+    { id: 't1', role: 'tool', card: { name: '执行编辑', status: 'rejected', revision: null, line: shortError, error: true } },
+  ]);
+  assert.equal(plan[0].blocks[0].text, '操作没有完成（无法解析摘要）');
+  assert.equal(plan[1].card.line, '');
+  assert.equal(plan[1].diagnostic, shortError);
+  assertNoRawJsonInPlan(client, plan);
 });
 

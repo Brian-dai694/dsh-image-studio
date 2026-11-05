@@ -4,11 +4,38 @@
 // 不发起任何调用。图片侧 `plugin/dsh-media-image/lib/client.js` 内联实现与本文档语义一致，
 // 由 `plugin/dsh-media-image/test/dialog-parity.test.mjs` 逐函数对照，改一边不改另一边会红。
 //
-// 版本：dialog-model@1（2026-11-05）。视频侧 vendor 本文件后，在 import 处记录 sha256，
-// 升级时替换文件并同步 sha256，不做"各改各的"。
+// 版本：dialog-model@2（2026-11-05）。@2 相比 @1：
+//   1) tool 分支新增 `locate` 透传（sanitizeLocate 只保留 objectIds + kind 白名单）；
+//   2) 错误行与工具回执改用严格裸 JSON 判定（能 parse 就算，不看长度），散文仍保留 40 字符阈值。
+// 版本号变了就不允许和 @1 混用：同版本号两个不同文件是歧义。
+//
+// 视频侧 vendor 本文件后，在旁侧 source.json 记录版本 + sha256 + 字节数；升级时整份替换并同步三者。
 
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 const ATTACHMENT_TYPES = { 'image/png': true, 'image/jpeg': true, 'image/webp': true };
+/** 严格判定：能解析成 JSON 结构就算裸 JSON，不看长度。错误行与工具回执用它。 */
+export function isJsonStructure(text) {
+  const trimmed = String(text == null ? '' : text).trim();
+  if (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[') return false;
+  try { JSON.parse(trimmed); return true } catch { return false }
+}
+
+/** 错误行/工具回执的最终判定：结构可解析，或长得像整段 JSON，都算裸 JSON。 */
+export function isRawPayload(text) {
+  return isJsonStructure(text) || looksLikeRawJson(text);
+}
+
+// 可定位对象：图片侧 layer，视频侧 clip / overlay / track。白名单外的 kind 整体丢弃。
+const LOCATE_KINDS = { layer: true, clip: true, overlay: true, track: true };
+
+/** 校验定位目标：只有"非空字符串数组 + 白名单 kind"才保留，任何一项非法就整体省略。 */
+export function sanitizeLocate(locate) {
+  if (!locate || typeof locate !== 'object') return null;
+  if (!LOCATE_KINDS[locate.kind]) return null;
+  if (!Array.isArray(locate.objectIds) || locate.objectIds.length === 0) return null;
+  if (!locate.objectIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 256)) return null;
+  return { objectIds: locate.objectIds.slice(), kind: locate.kind };
+}
 
 /** 把一段文本切成行内片段：普通文本、`代码`、![图](url)、[链接](url)、裸链接。 */
 export function parseInlineTokens(text) {
@@ -154,16 +181,19 @@ export function buildDialogPlan(rows) {
       const actions = [];
       if (row.undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT' });
       if (row.exportRef) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件' });
-      const diagnostic = card.line && looksLikeRawJson(card.line) ? card.line : '';
+      const diagnostic = card.line && isRawPayload(card.line) ? card.line : '';
       return {
         key, kind: 'tool', badge,
         tone: badge === 'rejected' ? 'error' : badge === 'unknown' ? 'warn' : badge === 'applied' ? 'good' : 'muted',
         card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: diagnostic ? '' : (card.line || '') },
         issue: row.issue || '', diagnostic, actions,
+        // 透传：P1 的 editor.highlight 全靠它。渲染层规则是"有 locate 才可点"，
+        // 不允许再按 key 回查原始行，那属于隐式耦合。
+        ...(sanitizeLocate(row.locate) ? { locate: sanitizeLocate(row.locate) } : {}),
       };
     }
     if (row.role === 'error') {
-      const text = looksLikeRawJson(row.text) ? '操作没有完成（无法解析摘要）' : String(row.text || '操作没有完成');
+      const text = isRawPayload(row.text) ? '操作没有完成（无法解析摘要）' : String(row.text || '操作没有完成');
       return { key, kind: 'error', badge: 'rejected', tone: 'error', blocks: [{ kind: 'paragraph', text }], actions: [] };
     }
     const text = String(row.text == null ? '' : row.text);
@@ -176,4 +206,4 @@ export function buildDialogPlan(rows) {
   });
 }
 
-export const DIALOG_MODEL_VERSION = 'dialog-model@1';
+export const DIALOG_MODEL_VERSION = 'dialog-model@2';

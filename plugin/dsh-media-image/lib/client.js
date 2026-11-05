@@ -399,6 +399,30 @@ window.__ModuleLoader__.load({
       return /^(?:\{[\s\S]*\}|\[[\s\S]*\])$/.test(trimmed)
     }
 
+    /** 严格判定：能解析成 JSON 结构就算裸 JSON，不看长度。错误行与工具回执用它。 */
+    function isJsonStructure(text) {
+      var trimmed = String(text == null ? '' : text).trim()
+      if (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[') return false
+      try { JSON.parse(trimmed); return true } catch (_) { return false }
+    }
+
+    /** 错误行/工具回执的最终判定：结构可解析，或长得像整段 JSON，都算裸 JSON。 */
+    function isRawPayload(text) {
+      return isJsonStructure(text) || looksLikeRawJson(text)
+    }
+
+    // 可定位对象：图片侧 layer，视频侧 clip / overlay / track。白名单外的 kind 整体丢弃。
+    var LOCATE_KINDS = { layer: true, clip: true, overlay: true, track: true }
+
+    /** 定位目标校验：只有"非空字符串数组 + 白名单 kind"才保留，任何一项非法就整体省略。 */
+    function sanitizeLocate(locate) {
+      if (!locate || typeof locate !== 'object') return null
+      if (!LOCATE_KINDS[locate.kind]) return null
+      if (!Array.isArray(locate.objectIds) || locate.objectIds.length === 0) return null
+      if (!locate.objectIds.every(function (id) { return typeof id === 'string' && id.length > 0 && id.length <= 256 })) return null
+      return { objectIds: locate.objectIds.slice(), kind: locate.kind }
+    }
+
     /** 会话行 → 界面计划。零原始 JSON：解析不出来就退回一句话摘要。 */
     function buildDialogPlan(rows) {
       var list = Array.isArray(rows) ? rows : []
@@ -427,16 +451,19 @@ window.__ModuleLoader__.load({
           if (row.undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT' })
           if (row.exportRef) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件' })
           // 解析失败的原始文本只用于复制诊断，不渲染成正文。
-          var diagnostic = card.line && looksLikeRawJson(card.line) ? card.line : ''
+          var diagnostic = card.line && isRawPayload(card.line) ? card.line : ''
+          var locate = sanitizeLocate(row.locate)
           return {
             key: key, kind: 'tool', badge: badge,
             tone: badge === 'rejected' ? 'error' : badge === 'unknown' ? 'warn' : badge === 'applied' ? 'good' : 'muted',
             card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: diagnostic ? '' : (card.line || '') },
             issue: row.issue || '', diagnostic: diagnostic, actions: actions,
+            // 透传：P1 的 editor.highlight 全靠它；渲染规则是"有 locate 才可点"。
+            ...(locate ? { locate: locate } : {}),
           }
         }
         if (row.role === 'error') {
-          var errorText = looksLikeRawJson(row.text) ? '操作没有完成（无法解析摘要）' : String(row.text || '操作没有完成')
+          var errorText = isRawPayload(row.text) ? '操作没有完成（无法解析摘要）' : String(row.text || '操作没有完成')
           return { key: key, kind: 'error', badge: 'rejected', tone: 'error', blocks: [{ kind: 'paragraph', text: errorText }], actions: [] }
         }
         var text = String(row.text == null ? '' : row.text)
@@ -808,7 +835,26 @@ window.__ModuleLoader__.load({
             blocks(item.blocks), renderActions(item))
         }
         if (item.kind === 'tool') {
-          return React.createElement('div', { key: item.key, style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f' } },
+          var locate = item.locate || null
+          // 规则：有 locate 才可点。不做"按 key 回查原始行"那种隐式耦合。
+          var locateProps = locate ? {
+            role: 'button', tabIndex: 0, title: '定位到画布对象',
+            'data-object-ids': locate.objectIds.join(','), 'data-object-kind': locate.kind,
+            onClick: function () {
+              if (typeof props.onLocate === 'function') props.onLocate(locate)
+              else setStatus('定位通道（editor.highlight）属于 P1，尚未接入')
+            },
+            onKeyDown: function (event) {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              if (typeof props.onLocate === 'function') props.onLocate(locate)
+              else setStatus('定位通道（editor.highlight）属于 P1，尚未接入')
+            },
+          } : { 'data-object-ids': '', 'data-object-kind': '' }
+          return React.createElement('div', {
+            key: item.key, ...locateProps,
+            style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f', cursor: locate ? 'pointer' : 'default' },
+          },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
               React.createElement('strong', { style: { fontWeight: 600 } }, item.card.name), badge(item.badge),
               item.card.revision === null || item.card.revision === undefined ? null : React.createElement('span', { style: { fontSize: 11, color: '#86868b' } }, 'R' + item.card.revision)),
@@ -1203,8 +1249,8 @@ window.__ModuleLoader__.load({
     exports.toolViewKeys = TOOL_VIEW_KEYS.slice()
     // Exposed for the contract tests; the host only consumes name/inject/apply.
     exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody,
-      // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定。
-      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson }
+      // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定、定位透传。
+      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate }
     return module.exports
   },
 })
