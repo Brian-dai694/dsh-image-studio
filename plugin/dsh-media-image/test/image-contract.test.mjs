@@ -89,8 +89,7 @@ test('a genuinely failed write that did not advance the revision stays rejected'
   } };
   const tools = new Map();
   registerMediaTools({ tools: { register: d => tools.set(d.name, d), guard: () => {} } }, {
-    imageBridge: createMediaBridge({ relay, editorKind: 'image' }),
-    videoBridge: createMediaBridge({ relay, editorKind: 'video' }),
+    bridge: createMediaBridge({ relay }),
     approvals: createApprovalStore(), bindings: fixtureBindings,
   });
   const value = await tools.get('media_image_apply_command').execute({

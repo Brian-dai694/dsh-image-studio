@@ -9,8 +9,8 @@ export function createEditorRelay({ timeoutMs = 10000, leaseMs = 15000, maxPendi
   minPollIntervalMs = 50, maxMessageBytes = 65536, maxResponseBytes = 262144, allowedTypes = DEFAULT_TYPES,
   editorKind = 'image' } = {}) {
   const types = new Set(allowedTypes);
-  if (!['image', 'video'].includes(editorKind) || !types.has('editor.read_state') || !types.has('editor.apply_command') || !types.has('editor.get_command_result')) {
-    throw new TypeError('Relay requires a supported editorKind and the three core editor request types');
+  if (editorKind !== 'image' || !types.has('editor.read_state') || !types.has('editor.apply_command') || !types.has('editor.get_command_result')) {
+    throw new TypeError('Relay is bound to the image editor and requires the three core editor request types');
   }
   const pages = new Map();
   const pending = new Map();

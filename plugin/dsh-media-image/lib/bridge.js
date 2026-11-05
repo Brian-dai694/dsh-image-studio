@@ -1,4 +1,4 @@
-// Editor adapter shared by the image and video plugins.
+// Editor adapter for the image editor.
 // Owns validation, idempotency, expectedRevision and unknown-outcome semantics.
 // It never stores document state: the editor page is the only state owner.
 
@@ -99,22 +99,11 @@ function validateImageState(state, instanceId) {
   return state;
 }
 
-function validateVideoState(state, instanceId) {
-  if (!isObject(state) || state.editorKind !== 'video' || state.editorInstanceId !== instanceId ||
-      typeof state.documentId !== 'string' || !Number.isSafeInteger(state.revision) || state.revision < 0 ||
-      !isObject(state.timeline) || !Number.isFinite(state.timeline.duration) ||
-      (state.timeline.fps !== null && (!Number.isFinite(state.timeline.fps) || state.timeline.fps <= 0)) ||
-      !Array.isArray(state.tracks) || !Array.isArray(state.clips) || !isObject(state.capabilities)) {
-    throw new MediaBridgeError('EDITOR_ERROR', 'Video editor returned an invalid state or missing capabilities.');
-  }
-  return state;
-}
+export const STATE_VALIDATORS = { image: validateImageState };
 
-export const STATE_VALIDATORS = { image: validateImageState, video: validateVideoState };
-
-export function createMediaBridge({ relay, editorKind, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (!relay || typeof relay.request !== 'function') throw new TypeError('relay.request is required');
-  if (!STATE_VALIDATORS[editorKind]) throw new TypeError('editorKind must be image or video');
+  if (editorKind !== 'image') throw new TypeError('editorKind must be "image"');
   const completed = new Map();
   const inFlight = new Map();
   const uncertain = new Map();
@@ -170,7 +159,7 @@ export function createMediaBridge({ relay, editorKind, timeoutMs = DEFAULT_TIMEO
       opaqueId(input?.instanceId, 'instanceId');
       opaqueId(input.projectId, 'projectId');
       opaqueId(input.commandId, 'commandId');
-      const formats = editorKind === 'image' ? ['png', 'jpeg'] : ['webm', 'mp4'];
+      const formats = ['png', 'jpeg'];
       if (!formats.includes(input.format)) throw new MediaBridgeError('INVALID_REQUEST', `Export format for ${editorKind} must be one of ${formats.join(', ')}.`);
       const key = keyOf(input.instanceId, input.commandId);
       if (completed.has(key)) return completed.get(key);
