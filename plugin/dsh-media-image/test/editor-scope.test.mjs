@@ -69,7 +69,7 @@ test('export renders carry the exportId/artifactRef the model needs; writes stay
   const bridge = {
     editorKind: 'image',
     readState: async () => ({ editorKind: 'image', editorInstanceId: 'i1', documentId: 'p1', revision: 2, stateDigest: 'd2', canvas: { width: 10, height: 10 }, layers: [] }),
-    applyCommand: async input => ({ editorKind: 'image', documentId: 'p1', commandId: input.commandId, revision: 3, changedObjectIds: [], stateDigest: 'd3' }),
+    applyCommand: async input => ({ editorKind: 'image', documentId: 'p1', commandId: input.commandId, revision: 3, changedObjectIds: [], stateDigest: 'd3', afterDigest: 'd3' }),
     startExport: async input => ({ editorKind: 'image', commandId: input.commandId, exportId: 'exp-1', status: 'ready', artifactRef: 'artifact://exp-1' }),
     getExportStatus: async () => ({ editorKind: 'image', exportId: 'exp-1', status: 'ready', artifactRef: 'artifact://exp-1' }),
   };
@@ -82,4 +82,35 @@ test('export renders carry the exportId/artifactRef the model needs; writes stay
   const applyArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'c-plain', expectedRevision: 2, operation: 'layer.update_text', params: {} };
   const applyText = render('media_image_apply_command', applyArgs, await tools.get('media_image_apply_command').execute(applyArgs, exec));
   assert.doesNotMatch(applyText, /exportId|artifactRef/);
+});
+
+test('tool meta carries structured credentials so panels never parse the text line', async () => {
+  const tools = new Map();
+  const bridge = {
+    editorKind: 'image',
+    readState: async () => ({ editorKind: 'image', editorInstanceId: 'i1', documentId: 'p1', revision: 2, stateDigest: 'd2', canvas: { width: 10, height: 10 }, layers: [] }),
+    applyCommand: async input => ({ editorKind: 'image', documentId: 'p1', commandId: input.commandId, revision: 3, changedObjectIds: [], stateDigest: 'd3', afterDigest: 'd3' }),
+    startExport: async input => ({ editorKind: 'image', commandId: input.commandId, exportId: 'exp-1', status: 'ready', artifactRef: 'artifact://exp-1' }),
+    getExportStatus: async () => ({ editorKind: 'image', exportId: 'exp-1', status: 'ready', artifactRef: 'artifact://exp-1' }),
+  };
+  registerMediaTools({ tools: { register: definition => tools.set(definition.name, definition), guard: () => {} } }, { bridge, approvals: createApprovalStore(), bindings: fixtureBindings });
+  const meta = (name, args, value) => tools.get(name).output.presentationMeta(args, value);
+  const startArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'e-1', expectedRevision: 2, format: 'png' };
+  const startMeta = meta('media_image_export_start', startArgs, await tools.get('media_image_export_start').execute(startArgs, exec));
+  assert.equal(startMeta.commandId, 'e-1');
+  assert.equal(startMeta.exportId, 'exp-1');
+  assert.equal(startMeta.artifactRef, 'artifact://exp-1');
+  assert.equal(startMeta.format, 'png');
+  const applyArgs = { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'c-meta', expectedRevision: 2, operation: 'layer.update_text', params: {} };
+  const applied = await tools.get('media_image_apply_command').execute(applyArgs, exec);
+  const applyMeta = meta('media_image_apply_command', applyArgs, applied);
+  assert.equal(applyMeta.commandId, 'c-meta');
+  assert.equal(applyMeta.appliedRevision, 3);
+  assert.equal(applyMeta.afterDigest, 'd3');
+  // 文本行格式保持不变，面板改读 meta。
+  assert.equal(tools.get('media_image_apply_command').output.render(applyArgs, applied).map(block => block.text).join('\n'), 'applied · c-meta · R3');
+  const staleArgs = { ...applyArgs, commandId: 'c-stale', expectedRevision: 1 };
+  const stale = await tools.get('media_image_apply_command').execute(staleArgs, exec);
+  assert.equal(stale.status, 'rejected');
+  assert.equal(meta('media_image_apply_command', staleArgs, stale).errorCode, 'REVISION_CONFLICT');
 });

@@ -128,6 +128,9 @@ const renderReadState = (_args, value) => [{
     ].join(' · ')
     : `${value.status} · ${value.commandId}${value.error ? ` · ${value.error.code}` : ''}`,
 }];
+// 面板不解析那行人读文本：凭据同时以结构化字段进 meta，且与文本行同源同值。
+// 写命令/查询带 commandId、写命令带 appliedRevision（= 新 revision）、afterDigest；
+// 导出带 exportId/artifactRef/format；失败带 errorCode（沿用 REVISION_CONFLICT 等稳定码）。
 const presentationMeta = (args, value) => ({
   operation: args.operation,
   status: value.status,
@@ -136,6 +139,13 @@ const presentationMeta = (args, value) => ({
   stateDigest: value.stateDigest,
   approvalId: value.approvalId,
   auditRef: value.auditRef,
+  ...(typeof args.commandId === 'string' ? { commandId: value.commandId ?? args.commandId } : {}),
+  ...(Number.isSafeInteger(value.revision) ? { appliedRevision: value.revision } : {}),
+  ...(typeof value.afterDigest === 'string' && value.afterDigest ? { afterDigest: value.afterDigest } : {}),
+  ...(typeof value.exportId === 'string' && value.exportId ? { exportId: value.exportId } : {}),
+  ...(typeof value.artifactRef === 'string' && value.artifactRef ? { artifactRef: value.artifactRef } : {}),
+  ...(typeof args.format === 'string' ? { format: args.format } : {}),
+  ...(value.error?.code ? { errorCode: value.error.code } : {}),
 });
 
 const envelope = (kind, extra) => ({ status: 'rejected', commandId: 'unknown', editorKind: kind, ...extra });

@@ -38,20 +38,24 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    function promptBody(sessionId, text) {
+    function promptBody(sessionId, text, attachments) {
+      var content = [{ type: 'text', text: text }]
+      // 附图作为真正的 image 内容片段发送；宿主若不支持会在 sendPrompt 里被如实报回来，
+      // 不做"看起来发出去了"的假成功。
+      if (Array.isArray(attachments)) attachments.forEach(function (part) { if (part && part.type === 'image') content.push(part) })
       return {
         requestId: 'media-studio-' + Date.now() + '-' + Math.random().toString(16).slice(2),
-        sessionId: sessionId, mode: 'queue', content: [{ type: 'text', text: text }],
+        sessionId: sessionId, mode: 'queue', content: content,
       }
     }
 
     /** Send one message. Never reports success it did not observe. */
-    async function sendPrompt(remote, sessionId, text) {
+    async function sendPrompt(remote, sessionId, text, attachments) {
       var session = remote && remote.session
       if (!session || typeof session.prompt !== 'function') return { ok: false, message: '宿主未提供 session.prompt，无法发送消息。' }
       try {
-        var value = await session.prompt(promptBody(sessionId, text))
-        if (value && value.ok === false) return { ok: false, message: '发送被宿主拒绝：' + JSON.stringify(value.error) }
+        var value = await session.prompt(promptBody(sessionId, text, attachments))
+        if (value && value.ok === false) return { ok: false, message: '发送被宿主拒绝：' + (value.error?.message || value.error?.code || '未知原因') }
         if (!value || value.ok !== true || value.value?.accepted !== true) return { ok: false, unknown: true, message: '宿主未确认受理，请核对会话记录。' }
         return { ok: true, value: value.value }
       } catch (error) {
@@ -74,6 +78,125 @@ window.__ModuleLoader__.load({
       }
       if (event.message && typeof event.message.role === 'string' && typeof event.message.text === 'string') return event.message.text
       return null
+    }
+
+    /**
+     * `remote.session.list` 在不同宿主版本里字段形状不一，这里统一成 `[{sessionId,title}]`。
+     * 拿不到结构就返回 null，调用方据此回退到"只能新建"，绝不假装有会话列表。
+     */
+    /**
+     * 严格解析 `remote.session.list`：契约是 `{ items: SessionSummary[] }`（单页，没有 sessions/hasMore/
+     * nextCursor）。形状不对就抛明确错误，**不静默退回"只能新建"**——那会让功能静默消失。
+     * 标题只在 `projections.values.title`，可为 null 或缺失；缺失时渲染层显示「未命名会话」。
+     */
+    function normalizeSessionItems(value) {
+      const raw = value && (value.value || value);
+      if (!raw || !Array.isArray(raw.items)) {
+        const error = new Error('宿主返回的会话列表不符合契约（缺少 items 数组），请核对 remote.session.list 的版本');
+        error.code = 'SESSION_LIST_UNSUPPORTED';
+        throw error;
+      }
+      const out = [];
+      for (const item of raw.items) {
+        if (!item || typeof item.sessionId !== 'string' || !item.sessionId) continue;
+        const values = item.projections && item.projections.values;
+        const rawTitle = values && typeof values.title === 'string' ? values.title.trim() : '';
+        out.push({
+          sessionId: item.sessionId,
+          title: rawTitle ? rawTitle.slice(0, 80) : null,
+          updatedAt: Number.isFinite(item.updatedAt) ? item.updatedAt : null,
+          running: item.running === true,
+          blank: item.blank === true,
+          agentAvailable: item.agentAvailable !== false,
+          cwd: typeof item.cwd === 'string' ? item.cwd : null,
+        });
+      }
+      return out;
+    }
+
+    /** 读会话列表；宿主没提供 list 或形状不符合契约时抛错（由绑定流程明确报给用户）。 */
+    async function listSessions(remote, limit = 8) {
+      const session = remote && remote.session;
+      const list = session && (session.list || session.listSessions);
+      if (typeof list !== 'function') {
+        const error = new Error('宿主未提供 remote.session.list，无法列出历史会话；可以新建专属会话');
+        error.code = 'SESSION_LIST_UNSUPPORTED';
+        throw error;
+      }
+      return normalizeSessionItems(await list({ limit }));
+    }
+
+    /** 会话摘要上的标注：空会话 / 有回合在跑 / 助手不在线。只做显示，不改变排序。 */
+    function sessionAnnotations(item) {
+      const notes = [];
+      if (item && item.blank === true) notes.push('空会话');
+      if (item && item.running === true) notes.push('有回合在跑');
+      if (item && item.agentAvailable === false) notes.push('助手不在线');
+      return notes;
+    }
+
+    /**
+     * 隐私边界：默认只列出**带本工程标记**的会话；其余一律不进列表（连标题都不显示）。
+     * 没有匹配项时由 UI 只给「新建」，而不是让用户从无关会话里挑。
+     */
+    function filterSessionsForProject(items, projectId, projectById) {
+      const list = Array.isArray(items) ? items : [];
+      const matched = [];
+      const others = [];
+      for (const item of list) {
+        if (projectId && projectById && projectById[item.sessionId] === projectId) matched.push(item);
+        else others.push(item);
+      }
+      return { matched, others };
+    }
+
+    /**
+     * 读取一个会话的工程标记：短暂 follow，拿到快照就取消；超时/无标记返回 null。
+     * 只用于"能否挂接"的判断，不缓存、不落盘。
+     */
+    function peekProjectId(remote, sessionId, timeoutMs = 800) {
+      return new Promise(resolve => {
+        let done = false;
+        let stop = null;
+        const finish = value => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (typeof stop === 'function') stop();
+          resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        stop = followSession(remote, sessionId, frame => {
+          const records = frame && frame.type === 'snapshot' ? frame.records : (frame && frame.record ? [frame.record] : []);
+          const found = projectIdFromRecords(records);
+          if (found) finish(found);
+          else if (frame && frame.type === 'snapshot') finish(null);
+        }, () => finish(null));
+        if (typeof stop !== 'function') finish(null);
+      });
+    }
+
+    /** 从会话记录里找工程身份标记的 projectId；找不到返回 null（只代表"没标记"，不代表匹配）。 */
+    function projectIdFromRecords(records) {
+      if (!Array.isArray(records)) return null;
+      for (const record of records) {
+        const event = record && record.event;
+        const text = event && textOfEvent(event.data?.message || event.data);
+        if (typeof text !== 'string' || text.indexOf('当前编辑工程身份：') < 0) continue;
+        const match = /"projectId"\s*:\s*"([^"]+)"/.exec(text);
+        if (match) return match[1];
+      }
+      return null;
+    }
+
+    /**
+     * 绑定已有会话时的工程校验：会话里带过工程身份、且 projectId 与当前工程不同 → 拒绝绑定。
+     * 没带标记（例如新建后还没发过指令）不拒绝，交给后续 read_state/审批把关。
+     */
+    function projectMismatch(records, projectId) {
+      const found = projectIdFromRecords(records);
+      if (!found || !projectId) return null;
+      return found === projectId ? null : found;
     }
 
     /**
@@ -131,47 +254,130 @@ window.__ModuleLoader__.load({
       })
     }
     function bindingKey(b) { return [b.editorKind, b.projectId, b.pageId, b.editorInstanceId].join(':') }
-    function undoEvidence(value, depth) {
-      if (!value || typeof value !== 'object' || depth > 6) return null
-      if (typeof value.commandId === 'string' && Number.isSafeInteger(value.revision) && typeof value.afterDigest === 'string') return { commandId: value.commandId, appliedRevision: value.revision, afterDigest: value.afterDigest }
-      for (var key of ['result', 'value', 'originalResult', 'output', 'data']) {
-        var found = undoEvidence(value[key], depth + 1)
-        if (found) return found
-      }
-      return null
+    // 真实会话里 tool/result 的外壳比契约示例深一层（例如 {result:{ok,value}}、或回执正文
+    // 放在 content[{type:'text',text:'{...}'}] 里）。所以不写死某条路径，而是把所有"可能是回执"
+    // 的层收集起来再按字段取第一个可用值：少一层/多一层/纯文本 JSON 都能解析。
+    var FACT_KEYS = ['result', 'value', 'output', 'data', 'call', 'payload', 'response', 'content', 'parts', 'blocks', 'items', 'messages', 'meta', 'error'];
+    /** 分层顺序 = 取值优先级：先外层再内层，契约层（result.value / call.result.value）紧跟其后。 */
+    function orderedSources(root) {
+      var layers = [];
+      function add(value) { if (value && typeof value === 'object' && layers.indexOf(value) < 0) layers.push(value) }
+      add(root);
+      add(root.result); add(root.result && root.result.value);
+      add(root.call);
+      var callResult = root.call && root.call.result;
+      add(callResult); add(callResult && callResult.value);
+      add(root.value); add(root.output); add(root.meta); add(root.error); add(root.data); add(root.payload); add(root.response);
+      // 低优先级：content/parts 里再包一层的对象，以及文本形态的 JSON 回执
+      factSources(root).forEach(add);
+      return layers;
     }
-    function resultIssue(value, depth) {
-      if (!value || typeof value !== 'object' || depth > 6) return null
-      if (value.code === 'HISTORY_CONFLICT') return '已有后续人工或 AI 修改，不能单独撤销这一步。请回读当前历史；不要重试旧命令。'
-      for (var key of ['error', 'result', 'value', 'originalResult', 'output', 'data']) {
-        var found = resultIssue(value[key], depth + 1)
-        if (found) return found
+    function factSources(root) {
+      var out = [], queue = [root], seen = new Set();
+      while (queue.length && out.length < 64) {
+        var value = queue.shift();
+        if (value === undefined || value === null) continue;
+        if (typeof value === 'string') {
+          var trimmed = value.trim();
+          if (trimmed.charAt(0) !== '{') continue;
+          try { value = JSON.parse(trimmed) } catch (_) { continue }
+        }
+        if (Array.isArray(value)) { value.forEach(function (item) { queue.push(item) }); continue }
+        if (typeof value !== 'object' || seen.has(value)) continue;
+        seen.add(value); out.push(value);
+        for (var index = 0; index < FACT_KEYS.length; index += 1) {
+          var next = value[FACT_KEYS[index]];
+          if (next !== undefined && next !== null) queue.push(next);
+        }
+        if (typeof value.text === 'string') queue.push(value.text);
       }
-      return null
+      return out;
+    }
+    function pickAny(sources, keys) {
+      for (var index = 0; index < sources.length; index += 1) {
+        for (var key = 0; key < keys.length; key += 1) {
+          var value = sources[index][keys[key]];
+          if (value !== undefined && value !== null && value !== '') return value;
+        }
+      }
+      return undefined;
+    }
+    /** 收集某个字段在各层出现的不同取值；第一个是优先级最高的那个，其余用于"不一致"诊断。 */
+    function collectValues(sources, key) {
+      var seen = [], values = [];
+      for (var index = 0; index < sources.length; index += 1) {
+        var value = sources[index][key];
+        if (typeof value !== 'string' || !value) continue;
+        if (seen.indexOf(value) >= 0) continue;
+        seen.push(value); values.push(value);
+      }
+      return values;
+    }
+    var stringOf = value => typeof value === 'string' && value ? value : undefined;
+    /** 一次把回执里所有用得到的字段抽出来：状态、修订、错误码、撤销凭据、导出引用。 */
+    function toolFacts(data) {
+      var sources = orderedSources(data);
+      var error = pickAny(sources, ['error']);
+      var errorCode;
+      if (typeof error === 'string') errorCode = error;
+      else if (error && typeof error === 'object') errorCode = stringOf(error.code);
+      if (!errorCode) {
+        var bareCode = stringOf(pickAny(sources, ['code']));
+        if (bareCode && /^[A-Z][A-Z0-9_]{3,}$/.test(bareCode)) errorCode = bareCode;
+      }
+      if (!errorCode && pickAny(sources, ['ok']) === false) errorCode = 'TOOL_ERROR';
+      // 后端已把稳定错误码放进 meta.errorCode（不再靠解析文本行）。
+      if (!errorCode) errorCode = stringOf(pickAny(sources, ['errorCode']));
+      var revision = pickAny(sources, ['revision', 'appliedRevision']);
+      var format = stringOf(pickAny(sources, ['format', 'mimeType']));
+      // 状态：按层级优先取第一个；若其他层给出不同值，不静默丢弃，交给卡片显示"不一致"。
+      var statuses = collectValues(sources, 'status');
+      return {
+        toolName: stringOf(pickAny(sources, ['toolName'])) || '',
+        status: statuses[0] || '',
+        statusConflicts: statuses.slice(1),
+        revision: Number.isSafeInteger(revision) ? revision : undefined,
+        errorCode: errorCode,
+        commandId: stringOf(pickAny(sources, ['commandId', 'targetCommandId'])),
+        afterDigest: stringOf(pickAny(sources, ['afterDigest'])),
+        exportId: stringOf(pickAny(sources, ['exportId'])),
+        artifactRef: stringOf(pickAny(sources, ['artifactRef'])),
+        format: format,
+      };
+    }
+    /** 回执证据优先取 message.content 里的工具输出 JSON，其次才是事件外壳。 */
+    function evidenceData(value) {
+      return outputJsonOf(value && value.message) || outputJsonOf(value) || value;
+    }
+    function undoEvidence(value) {
+      var facts = toolFacts(evidenceData(value));
+      if (!facts.commandId || !Number.isSafeInteger(facts.revision) || !facts.afterDigest) return null;
+      return { commandId: facts.commandId, appliedRevision: facts.revision, afterDigest: facts.afterDigest };
     }
     /**
-     * 生成「定向撤销」的提示词：把命令 id、修订号、摘要交给模型，要求它先 read_state 核对
-     * 该命令仍在历史栈顶且 digest 一致，再带 targetCommandId+afterDigest 执行；
-     * 不一致或返回 HISTORY_CONFLICT 时必须停止，不允许重试旧命令。
+     * 撤销指令：只把带凭据的指令填进输入框，由会话里的 Agent 执行。
+     * 凭据缺一项就不生成文案——宁可不给按钮，也不给一个跑不通的指令。
      */
     function undoPrompt(evidence) {
-      var operation = 'history.undo'
-      return '请撤销这一条修改。先 read_state 核对 history.lastCommandId=' + evidence.commandId + '、history.appliedRevision=' + evidence.appliedRevision + '、history.afterDigest=' + evidence.afterDigest + ' 与当前 revision/stateDigest 一致且仍在栈顶；不一致或 HISTORY_CONFLICT 就停止并说明已有后续修改，不重试旧命令。确认后使用 operation="' + operation + '", params=' + JSON.stringify({ targetCommandId: evidence.commandId, afterDigest: evidence.afterDigest }) + '，携带最新 expectedRevision，执行后回读。'
+      var undo = sanitizeUndo(evidence);
+      if (!undo) return '';
+      return '撤销上一步修改：使用 history.undo，params={"targetCommandId":"' + undo.commandId + '","afterDigest":"' + undo.afterDigest + '"}'
+        + '（commandId=' + undo.commandId + '，appliedRevision=' + undo.appliedRevision + '）。'
+        + '先 read_state 确认这一步仍是历史栈顶；若返回 HISTORY_CONFLICT 说明已有后续修改，立即停止并说明，不要重试或绕过。';
+    }
+    function resultIssue(value) {
+      var facts = toolFacts(evidenceData(value));
+      if (facts.errorCode === 'HISTORY_CONFLICT') return '已有后续人工或 AI 修改，不能单独撤销这一步。请回读当前历史；不要重试旧命令。';
+      return null;
     }
     /**
      * 从工具回执里找导出的artifactRef：只用于在界面上提供真实「另存」入口。
      * Host 侧通常是合成引用（artifact://…），因此按钮会请编辑器自己再导一次，而不是直接打开该引用。
      */
-    function exportEvidence(value, depth) {
-      if (!value || typeof value !== 'object' || depth > 6) return null
-      if (typeof value.artifactRef === 'string' || typeof value.exportId === 'string') {
-        return { artifactRef: typeof value.artifactRef === 'string' ? value.artifactRef : null, exportId: typeof value.exportId === 'string' ? value.exportId : null, format: /jpe?g/i.test(String(value.mimeType || value.format || '')) ? 'jpeg' : 'png' }
-      }
-      for (var key of ['result', 'value', 'originalResult', 'output', 'data']) {
-        var found = exportEvidence(value[key], depth + 1)
-        if (found) return found
-      }
-      return null
+    function exportEvidence(value) {
+      var facts = toolFacts(evidenceData(value));
+      if (!facts.exportId && !facts.artifactRef) return null;
+      return { exportId: facts.exportId || null, artifactRef: facts.artifactRef || null, format: /jpe?g/i.test(String(facts.format || '')) ? 'jpeg' : 'png' };
     }
     function watchPanel(layout, onChange) {
       var store = layout && layout.panelInfo
@@ -259,24 +465,301 @@ window.__ModuleLoader__.load({
      * 把工具回执压成一张可读卡片：工具中文名、状态、修订号、一行说明。
      * 聊天面板只显示这些结构化字段，绝不把 canonical JSON 原样铺给用户。
      */
-    function toolCard(data, isCall) {
+    /** 从 message.content 的文本块里解析工具输出 JSON（真实事件里状态与凭据都在这层）。 */
+    function outputJsonOf(container, depth = 0) {
+      if (!container || typeof container !== 'object' || depth > 4) return null;
+      const content = container.content;
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (!part) continue;
+          if (typeof part === 'string') {
+            const parsed = parseJsonText(part);
+            if (parsed) return parsed;
+          } else if (typeof part.text === 'string') {
+            const parsed = parseJsonText(part.text);
+            if (parsed) return parsed;
+          }
+        }
+      }
+      if (container.message && container.message !== container) return outputJsonOf(container.message, depth + 1);
+      return null;
+    }
+    function parseJsonText(text) {
+      if (typeof text !== 'string') return null;
+      const trimmed = text.trim();
+      if (trimmed.charAt(0) !== '{') return null;
+      try { return JSON.parse(trimmed) } catch (_) { return null }
+    }
+
+    /**
+     * 工具回执卡片。真实事件形状（源码结论，见 docs/session-event-shapes.md）：
+     *   tool/call  : {callId, name, arguments(JSON 字符串)}
+     *   tool/result: {callId?, message:{toolCallId, isError, content[]}, error?{code}}
+     *   工具输出（status/revision/commandId/afterDigest/exportId/artifactRef）在 content 文本 JSON 里。
+     * 规则：pending 只由"有 call 无 result"得出；rejected 只由 isError/error 得出；
+     * **不许把"解析不到摘要"当成 unknown**——成功但摘要解析不出来时显示 applied + 摘要无法解析。
+     */
+    function toolCard(data, isCall, fallbackName) {
       if (!data || typeof data !== 'object') return null
-      var payload = data.arguments || data.result || data.value || data
-      var rawName = data.toolName || data.name || payload.toolName || ''
+      var message = data.message && typeof data.message === 'object' ? data.message : null
+      var isError = message ? message.isError === true : false
+      var callName = typeof data.name === 'string' ? data.name : (data.call && typeof data.call.name === 'string' ? data.call.name : '')
+      var output = message ? outputJsonOf(message) : null
+      var baseFacts = toolFacts(data)
+      // 事件外壳（result.value 等）优先；只有外壳里没有任何可用字段时，才把 content 文本 JSON 当来源。
+      if (!output && !baseFacts.status && !baseFacts.exportId && !baseFacts.artifactRef) output = outputJsonOf(data)
+      var facts = output ? toolFacts(output) : baseFacts
+      var errorCode = facts.errorCode || (data.error && typeof data.error.code === 'string' ? data.error.code : undefined)
+      if (!errorCode && isError) errorCode = 'TOOL_ERROR'
+      var rawName = callName || facts.toolName || fallbackName || ''
       var name = TOOL_NAMES[rawName] || rawName || '工具调用'
-      var status = (isCall ? 'running' : null) || data.status || payload.status || ''
-      var revision = payload.revision ?? data.revision
-      var errorCode = payload.error?.code || payload.code || (Array.isArray(data.content) ? null : null)
+      var status
+      if (isCall) status = 'running'
+      else if (isError || errorCode) status = 'rejected'
+      else status = facts.status || 'applied'
+      var revision = facts.revision
       var line = ''
       if (!isCall) {
         if (errorCode) line = ERROR_TEXT[errorCode] || ('操作没有完成：' + errorCode)
-        else if (payload.operation) line = String(payload.operation)
-        else if (payload.exportId) line = '导出任务 ' + payload.exportId + (status ? ' · ' + status : '')
-        else if (payload.documentId) line = '工程 ' + String(payload.documentId).slice(0, 8)
-        else if (payload.layersCount !== undefined) line = payload.layersCount + ' 个图层'
+        else if (facts.exportId) line = '导出任务 ' + facts.exportId + (facts.status ? ' · ' + facts.status : '')
+        else if (facts.artifactRef) line = '导出文件已就绪'
+        else if (revision !== undefined) line = '修订 R' + revision
+        else if (status === 'rejected') line = '未执行（编辑器拒绝了这次修改，回执里没有错误码）'
+        // 成功但没有结构化摘要（导出/撤销凭据本身就算摘要，不叠加这句话）。
+        if (!output && status === 'applied' && !facts.exportId && !facts.artifactRef) line = (line ? line + ' ' : '') + '已执行（摘要无法解析）'
       }
-      return { name: name, status: status || (isCall ? 'running' : 'unknown'), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
+      // 同一回执里出现多个不一致的状态：按外层取值，但必须把"不一致"说出来，不能静默挑一个。
+      if (facts.statusConflicts.length) {
+        var all = [facts.status].concat(facts.statusConflicts).filter(Boolean).join(' / ')
+        line = (line ? line + ' ' : '') + '（回执里有多处状态不一致：' + all + '，已按外层取值）'
+      }
+      var card = { name: name, status: status, revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
+      // 摘要解析不出来时，把原始正文留给"复制诊断信息"，不进 DOM。
+      if (!isCall && !output) {
+        var rawText = message && Array.isArray(message.content)
+          ? message.content.map(function (part) { return part && (typeof part === 'string' ? part : part.text) || '' }).join('\n')
+          : ''
+        if (rawText) card.diagnostic = rawText
+      }
+      return card
     }
+    // ---------- 对话框 v1：纯函数层 ----------
+    //
+    // 渲染前先把"会话行"压成可读的计划（plan），组件只负责画。这样两点能被测试钉住：
+    // ① 任何一行都不会把原始 JSON 铺到界面上；② 审批只给"打开原生会话"，不造假按钮。
+
+    var MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
+    var ATTACHMENT_TYPES = { 'image/png': true, 'image/jpeg': true, 'image/webp': true }
+
+    /** 把一段文本切成行内片段：普通文本、`代码`、![图](url)、[链接](url)、裸链接。 */
+    function parseInlineTokens(text) {
+      var source = String(text == null ? '' : text)
+      var tokens = []
+      var pattern = /(`[^`\n]+`)|(!\[[^\]\n]*\]\([^)\s]+\))|(\[[^\]\n]+\]\([^)\s]+\))|(https?:\/\/[^\s<>()]+)/g
+      var last = 0, match
+      while ((match = pattern.exec(source)) !== null) {
+        if (match.index > last) tokens.push({ kind: 'text', text: source.slice(last, match.index) })
+        var raw = match[0]
+        if (raw.charAt(0) === '`') tokens.push({ kind: 'code', text: raw.slice(1, -1) })
+        else if (raw.slice(0, 2) === '![') {
+          var image = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(raw)
+          tokens.push(image ? { kind: 'image', alt: image[1], href: image[2] } : { kind: 'text', text: raw })
+        } else if (raw.charAt(0) === '[') {
+          var link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(raw)
+          tokens.push(link ? { kind: 'link', text: link[1], href: link[2] } : { kind: 'text', text: raw })
+        } else tokens.push({ kind: 'link', text: raw, href: raw })
+        last = match.index + raw.length
+      }
+      if (last < source.length) tokens.push({ kind: 'text', text: source.slice(last) })
+      return tokens
+    }
+
+    /** 轻量 Markdown 分块：标题、列表、围栏代码、引用、段落。不认识的一律当段落，不吞内容。 */
+    function parseMarkdownBlocks(text) {
+      var lines = String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')
+      var blocks = [], buffer = []
+      function flush() {
+        if (!buffer.length) return
+        blocks.push({ kind: 'paragraph', text: buffer.join('\n') })
+        buffer = []
+      }
+      for (var index = 0; index < lines.length; index += 1) {
+        var line = lines[index]
+        if (/^```/.test(line)) {
+          flush()
+          var lang = line.slice(3).trim()
+          var code = []
+          index += 1
+          while (index < lines.length && !/^```/.test(lines[index])) code.push(lines[index++])
+          blocks.push({ kind: 'code', lang: lang, text: code.join('\n') })
+          continue
+        }
+        var heading = /^(#{1,3})\s+(.*)$/.exec(line)
+        if (heading) { flush(); blocks.push({ kind: 'heading', level: heading[1].length, text: heading[2] }); continue }
+        var bullet = /^\s*[-*]\s+(.*)$/.exec(line)
+        var ordered = /^\s*\d+[.)]\s+(.*)$/.exec(line)
+        if (bullet || ordered) {
+          flush()
+          var list = { kind: 'list', ordered: !!ordered, items: [] }
+          while (index < lines.length) {
+            var next = lines[index]
+            var item = /^\s*[-*]\s+(.*)$/.exec(next) || /^\s*\d+[.)]\s+(.*)$/.exec(next)
+            if (!item) break
+            list.items.push(item[1])
+            index += 1
+          }
+          index -= 1
+          blocks.push(list)
+          continue
+        }
+        var quote = /^>\s?(.*)$/.exec(line)
+        if (quote) { flush(); blocks.push({ kind: 'quote', text: quote[1] }); continue }
+        if (!line.trim()) { flush(); continue }
+        buffer.push(line)
+      }
+      flush()
+      return blocks
+    }
+
+    /** 附件：只接受 PNG/JPEG/WebP，按 base64 大小校验，超限明确拒绝而不是悄悄丢。 */
+    function attachmentFromDataUrl(name, dataUrl) {
+      var match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(String(dataUrl == null ? '' : dataUrl))
+      if (!match) return { ok: false, message: '只能附加 PNG、JPEG 或 WebP 图片' }
+      var mediaType = match[1].toLowerCase()
+      if (!ATTACHMENT_TYPES[mediaType]) return { ok: false, message: '只支持 PNG、JPEG、WebP 图片（当前是 ' + mediaType + '）' }
+      var data = match[2].replace(/\s+/g, '')
+      var bytes = Math.floor(data.length * 3 / 4)
+      if (bytes > MAX_ATTACHMENT_BYTES) return { ok: false, message: '图片约 ' + Math.round(bytes / 1024 / 1024) + ' MB，超过 4 MB 上限，请先压缩' }
+      return { ok: true, name: String(name || '图片'), bytes: bytes, part: { type: 'image', mediaType: mediaType, data: data } }
+    }
+
+    /** 输入区发送状态：只有在真正没发出去且值得重试时才允许"重试一次"。 */
+    function retryState(failure) {
+      if (!failure || !failure.text) return null
+      if (failure.unknown) return { retryable: false, reason: '上次结果未知，请先核对会话记录，避免重复发送' }
+      return { retryable: true, reason: '' }
+    }
+
+    var PLAN_JSON_KEYS = ['{', '["', '\"toolName\"', '\"arguments\"']
+
+    /** 工具卡片四态：宿主回执里的自由文本收敛成四个固定值，unknown 单独一态（不可重放）。 */
+    function normalizeToolStatus(status, failed) {
+      var value = String(status || '').toLowerCase()
+      if (!value) return failed ? 'rejected' : 'pending'
+      if (value === 'applied' || value === 'completed' || value === 'ok' || value === 'ready') return 'applied'
+      if (value === 'rejected' || value === 'failed' || value === 'error' || value === 'aborted') return 'rejected'
+      if (value === 'unknown' || value === 'pending' || value === 'running' || value === 'queued') return value === 'unknown' ? 'unknown' : 'pending'
+      return failed ? 'rejected' : 'pending'
+    }
+
+    /** 阈值：一段文本里出现以 { 或 [ 开头的长串，就认为它是裸 JSON，不能进 DOM。 */
+    function looksLikeRawJson(text) {
+      var value = String(text == null ? '' : text)
+      if (value.length < 40) return false
+      var trimmed = value.trim()
+      if (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[') return false
+      return /^(?:\{[\s\S]*\}|\[[\s\S]*\])$/.test(trimmed)
+    }
+
+    /** 严格判定：能解析成 JSON 结构就算裸 JSON，不看长度。错误行与工具回执用它。 */
+    function isJsonStructure(text) {
+      var trimmed = String(text == null ? '' : text).trim()
+      if (trimmed.charAt(0) !== '{' && trimmed.charAt(0) !== '[') return false
+      try { JSON.parse(trimmed); return true } catch (_) { return false }
+    }
+
+    /** 错误行/工具回执的最终判定：结构可解析，或长得像整段 JSON，都算裸 JSON。 */
+    function isRawPayload(text) {
+      return isJsonStructure(text) || looksLikeRawJson(text)
+    }
+
+    /** 撤销凭据校验：三项缺一项就整体省略。 */
+    function sanitizeUndo(undo) {
+      if (!undo || typeof undo !== 'object') return null
+      if (typeof undo.commandId !== 'string' || !undo.commandId || undo.commandId.length > 256) return null
+      if (!Number.isSafeInteger(undo.appliedRevision) || undo.appliedRevision < 0) return null
+      if (typeof undo.afterDigest !== 'string' || !/^fnv1a64-[0-9a-f]{16}$/.test(undo.afterDigest)) return null
+      return { commandId: undo.commandId, appliedRevision: undo.appliedRevision, afterDigest: undo.afterDigest }
+    }
+
+    /** 导出引用校验：exportId 必须存在，其余按需保留。 */
+    function sanitizeExport(ref) {
+      if (!ref || typeof ref !== 'object') return null
+      if (typeof ref.exportId !== 'string' || !ref.exportId || ref.exportId.length > 256) return null
+      var out = { exportId: ref.exportId }
+      if (typeof ref.artifactRef === 'string' && ref.artifactRef) out.artifactRef = ref.artifactRef
+      if (typeof ref.format === 'string' && /^[a-z]{2,8}$/i.test(ref.format)) out.format = ref.format
+      return out
+    }
+
+    // 可定位对象：图片侧 layer，视频侧 clip / overlay / track。白名单外的 kind 整体丢弃。
+    var LOCATE_KINDS = { layer: true, clip: true, overlay: true, track: true }
+
+    /** 定位目标校验：只有"非空字符串数组 + 白名单 kind"才保留，任何一项非法就整体省略。 */
+    function sanitizeLocate(locate) {
+      if (!locate || typeof locate !== 'object') return null
+      if (!LOCATE_KINDS[locate.kind]) return null
+      if (!Array.isArray(locate.objectIds) || locate.objectIds.length === 0) return null
+      if (!locate.objectIds.every(function (id) { return typeof id === 'string' && id.length > 0 && id.length <= 256 })) return null
+      return { objectIds: locate.objectIds.slice(), kind: locate.kind }
+    }
+
+    /** 会话行 → 界面计划。零原始 JSON：解析不出来就退回一句话摘要。 */
+    function buildDialogPlan(rows) {
+      var list = Array.isArray(rows) ? rows : []
+      return list.map(function (row) {
+        var key = row && row.id ? row.id : 'row-' + Math.random().toString(16).slice(2)
+        if (!row || typeof row !== 'object') return { key: key, kind: 'assistant', badge: null, blocks: [{ kind: 'paragraph', text: '' }], actions: [] }
+        if (row.role === 'approval') {
+          // 审批也只显示四态：允许一次=applied；拒绝/取消=rejected；不可用或结果未知=unknown。
+          // 三态之外没有第五种，也不提供任何"代为作答"的入口。
+          var approvalBadge = !row.decided ? 'pending'
+            : row.outcome === 'allowed-once' ? 'applied'
+            : row.outcome === 'rejected' || row.outcome === 'cancelled' ? 'rejected' : 'unknown'
+          return {
+            key: key, kind: 'approval', badge: approvalBadge, tone: approvalBadge === 'rejected' ? 'error' : approvalBadge === 'pending' ? 'warn' : 'muted',
+            title: row.title || (row.decided ? '审批结果' : '等待本人在原生会话确认'),
+            blocks: [{ kind: 'paragraph', text: row.text || '审批状态来自原生会话，本面板只显示状态，不代为作答。' }],
+            // 审批永远只给"打开原生会话"：没有可提交的按钮，避免伪造授权入口。
+            actions: [{ kind: 'open-native', label: '打开原生会话 / 审批' }],
+          }
+        }
+        if (row.role === 'tool') {
+          var card = row.card || { name: '工具调用', status: '', revision: null, line: '' }
+          var badge = normalizeToolStatus(card.status, !!card.error)
+          var actions = []
+          // 动作自带凭据：渲染层拿到就能用，不回查原始行。
+          var undo = sanitizeUndo(row.undo)
+          if (undo) actions.push({ kind: 'fill-undo', label: '填入撤销指令', hint: '仅栈顶可撤；已有后续修改会返回 HISTORY_CONFLICT', prompt: undoPrompt(undo), undo: undo })
+          var exported = sanitizeExport(row.exportRef)
+          if (exported) actions.push({ kind: 'download-export', label: '在编辑器中另存为文件', export: exported })
+          // 裸 JSON 只进诊断（剪贴板），不进卡片正文；普通文本诊断（如"版本冲突"）保留正文。
+          var rawLine = card.line && isRawPayload(card.line)
+          var diagnostic = card.diagnostic || (rawLine ? card.line : '')
+          var locate = sanitizeLocate(row.locate)
+          return {
+            key: key, kind: 'tool', badge: badge,
+            tone: badge === 'rejected' ? 'error' : badge === 'unknown' ? 'warn' : badge === 'applied' ? 'good' : 'muted',
+            card: { name: card.name || '工具调用', status: badge, revision: card.revision, line: rawLine ? '' : (card.line || '') },
+            issue: row.issue || '', diagnostic: diagnostic, actions: actions,
+            // 透传：P1 的 editor.highlight 全靠它；渲染规则是"有 locate 才可点"。
+            ...(locate ? { locate: locate } : {}),
+          }
+        }
+        if (row.role === 'error') {
+          var errorText = isRawPayload(row.text) ? '操作没有完成（无法解析摘要）' : String(row.text || '操作没有完成')
+          return { key: key, kind: 'error', badge: 'rejected', tone: 'error', blocks: [{ kind: 'paragraph', text: errorText }], actions: [] }
+        }
+        var text = String(row.text == null ? '' : row.text)
+        var raw = looksLikeRawJson(text)
+        // 兜底：正文里如果还是一段 JSON，就退成一句话摘要，原始内容只留给"复制诊断信息"。
+        var blocks = raw
+          ? [{ kind: 'paragraph', text: '这一步已执行（无法解析摘要）' }]
+          : parseMarkdownBlocks(text)
+        return { key: key, kind: row.role === 'user' ? 'user' : 'assistant', badge: null, tone: 'normal', blocks: blocks, diagnostic: raw ? text : '', actions: [] }
+      })
+    }
+
     function makeTranscript() {
       var events = new Map(), attempts = new Map()
       function add(event) {
@@ -299,6 +782,10 @@ window.__ModuleLoader__.load({
           }
         }
         var rows = []
+        // tool/call 行带工具名，tool/result 行只有 toolCallId：按 id 映射回名字，
+        // 映射不到就沿用上一条 call 的名字，避免整屏「工具调用」。
+        var lastName = null
+        var callNames = new Map()
         Array.from(events.values()).sort(function (a,b) { return a.seq-b.seq }).forEach(function (e) {
           var d = e.data || {}, message = d.message || d
           if (e.type === 'user/message' || e.type === 'assistant/message') {
@@ -315,10 +802,19 @@ window.__ModuleLoader__.load({
           } else if (e.type === 'approval/asked') {
             rows.push({ id: 'event-'+e.seq, role: 'approval', text: '等待本人在原生会话确认审批：' + (d.toolName || '') + (d.reason ? '\n' + (typeof d.reason === 'string' ? d.reason : JSON.stringify(d.reason)) : '') })
           } else if (e.type === 'approval/decided') {
-            rows.push({ id: 'event-'+e.seq, role: 'approval', text: approvalText(d.outcome) })
+            rows.push({ id: 'event-'+e.seq, role: 'approval', decided: true, outcome: d.outcome, text: approvalText(d.outcome) })
+          } else if (e.type === 'error' || /\/error$/.test(e.type)) {
+            // 会话级错误：只取一句可读文本，原始结构（code/stack）不进界面。
+            var failure = d.message || d.error || {}
+            var failureText = typeof failure === 'string' ? failure : (failure.message || failure.code || '操作没有完成')
+            rows.push({ id: 'event-'+e.seq, role: 'error', text: String(failureText) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
             var isCall = e.type === 'tool/call'
-            rows.push({ id: 'event-'+e.seq, role: 'tool', card: toolCard(d, isCall), issue: isCall ? null : resultIssue(d, 0), exportRef: isCall ? null : exportEvidence(d, 0), undo: !isCall && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: '' })
+            var callId = d.callId || (d.call && d.call.callId) || (d.message && (d.message.toolCallId || (d.message.source && d.message.source.callId)))
+            var fallback = (callId && callNames.get(callId)) || lastName
+            var card = toolCard(d, isCall, isCall ? null : fallback)
+            if (isCall && card) { if (callId) callNames.set(callId, card.name); lastName = card.name }
+            rows.push({ id: 'event-'+e.seq, role: 'tool', card: card, issue: isCall ? null : resultIssue(d), exportRef: isCall ? null : exportEvidence(d), undo: !isCall && !resultIssue(d) ? undoEvidence(d) : null, text: '', diagnostic: card && card.diagnostic ? card.diagnostic : null })
           }
         })
         attempts.forEach(function (a, id) {
@@ -384,32 +880,102 @@ window.__ModuleLoader__.load({
       activeRef.current = props.active !== false
       var [ready, setReady] = React.useState(false)
       var [busy, setBusy] = React.useState(false)
-      async function bind() {
+      var attachState = React.useState([])
+      var attach = attachState[0]
+      var setAttach = attachState[1]
+      // 失败重试只保留"最后一次没发出去的同一条消息"，重试逐字重发，不换参数。
+      var lastFailureRef = React.useRef(null)
+      var fileRef = React.useRef(null)
+      var choiceState = React.useState(null)
+      var choices = choiceState[0]
+      var setChoices = choiceState[1]
+      var showAllState = React.useState(false)
+      var showAll = showAllState[0]
+      var setShowAll = showAllState[1]
+      // 附图相关的提示只能留在输入区，不许污染顶部状态行（上一版出现过"没选文件却报 5MB 超限"）。
+      var attachNoticeState = React.useState('')
+      var attachNotice = attachNoticeState[0]
+      var setAttachNotice = attachNoticeState[1]
+
+      /** 绑定/切换会话时把输入区状态清干净：附件、附图提示、失败重试游标。 */
+      function resetComposer() {
+        setAttach([]); setAttachNotice(''); lastFailureRef.current = null
+      }
+
+      /**
+       * 绑定会话：sessionId 为空表示新建，否则挂接已有会话。
+       * 绑定前先读工程身份；挂接已有会话时若历史里带过别的 projectId，直接拒绝并说明原因。
+       */
+      async function bindSession(sessionId) {
         if (sendingRef.current) return
-        sendingRef.current = true; setBusy(true); setReady(false)
-        if (stopRef.current) stopRef.current()
-        bindingRef.current = null; transcriptRef.current = null; setMessages([])
+        sendingRef.current = true; setBusy(true); setReady(false); setChoices(null)
+        if (stopRef.current) { stopRef.current(); stopRef.current = null }
+        bindingRef.current = null; transcriptRef.current = null; setMessages([]); resetComposer()
         try {
           var b = await readBinding(props.frameRef.current, props.kind)
           var remote = props.getRemote()
-          if (!remote?.session?.create) throw new Error('宿主未提供会话创建接口')
-          var result = await remote.session.create({})
-          if (!result?.ok || !result.value?.sessionId) throw new Error('创建专属会话失败，请检查宿主会话配置')
+          if (!sessionId) {
+            if (!remote?.session?.create) throw new Error('宿主未提供会话创建接口')
+            var created = await remote.session.create({})
+            if (!created?.ok || !created.value?.sessionId) throw new Error('创建专属会话失败，请检查宿主会话配置')
+            sessionId = created.value.sessionId
+          }
           if (!aliveRef.current) return
-          b.sessionId = result.value.sessionId
+          b.sessionId = sessionId
           bindingRef.current = b
           var reduce = makeTranscript()
           transcriptRef.current = reduce
-          if (!activeRef.current) { setStatus('专属对话已创建，返回编辑器后恢复订阅；工程尚待授权'); return }
-          stopRef.current = followSession(remote, b.sessionId, function (frame) {
+          if (!activeRef.current) { setStatus('会话已绑定，返回编辑器后恢复订阅；工程尚待授权'); return }
+          stopRef.current = followSession(remote, sessionId, function (frame) {
             if (!aliveRef.current || bindingRef.current !== b) return
             if (frame.type === 'snapshot' && frame.header.id !== b.sessionId) { setReady(false); setStatus('会话身份不匹配，已停止'); stopRef.current?.(); return }
+            if (frame.type === 'snapshot') {
+              var other = projectMismatch(frame.records, b.projectId)
+              if (other) {
+                // 拒绝挂接：会话里留着别的工程，继续用会把指令发到错误的画布上。
+                bindingRef.current = null; setReady(false)
+                setStatus('这个会话属于另一个工程（projectId ' + String(other).slice(0, 8) + '…），已拒绝绑定；请选择本工程的会话或新建')
+                stopRef.current?.(); return
+              }
+            }
             setMessages(reduce(frame)); setReady(true); setStatus('已连接对话，工程授权以 Host 回读为准 · ' + b.editorKind)
           }, function (error) { if (aliveRef.current) { setReady(false); setStatus('订阅中断：' + error.message) } })
           if (!stopRef.current) throw new Error('宿主未提供消息订阅接口')
-          setStatus('正在同步专属会话…')
+          setStatus('正在同步会话…')
         } catch (error) { if (aliveRef.current) setStatus(error.message) }
         finally { sendingRef.current = false; if (aliveRef.current) setBusy(false) }
+      }
+
+      /**
+       * 绑定入口：先按契约列会话，再逐个读工程标记，**只把与本工程匹配的会话给用户看**。
+       * 契约不符时明确报错（不静默退回）；没有匹配项时只保留「新建」。
+       */
+      async function bind() {
+        if (sendingRef.current) return
+        sendingRef.current = true; setBusy(true); setReady(false); setShowAll(false)
+        if (stopRef.current) { stopRef.current(); stopRef.current = null }
+        bindingRef.current = null; transcriptRef.current = null; setMessages([]); resetComposer()
+        try {
+          var binding = await readBinding(props.frameRef.current, props.kind)
+          var remote = props.getRemote()
+          var items = await listSessions(remote, 8)
+          var usable = items.filter(function (item) { return item.agentAvailable !== false }).slice(0, 8)
+          var projectById = {}
+          await Promise.all(usable.map(function (item) {
+            return peekProjectId(remote, item.sessionId, 800).then(function (projectId) { projectById[item.sessionId] = projectId })
+          }))
+          if (!aliveRef.current) return
+          var grouped = filterSessionsForProject(usable, binding.projectId, projectById)
+          setChoices({ matched: grouped.matched, others: grouped.others, projectId: binding.projectId })
+          setStatus(grouped.matched.length
+            ? '选择一个与本工程匹配的会话，或新建专属会话'
+            : '没有与本工程匹配的历史会话，可以新建专属会话')
+        } catch (error) {
+          if (!aliveRef.current) return
+          // 契约不符/接口缺失：说清楚原因，但仍允许新建（不是"静默回退"）。
+          setChoices({ matched: [], others: [], error: error.message })
+          setStatus(error.message)
+        } finally { if (aliveRef.current) setBusy(false); sendingRef.current = false }
       }
 
       React.useEffect(function () {
@@ -440,20 +1006,50 @@ window.__ModuleLoader__.load({
         if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
       }, [messages.length])
 
-      async function submit(override) {
-        var text = typeof override === 'string' ? override : String(draft || '').trim(), b = bindingRef.current
+      async function submit(override, snapshotAttachments) {
+        var text = typeof override === 'string' ? override : String(draft || '').trim()
+        var attachments = Array.isArray(snapshotAttachments) ? snapshotAttachments : attach.map(function (item) { return item.part })
+        var b = bindingRef.current
         if (!text || !ready || !b || sendingRef.current) return
         sendingRef.current = true; setBusy(true)
         try {
           var current = await readBinding(props.frameRef.current, props.kind)
           if (bindingKey(current) !== bindingKey(b)) { setReady(false); stopRef.current?.(); throw new Error('工程已变化，请重新绑定对话') }
           var context = '当前编辑工程身份：' + JSON.stringify(b) + '\n首次尚无 Host 授权时，对应 read_state 显式传 bind:true，申请原生审批；等待用户本人在原生会话回答，拒绝/取消/不可用时停止，不修改策略、不重试冒充授权。已授权的后续 read_state 省略 bind。仅操作上述工程；先通过对应 media_' + b.editorKind + '_* 工具读取并核对身份、修订，再执行授权修改。身份不一致时停止。' + '\n用户指令：\n'
-          var result = await sendPrompt(props.getRemote(), b.sessionId, context + text)
+          var result = await sendPrompt(props.getRemote(), b.sessionId, context + text, attachments)
           if (!aliveRef.current || bindingRef.current !== b) return
-          if (result.ok) { setDraft(''); setStatus('消息已受理，等待真实会话反馈') }
-          else { setStatus(result.message); if (result.unknown) setReady(false) }
+          if (result.ok) {
+            setDraft(''); setAttach([]); setAttachNotice(''); lastFailureRef.current = null
+            setStatus('消息已受理，等待真实会话反馈')
+          } else {
+            // 只记"同一条消息"，重试时逐字重发，绝不改参数重发。
+            lastFailureRef.current = { text: text, attachments: attachments, unknown: !!result.unknown, message: result.message }
+            setStatus(result.message); if (result.unknown) setReady(false)
+          }
         } catch (error) { if (aliveRef.current) setStatus(error.message) }
         finally { sendingRef.current = false; if (aliveRef.current) setBusy(false) }
+      }
+
+      /** 读取附图：只收 PNG/JPEG/WebP，超限或格式不对都明确报出来，不静默丢。 */
+      function pickFiles(event) {
+        var files = Array.prototype.slice.call((event.target && event.target.files) || [])
+        if (event.target) event.target.value = ''
+        if (!files.length) return
+        files.forEach(function (file) {
+          var reader = new FileReader()
+          reader.onload = function () {
+            var parsed = attachmentFromDataUrl(file.name, reader.result)
+            // 附图相关提示只进输入区，不进顶部状态行。
+            if (!parsed.ok) { setAttachNotice('附图未加入：' + parsed.message); return }
+            setAttach(function (current) {
+              if (current.length >= 3) { setAttachNotice('最多附加 3 张图片'); return current }
+              setAttachNotice('')
+              return current.concat([{ name: parsed.name, bytes: parsed.bytes, part: parsed.part }])
+            })
+          }
+          reader.onerror = function () { setAttachNotice('读取图片失败：' + (file.name || '未知文件')) }
+          reader.readAsDataURL(file)
+        })
       }
 
       // The Host only carries a synthetic artifact ref, so a real file can only be produced by
@@ -478,106 +1074,267 @@ window.__ModuleLoader__.load({
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing && !event.isComposing) { event.preventDefault(); void submit() }
       }
 
+      // ---------- 对话框 v1 渲染 ----------
+      // 统一 class + 一份 style，按钮三态与 focus ring 只在一处定义；色值全部来自 visual-spec。
+      var DIALOG_CSS = [
+        '.dsh-media-btn{font:inherit;font-size:12.5px;border:0;border-radius:999px;padding:8px 14px;background:#f5f5f7;color:#0071e3;cursor:pointer;transition:transform 180ms ' + EASE + ',background-color 180ms ' + EASE + '}',
+        '.dsh-media-btn:hover:not(:disabled){background:#ececf0}',
+        '.dsh-media-btn:active:not(:disabled){transform:scale(.98)}',
+        '.dsh-media-btn:focus-visible{outline:2px solid #0071e3;outline-offset:2px}',
+        '.dsh-media-btn:disabled{color:#86868b;cursor:not-allowed;opacity:.7}',
+        '.dsh-media-btn-primary{background:#0071e3;color:#ffffff;font-weight:500}',
+        '.dsh-media-btn-primary:hover:not(:disabled){background:#0066cc}',
+        '.dsh-media-btn-primary:active:not(:disabled){transform:scale(.96)}',
+        '.dsh-media-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 10px;border-radius:999px;background:#f5f5f7;color:#1d1d1f;font-size:11px}',
+        '.dsh-media-chip-x{border:0;background:transparent;color:#6e6e73;cursor:pointer;border-radius:999px;width:18px;height:18px;line-height:1;padding:0}',
+        '.dsh-media-chip-x:focus-visible{outline:2px solid #0071e3;outline-offset:1px}',
+        '.dsh-media-skeleton{height:12px;border-radius:6px;background:linear-gradient(90deg,#f0f0f2,#f7f7f8,#f0f0f2);background-size:200% 100%;animation:dsh-media-shimmer 1.2s infinite linear}',
+        '@keyframes dsh-media-shimmer{from{background-position:0 0}to{background-position:-200% 0}}',
+        '@media(prefers-reduced-motion:reduce){.dsh-media-btn,.dsh-media-chip-x{transition:none}.dsh-media-skeleton{animation:none}}',
+      ].join('')
+      React.useEffect(function () {
+        if (typeof document === 'undefined' || document.getElementById('dsh-media-dialog-style')) return
+        var el = document.createElement('style'); el.id = 'dsh-media-dialog-style'; el.textContent = DIALOG_CSS
+        document.head.appendChild(el)
+      }, [])
+
+      var BADGES = {
+        applied: { label: '已执行', color: '#1d7a3c', background: 'rgba(29,122,60,.10)', weight: 600 },
+        rejected: { label: '未执行', color: '#ff3b30', background: 'rgba(255,59,48,.10)', weight: 600 },
+        // unknown 在协议里"不可重放"，视觉上不能画成失败：用墨色 + 更重的描边，并写明不要重放。
+        unknown: { label: '结果未知 · 不要重放', color: '#1d1d1f', background: 'rgba(0,0,0,.06)', weight: 700 },
+        pending: { label: '进行中', color: '#6e6e73', background: 'rgba(0,0,0,.05)', weight: 500 },
+      }
+      var plan = buildDialogPlan(messages)
+      var lastFailure = lastFailureRef.current
+      var retry = retryState(lastFailure)
+
+      function btn(options) {
+        var React = require('react')
+        return React.createElement('button', {
+          type: 'button', className: 'dsh-media-btn' + (options.variant === 'primary' ? ' dsh-media-btn-primary' : ''),
+          disabled: !!options.disabled, title: options.title || '', onClick: options.onClick, style: options.style,
+        }, options.label)
+      }
+
+      function copyText(text, okMessage) {
+        var value = String(text || '')
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            void navigator.clipboard.writeText(value).then(function () { setStatus(okMessage || '诊断信息已复制到剪贴板') },
+              function () { setStatus('复制失败：剪贴板不可用') })
+            return
+          }
+          setStatus('复制失败：剪贴板不可用')
+        } catch (_) { setStatus('复制失败：剪贴板不可用') }
+      }
+
+      function inline(tokens) {
+        var React = require('react')
+        return tokens.map(function (token, index) {
+          if (token.kind === 'code') return React.createElement('code', { key: index, style: { fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: '0.92em', background: 'rgba(0,0,0,.06)', borderRadius: 6, padding: '1px 5px' } }, token.text)
+          if (token.kind === 'link') return React.createElement('a', {
+            key: index, href: token.href, target: '_blank', rel: 'noreferrer noopener', referrerPolicy: 'no-referrer',
+            onClick: function (event) {
+              if (!/^https?:\/\//i.test(token.href)) { event.preventDefault(); setStatus('只允许打开 http/https 链接'); return }
+              if (typeof window.confirm === 'function' && !window.confirm('将打开外部链接：\n' + token.href)) event.preventDefault()
+            },
+            style: { color: '#0071e3', textDecoration: 'underline' },
+          }, token.text)
+          if (token.kind === 'image') return React.createElement('img', { key: index, src: token.href, alt: token.alt || '图片', style: { display: 'block', maxWidth: '100%', borderRadius: 10, marginTop: 6 }, loading: 'lazy' })
+          return React.createElement('span', { key: index }, token.text)
+        })
+      }
+
+      function blocks(items) {
+        var React = require('react')
+        return items.map(function (block, index) {
+          if (block.kind === 'code') return React.createElement('pre', { key: index, style: { margin: '6px 0 0', padding: 10, borderRadius: 10, background: '#f5f5f7', overflowX: 'auto', fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: 12, lineHeight: 1.5 } }, React.createElement('code', null, block.text))
+          if (block.kind === 'heading') return React.createElement('div', { key: index, style: { margin: '6px 0 0', fontWeight: 600, fontSize: block.level === 1 ? 15 : block.level === 2 ? 14 : 13 } }, inline(parseInlineTokens(block.text)))
+          if (block.kind === 'list') return React.createElement(block.ordered ? 'ol' : 'ul', { key: index, style: { margin: '6px 0 0', paddingLeft: 18, display: 'grid', gap: 3 } },
+            block.items.map(function (item, itemIndex) { return React.createElement('li', { key: itemIndex }, inline(parseInlineTokens(item))) }))
+          if (block.kind === 'quote') return React.createElement('blockquote', { key: index, style: { margin: '6px 0 0', paddingLeft: 10, borderLeft: '2px solid rgba(0,0,0,.12)', color: '#6e6e73' } }, inline(parseInlineTokens(block.text)))
+          return React.createElement('div', { key: index, style: { margin: index === 0 ? 0 : '6px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, inline(parseInlineTokens(block.text)))
+        })
+      }
+
+      function badge(kind) {
+        var React = require('react')
+        var tone = BADGES[kind] || BADGES.pending
+        return React.createElement('span', {
+          style: { padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: tone.weight, color: tone.color, background: tone.background },
+        }, tone.label)
+      }
+
+      function renderActions(item) {
+        var React = require('react')
+        // 只用计划里的动作数据：不回查原始行（隐式耦合是架构师明确禁止的）。
+        return item.actions.map(function (action, index) {
+          if (action.kind === 'open-native') {
+            var workspace = typeof props.getWorkspace === 'function' ? props.getWorkspace() : null
+            var canOpen = !!(workspace && typeof workspace.openSession === 'function')
+            return btn({ key: index, label: action.label, disabled: !canOpen, title: canOpen ? '' : '宿主未提供原生会话导航', style: { marginTop: 8 },
+              onClick: function () { try { openNativeSession(workspace, bindingRef.current?.sessionId) } catch (error) { setStatus(error.message) } } })
+          }
+          if (action.kind === 'fill-undo' && action.prompt) {
+            return btn({ key: index, label: action.label, title: action.hint, style: { marginTop: 8 },
+              onClick: function () { setDraft(action.prompt); setStatus('已填入撤销指令；仅栈顶可撤，已有后续修改会返回 HISTORY_CONFLICT。请确认后再发送。') } })
+          }
+          if (action.kind === 'download-export' && action.export) {
+            return btn({ key: index, label: action.label, style: { marginTop: 8 }, onClick: function () { downloadExport(action.export) } })
+          }
+          return null
+        }).filter(Boolean)
+      }
+
+      function renderRow(item) {
+        var React = require('react')
+        if (item.kind === 'approval') {
+          var approvalBadge = item.badge || 'pending'
+          return React.createElement('div', { key: item.key, style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f' } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              React.createElement('strong', { style: { fontWeight: 600 } }, item.title), badge(approvalBadge)),
+            blocks(item.blocks), renderActions(item))
+        }
+        if (item.kind === 'tool') {
+          var locate = item.locate || null
+          // 规则：有 locate 才可点。不做"按 key 回查原始行"那种隐式耦合。
+          var locateProps = locate ? {
+            role: 'button', tabIndex: 0, title: '定位到画布对象',
+            'data-object-ids': locate.objectIds.join(','), 'data-object-kind': locate.kind,
+            onClick: function () {
+              if (typeof props.onLocate === 'function') props.onLocate(locate)
+              else setStatus('定位通道（editor.highlight）属于 P1，尚未接入')
+            },
+            onKeyDown: function (event) {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              if (typeof props.onLocate === 'function') props.onLocate(locate)
+              else setStatus('定位通道（editor.highlight）属于 P1，尚未接入')
+            },
+          } : { 'data-object-ids': '', 'data-object-kind': '' }
+          return React.createElement('div', {
+            key: item.key, ...locateProps,
+            style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f', cursor: locate ? 'pointer' : 'default' },
+          },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              React.createElement('strong', { style: { fontWeight: 600 } }, item.card.name), badge(item.badge),
+              item.card.revision === null || item.card.revision === undefined ? null : React.createElement('span', { style: { fontSize: 11, color: '#86868b' } }, 'R' + item.card.revision)),
+            item.card.line ? React.createElement('div', { style: { marginTop: 4, color: '#6e6e73', wordBreak: 'break-word' } }, item.card.line) : null,
+            item.issue ? React.createElement('div', { role: 'status', style: { marginTop: 6, color: '#ff3b30' } }, item.issue) : null,
+            item.diagnostic ? btn({ label: '复制诊断信息', style: { marginTop: 8 }, onClick: function () { copyText(item.diagnostic, '已复制这一步的诊断信息') } }) : null,
+            renderActions(item))
+        }
+        if (item.kind === 'error') {
+          return React.createElement('div', { key: item.key, role: 'alert', style: { alignSelf: 'stretch', padding: '9px 12px', borderRadius: 12, background: 'rgba(255,59,48,.08)', color: '#ff3b30', fontSize: 12.5, lineHeight: 1.5 } },
+            blocks(item.blocks))
+        }
+        var mine = item.kind === 'user'
+        return React.createElement('div', {
+          key: item.key,
+          style: {
+            alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '86%',
+            padding: '9px 12px', borderRadius: 14, fontSize: 13, lineHeight: 1.5,
+            background: mine ? '#0071e3' : '#f5f5f7', color: mine ? '#ffffff' : '#1d1d1f', wordBreak: 'break-word',
+          },
+        }, blocks(item.blocks),
+        item.diagnostic ? btn({ label: '复制诊断信息', style: { marginTop: 8, background: 'rgba(255,255,255,.16)', color: mine ? '#ffffff' : '#0071e3' },
+          onClick: function () { copyText(item.diagnostic, '已复制这条消息的诊断信息') } }) : null)
+      }
+
+      function skeletonRows() {
+        var React = require('react')
+        return React.createElement('div', { 'aria-busy': 'true', 'aria-label': '正在同步会话', style: { display: 'grid', gap: 8 } },
+          [72, 92, 60].map(function (width, index) {
+            return React.createElement('div', { key: index, className: 'dsh-media-skeleton', style: { width: width + '%', alignSelf: index % 2 ? 'flex-end' : 'flex-start' } })
+          }))
+      }
+
+      function emptyState() {
+        var React = require('react')
+        if (!bindingRef.current) {
+          return React.createElement('div', { style: { display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 14, background: '#f5f5f7' } },
+            React.createElement('strong', { style: { fontSize: 13 } }, '还没有绑定专属对话'),
+            React.createElement('span', { style: { fontSize: 12, color: '#6e6e73' } }, '点顶部「绑定专属对话」把当前工程连接到会话；工程首次授权要本人到原生会话确认。'))
+        }
+        var examples = ['读取当前工程状态，告诉我现在有几个图层', '把画布尺寸改成 1200×800', '把选中的图层隐藏起来']
+        return React.createElement('div', { style: { display: 'grid', gap: 8 } },
+          React.createElement('span', { style: { fontSize: 12, color: '#86868b' } }, '已连接，还没有消息。可以试试：'),
+          examples.map(function (example) {
+            return btn({ key: example, label: example, style: { textAlign: 'left', justifySelf: 'start' }, onClick: function () { setDraft(example) } })
+          }))
+      }
+
+      function composer() {
+        var React = require('react')
+        return React.createElement('div', { style: { padding: 12, boxShadow: 'inset 0 1px 0 rgba(0,0,0,.08)', background: '#ffffff' } },
+          attach.length ? React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
+            attach.map(function (item, index) {
+              return React.createElement('span', { key: item.name + index, className: 'dsh-media-chip' },
+                item.name + ' · ' + Math.max(1, Math.round(item.bytes / 1024)) + ' KB',
+                React.createElement('button', {
+                  type: 'button', className: 'dsh-media-chip-x', 'aria-label': '移除附图 ' + item.name,
+                  onClick: function () { setAttach(function (current) { return current.filter(function (_, at) { return at !== index }) }) },
+                }, '×'))
+            })) : null,
+          attachNotice ? React.createElement('div', { role: 'status', style: { marginBottom: 8, fontSize: 11.5, color: '#ff3b30' } }, attachNotice) : null,
+          React.createElement('textarea', {
+            value: draft, disabled: !ready || busy, 'aria-label': '编辑指令', rows: 3,
+            placeholder: ready ? '输入指令，Enter 发送，Shift+Enter 换行' : '先绑定专属对话',
+            onChange: function (event) { setDraft(event.target.value) }, onKeyDown: onKeyDown,
+            style: { width: '100%', boxSizing: 'border-box', resize: 'none', padding: '10px 12px', border: '1px solid transparent', borderRadius: 10, background: '#f5f5f7', font: 'inherit', fontSize: 13, color: '#1d1d1f' },
+          }),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+            React.createElement('input', { ref: fileRef, type: 'file', accept: 'image/png,image/jpeg,image/webp', multiple: true, style: { display: 'none' }, onChange: pickFiles }),
+            btn({ label: '附图', disabled: !ready || busy, title: '附加图片（PNG/JPEG/WebP，单张 ≤ 4 MB，最多 3 张）', onClick: function () { if (fileRef.current) fileRef.current.click() } }),
+            React.createElement('span', { style: { flex: 1, fontSize: 11, color: '#86868b' } }, busy ? '正在发送…' : 'Enter 发送 · Shift+Enter 换行'),
+            retry && retry.retryable ? btn({ label: '重试一次', onClick: function () { var failure = lastFailureRef.current; if (failure) void submit(failure.text, failure.attachments) } }) : null,
+            retry && !retry.retryable ? React.createElement('span', { style: { fontSize: 11, color: '#6e6e73' } }, retry.reason) : null,
+            btn({ label: busy ? '发送中…' : '发送', variant: 'primary', disabled: !ready || busy, onClick: function () { void submit() } })))
+      }
+
       return React.createElement('aside', {
         style: {
-          width: 340, flex: '0 0 340px', display: 'flex', flexDirection: 'column',
-          background: '#ffffff', boxShadow: 'inset 1px 0 0 rgba(0,0,0,.08)', minHeight: 0,
+          width: props.narrow ? '100%' : (props.width || 340), flex: props.narrow ? '0 0 auto' : '0 0 ' + (props.width || 340) + 'px',
+          height: props.narrow ? '42vh' : 'auto', display: 'flex', flexDirection: 'column', minHeight: 0,
+          background: '#ffffff', boxShadow: props.narrow ? 'inset 0 1px 0 rgba(0,0,0,.08)' : 'inset 1px 0 0 rgba(0,0,0,.08)',
         },
       },
       React.createElement('div', {
         style: { padding: '14px 16px 10px', fontSize: 12, letterSpacing: '.02em', color: '#6e6e73', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,.08)' },
-      }, '对话 · ' + props.label, React.createElement('button', { type: 'button', disabled: busy, onClick: function () { void bind() }, style: { marginLeft: 12, border: 0, borderRadius: 12, padding: '8px 12px', background: '#f5f5f7', color: '#0071e3', cursor: 'pointer' } }, '绑定专属对话'), React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: status.indexOf('未') === 0 ? '#ff3b30' : '#6e6e73' } }, status)),
-      React.createElement('div', { style: { padding: '8px 16px', fontSize: 12, color: '#6e6e73' }, role: 'status' },
-        '工程首次授权须本人在原生会话确认。切回编辑器会保留工程；策略禁止时保持未授权。',
-        React.createElement('button', { type: 'button', disabled: !bindingRef.current, onClick: function () {
-          try { openNativeSession(props.getWorkspace?.(), bindingRef.current?.sessionId) }
-          catch (error) { setStatus(error.message) }
-        }, style: { display: 'block', marginTop: 6, border: 0, borderRadius: 12, padding: '8px 12px', background: '#f5f5f7', color: '#0071e3', cursor: 'pointer' } }, '打开原生会话 / 审批')),
-      React.createElement('div', { ref: listRef, style: { flex: 1, overflow: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 } },
-        messages.length === 0
-          ? React.createElement('p', { style: { margin: 0, fontSize: 13, color: '#86868b' } }, '还没有消息。输入指令后由真实会话处理。')
-          : messages.filter(function (message) {
-            // 自建面板只保留人类可读的对话；普通工具调用交给原生 conversation 里的
-            // tool.call.toolview 卡片渲染，避免同一份 JSON 在两个地方重复出现。
-            // 例外：带「另存文件」或「定向撤销」凭据的结果卡仍在这里，因为操作按钮属于本面板。
-            if (message.role === 'approval') return false
-            if (message.role === 'tool') return !!(message.exportRef || message.undo)
-            return true
-          }).map(function (message, index) {
-            var mine = message.role === 'user'
-            var bad = message.role === 'error'
-            if (message.role === 'tool' || message.role === 'approval') {
-              // 工具与审批只显示结构化卡片：名称、状态、修订号、一行说明，不铺原始 JSON。
-              var card = message.card || { name: '审批', status: message.role === 'approval' ? 'pending' : 'unknown', revision: null, line: message.text || '' }
-              var tone = card.error ? '#ff3b30' : card.status === 'applied' ? '#1d7a3c' : '#6e6e73'
-              return React.createElement('div', {
-                key: message.id,
-                style: { alignSelf: 'flex-start', maxWidth: '92%', padding: '10px 12px', borderRadius: 14, fontSize: 12.5, lineHeight: 1.5,
-                  background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', color: '#1d1d1f' },
-              },
-                React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-                  React.createElement('strong', { style: { fontWeight: 600 } }, card.name),
-                  React.createElement('span', { style: { fontSize: 11, color: tone } }, card.status),
-                  card.revision === null ? null : React.createElement('span', { style: { fontSize: 11, color: '#86868b' } }, 'R' + card.revision)),
-                card.line ? React.createElement('div', { style: { marginTop: 4, color: '#6e6e73', wordBreak: 'break-word' } }, card.line) : null,
-                message.issue ? React.createElement('div', { role: 'status', style: { marginTop: 6, color: '#ff3b30' } }, message.issue) : null,
-                message.exportRef ? React.createElement('button', {
-                  type: 'button', onClick: function () { downloadExport(message.exportRef) },
-                  style: { marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#f5f5f7', color: '#0071e3', cursor: 'pointer' },
-                }, '在编辑器中另存为文件') : null,
-                message.undo ? React.createElement('div', { style: { marginTop: 8, fontSize: 11, color: '#86868b' } }, '命令 ' + message.undo.commandId + ' · R' + message.undo.appliedRevision + ' · ' + message.undo.afterDigest) : null,
-                message.undo ? React.createElement('button', {
-                  type: 'button', disabled: true, title: '定向撤销尚待真实页面验收，暂不可用',
-                  onClick: function () { void submit(undoPrompt(message.undo)) },
-                  style: { marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#f5f5f7', color: '#0071e3', cursor: 'pointer' },
-                }, '撤销这一步') : null)
-            }
-            return React.createElement('div', {
-              key: message.id,
-              style: {
-                alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '86%',
-                padding: '9px 12px', borderRadius: 14, fontSize: 13, lineHeight: 1.5,
-                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                background: mine ? '#0071e3' : bad ? '#ffeceb' : '#f5f5f7',
-                color: mine ? '#ffffff' : bad ? '#ff3b30' : '#1d1d1f',
-              },
-            }, message.text,
-            message.issue ? React.createElement('div', { role: 'status', style: { marginTop: 8, fontWeight: 500 } }, message.issue) : null,
-            message.exportRef ? React.createElement('div', { style: { marginTop: 8, fontSize: 11 } }, '导出：' + (message.exportRef.exportId || '') + ' · ' + (message.exportRef.artifactRef || '仅回执，无文件引用')) : null,
-            message.exportRef ? React.createElement('button', {
-              type: 'button', onClick: function () { downloadExport(message.exportRef) },
-              style: { display: 'block', marginTop: 6, border: 0, borderRadius: 12, padding: '8px 12px', background: '#ffffff', color: '#0071e3', cursor: 'pointer' },
-            }, '在编辑器中另存为文件') : null,
-            message.undo ? React.createElement('div', { style: { marginTop: 8, fontSize: 11 } }, '命令：' + message.undo.commandId + '\n修订：' + message.undo.appliedRevision + '\n摘要：' + message.undo.afterDigest) : null,
-            message.undo ? React.createElement('button', {
-              type: 'button', disabled: true, title: '定向撤销尚待真实页面验收，暂不可用',
-              onClick: function () { void submit(undoPrompt(props.kind, message.undo)) },
-              style: { display: 'block', marginTop: 8, border: 0, borderRadius: 12, padding: '8px 12px', background: '#ffffff', color: '#0071e3', cursor: 'pointer' },
-            }, '撤销这一步') : null)
-          })),
-      React.createElement('div', { style: { padding: 12, boxShadow: 'inset 0 1px 0 rgba(0,0,0,.08)' } },
-        React.createElement('textarea', {
-          value: draft, disabled: !ready || busy, 'aria-label': '编辑指令',
-          rows: 3,
-          placeholder: '输入指令，Enter 发送，Shift+Enter 换行',
-          onChange: function (event) { setDraft(event.target.value) },
-          onKeyDown: onKeyDown,
-          style: {
-            width: '100%', boxSizing: 'border-box', resize: 'none', padding: '10px 12px',
-            border: '1px solid transparent', borderRadius: 10, background: '#f5f5f7',
-            font: 'inherit', fontSize: 13, color: '#1d1d1f',
-          },
+      }, '对话 · ' + props.label, React.createElement('button', { type: 'button', className: 'dsh-media-btn', disabled: busy, onClick: function () { void bind() }, style: { marginLeft: 12 } }, '绑定专属对话'), React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: status.indexOf('未') === 0 ? '#ff3b30' : '#6e6e73' } }, status),
+      choices ? React.createElement('div', { role: 'listbox', 'aria-label': '可挂接的会话', style: { marginTop: 8, display: 'grid', gap: 6, padding: 8, borderRadius: 12, background: '#f5f5f7' } },
+        choices.error ? React.createElement('div', { role: 'status', style: { fontSize: 11.5, color: '#ff3b30' } }, choices.error) : null,
+        choices.matched.map(function (item) {
+          var notes = sessionAnnotations(item)
+          return btn({ key: item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
         }),
+        !choices.error && !choices.matched.length ? React.createElement('div', { style: { fontSize: 11.5, color: '#6e6e73' } }, '没有与本工程匹配的历史会话。') : null,
+        choices.others.length ? btn({ label: showAll ? '隐藏其他会话' : '显示全部会话（仅供诊断）', onClick: function () { setShowAll(!showAll) } }) : null,
+        showAll && choices.others.length ? React.createElement('div', { role: 'note', style: { fontSize: 11, color: '#ff3b30', lineHeight: 1.5 } }, '下面是与本工程无关的会话，仅供诊断；默认不展示，以免暴露本实例其他会话的标题。') : null,
+        showAll ? choices.others.map(function (item) {
+          var notes = sessionAnnotations(item)
+          return btn({ key: 'other-' + item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
+        }) : null,
+        btn({ label: '＋ 新建专属会话', variant: 'primary', onClick: function () { void bindSession(null) } })) : null),
+      React.createElement('div', {
+        style: { padding: '8px 16px', fontSize: 12, color: '#6e6e73' }, role: 'status',
+      },
+        '工程首次授权须本人在原生会话确认。切回编辑器会保留工程；策略禁止时保持未授权。',
         React.createElement('button', {
-          type: 'button',
-          disabled: !ready || busy, onClick: function () { void submit() },
-          style: {
-            marginTop: 8, width: '100%', padding: '10px 14px', border: 0, borderRadius: 999,
-            background: '#0071e3', color: '#ffffff', font: 'inherit', fontWeight: 500, cursor: 'pointer',
-            transition: 'background-color 180ms ' + EASE,
+          type: 'button', className: 'dsh-media-btn', disabled: !bindingRef.current || !props.getWorkspace?.(),
+          title: bindingRef.current && !props.getWorkspace?.() ? '宿主未提供原生会话导航' : '',
+          onClick: function () {
+            try { openNativeSession(props.getWorkspace?.(), bindingRef.current?.sessionId) }
+            catch (error) { setStatus(error.message) }
           },
-        }, '发送'))
-      )
+          style: { display: 'block', marginTop: 6 },
+        }, '打开原生会话 / 审批')),
+      React.createElement('div', { ref: listRef, style: { flex: 1, overflow: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 } },
+        busy && plan.length === 0 ? skeletonRows() : null,
+        !busy && plan.length === 0 ? emptyState() : null,
+        plan.map(function (item) { return renderRow(item) })),
+      composer())
     }
 
     /** Page body: editor fills the pane, conversation sits to its right. */
@@ -585,18 +1342,60 @@ window.__ModuleLoader__.load({
       return function EditorPage(props) {
         var React = require('react')
         var frameRef = React.useRef(null)
+        var widthState = React.useState(340)
+        var width = widthState[0]
+        var setWidth = widthState[1]
+        var narrowState = React.useState(typeof window !== 'undefined' ? window.innerWidth < 720 : false)
+        var narrow = narrowState[0]
+        var setNarrow = narrowState[1]
+        var draggingRef = React.useRef(null)
         var getRemote = function () {
           if (props && props.remote) return props.remote
           if (props && props.ctx) return pick(props.ctx, 'remote') || { session: pick(props.ctx, 'remote.session') }
           if (props && props.remoteSession) return { session: props.remoteSession }
           return getBoundRemote ? getBoundRemote() : null
         }
-        return React.createElement('div', { style: { display: 'flex', height: '100%', minHeight: 0, background: '#f5f5f7' } },
+        React.useEffect(function () {
+          function onResize() { setNarrow(window.innerWidth < 720) }
+          window.addEventListener('resize', onResize)
+          return function () { window.removeEventListener('resize', onResize) }
+        }, [])
+        // 分栏只改容器宽度和 iframe 的 CSS 尺寸：iframe 元素本身不换 key、不重建，
+        // 否则拖一下就丢工程。
+        function startDrag(event) {
+          if (narrow) return
+          event.preventDefault()
+          draggingRef.current = event.clientX
+          function move(moveEvent) {
+            if (draggingRef.current === null) return
+            var delta = draggingRef.current - moveEvent.clientX
+            draggingRef.current = moveEvent.clientX
+            setWidth(function (current) { return Math.max(280, Math.min(620, current + delta)) })
+          }
+          function end() {
+            draggingRef.current = null
+            window.removeEventListener('mousemove', move)
+            window.removeEventListener('mouseup', end)
+          }
+          window.addEventListener('mousemove', move)
+          window.addEventListener('mouseup', end)
+        }
+        return React.createElement('div', {
+          style: { display: 'flex', flexDirection: narrow ? 'column' : 'row', height: '100%', minHeight: 0, background: '#f5f5f7' },
+        },
           React.createElement('iframe', {
             ref: frameRef, src: entry.src, title: entry.label,
-            style: { flex: 1, border: 0, display: 'block', minWidth: 0, background: '#f5f5f7' },
+            style: { flex: 1, border: 0, display: 'block', minWidth: 0, minHeight: 0, background: '#f5f5f7' },
           }),
-          React.createElement(Conversation, { label: entry.label, kind: 'image', frameRef: frameRef, getRemote: getRemote, getWorkspace: getWorkspace, active: props?.active !== false })
+          narrow ? null : React.createElement('div', {
+            role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '拖动调整对话宽度', title: '拖动调整对话宽度',
+            onMouseDown: startDrag,
+            style: { flex: '0 0 6px', cursor: 'col-resize', background: 'transparent', boxShadow: 'inset 1px 0 0 rgba(0,0,0,.08)' },
+          }),
+          React.createElement(Conversation, {
+            label: entry.label, kind: 'image', frameRef: frameRef, getRemote: getRemote, getWorkspace: getWorkspace,
+            active: props?.active !== false, width: width, narrow: narrow,
+          })
         )
       }
     }
@@ -826,7 +1625,15 @@ window.__ModuleLoader__.load({
     exports.entries = ENTRIES
     exports.toolViewKeys = TOOL_VIEW_KEYS.slice()
     // Exposed for the contract tests; the host only consumes name/inject/apply.
-    exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody }
+    exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody,
+      // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定、定位透传、动作凭据。
+      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate, sanitizeUndo: sanitizeUndo, sanitizeExport: sanitizeExport,
+      // 静态夹具复用同一套渲染组件（docs/fixtures/dialog-fixture.html）。
+      Conversation: Conversation,
+      // 会话挂接：严格契约解析、工程标记提取、隐私过滤（纯函数，便于测试）。
+      sessionListItems: normalizeSessionItems, normalizeSessionItems: normalizeSessionItems, listSessions: listSessions,
+      sessionAnnotations: sessionAnnotations, filterSessionsForProject: filterSessionsForProject, peekProjectId: peekProjectId,
+      projectIdFromRecords: projectIdFromRecords, projectMismatch: projectMismatch }
     return module.exports
   },
 })

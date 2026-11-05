@@ -1,0 +1,376 @@
+{
+  "note": "夹具样本：probe=FDE 在 0.2.1 上抓的原文（meta 已带 commandId/appliedRevision/afterDigest/exportId/artifactRef/format/errorCode）；synthetic=仅补显式 unknown。",
+  "sourceSession": "session-c5042084-84d2-4e2b-8820-ff646401630a",
+  "generatedAt": "2026-11-05T08:01:22.539Z",
+  "version": "0.2.1",
+  "events": [
+    {
+      "type": "tool/call",
+      "seq": 19,
+      "time": 1793865648493,
+      "data": {
+        "turn": 1,
+        "step": 1,
+        "callId": "call_00_yd5jnRnf50yvJMl5Vr9g2464",
+        "name": "media_image_read_state",
+        "arguments": "{\"editorKind\": \"image\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"bind\": true}"
+      },
+      "fixtureOrigin": "probe:samples/tool/call"
+    },
+    {
+      "type": "approval/asked",
+      "seq": 20,
+      "time": 1793865648556,
+      "data": {
+        "id": "49477513-2ee3-47cd-a051-4e4d8e8f1679",
+        "toolName": "media_image_read_state",
+        "callId": "call_00_yd5jnRnf50yvJMl5Vr9g2464",
+        "reason": "Authorize this session <id:44> to read, edit and export this exact editor project. editorKind=image; documentId=0f0a0faf-030b-45e3-bac4-67899ea3ef97; instanceId=bb6aed74-ebfd-494c-b870-4136d34dab1c; pageId=bf1fe2e0-b15a-468e-ad59-4bf4146d20f2; revision=0; digest=fnv1a64-9fb1dbb7755578ab. Destructive edits still require separate approval."
+      },
+      "fixtureOrigin": "probe:samples/approval/asked"
+    },
+    {
+      "type": "approval/decided",
+      "seq": 21,
+      "time": 1793865654336,
+      "data": {
+        "id": "49477513-2ee3-47cd-a051-4e4d8e8f1679",
+        "outcome": "allowed-once"
+      },
+      "fixtureOrigin": "probe:samples/approval/decided"
+    },
+    {
+      "type": "tool/result",
+      "seq": 22,
+      "time": 1793865654475,
+      "data": {
+        "turn": 1,
+        "step": 1,
+        "message": {
+          "role": "tool",
+          "source": {
+            "kind": "tool",
+            "callId": "call_00_yd5jnRnf50yvJMl5Vr9g2464"
+          },
+          "toolCallId": "call_00_yd5jnRnf50yvJMl5Vr9g2464",
+          "content": [
+            {
+              "type": "text",
+              "text": "image · R0 · projectId 0f0a0faf-030b-45e3-bac4-67899ea3ef97 · stateDigest fnv1a64-9fb1dbb7755578ab · undo no · redo no · objects {\"editorKind\":\"image\",\"documentId\":\"0f0a0faf-030b-45e3-bac4-67899ea3ef97\",\"revision\":0,\"canvas\":{\"width\":520,\"height\":721},\"history\":{\"canUndo\":false,\"canRedo\":false,\"undoDepth\":0,\"redoDepth\":0,\"lastActionId\":\"unknown\"},\"selectedLayerId\":\"1\",\"selectedObjects\":[{\"id\":\"1\",\"kind\":\"empty\",\"textSummary\":null,\"propsSummary\":{\"name\":\"Animation #1\"},\"transform\":{\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0},\"visible\":true,\"zIndex\":0}],\"layers\":[{\"id\":\"1\",\"name\":\"Animation #1\",\"type\":\"empty\",\"visible\":true,\"x\":0,\"y\":0,\"width\":null,\"height\":null,\"rotationDeg\":0}],\"layersCount\":1,\"layersTruncated\":false}"
+            }
+          ],
+          "isError": false,
+          "id": "4a1080db-f888-4e1a-80aa-b510771b46ff"
+        },
+        "meta": {
+          "status": "applied",
+          "editorKind": "image",
+          "projectId": "0f0a0faf-030b-45e3-bac4-67899ea3ef97",
+          "stateDigest": "fnv1a64-9fb1dbb7755578ab",
+          "appliedRevision": 0
+        }
+      },
+      "sourceEventSeqs": [
+        19
+      ],
+      "surfaceOp": "append",
+      "fixtureOrigin": "probe:samples/tool/result"
+    },
+    {
+      "type": "tool/call",
+      "seq": 27,
+      "time": 1793865656887,
+      "data": {
+        "turn": 1,
+        "step": 2,
+        "callId": "call_00_jRDXzQ0vAVqxXOLZeo128268",
+        "name": "media_image_apply_command",
+        "arguments": "{\"editorKind\": \"image\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"commandId\": \"fde-021-step2-addtext-01\", \"expectedRevision\": 0, \"operation\": \"layer.add_text\", \"mode\": \"assist\", \"params\": {\"text\": \"FDE 0.2.1 验收\"}}"
+      },
+      "fixtureOrigin": "probe:samples/tool/call"
+    },
+    {
+      "type": "tool/result",
+      "seq": 28,
+      "time": 1793865657452,
+      "data": {
+        "turn": 1,
+        "step": 2,
+        "message": {
+          "role": "tool",
+          "source": {
+            "kind": "tool",
+            "callId": "call_00_jRDXzQ0vAVqxXOLZeo128268"
+          },
+          "toolCallId": "call_00_jRDXzQ0vAVqxXOLZeo128268",
+          "content": [
+            {
+              "type": "text",
+              "text": "applied · fde-021-step2-addtext-01 · R1"
+            }
+          ],
+          "isError": false,
+          "id": "15f128b6-df44-46ab-a25f-9b70053b7639"
+        },
+        "meta": {
+          "operation": "layer.add_text",
+          "status": "applied",
+          "editorKind": "image",
+          "projectId": "0f0a0faf-030b-45e3-bac4-67899ea3ef97",
+          "stateDigest": "fnv1a64-541b9dfeaf6c5f70",
+          "auditRef": "audit-fde-021-step2-addtext-01",
+          "commandId": "fde-021-step2-addtext-01",
+          "appliedRevision": 1,
+          "afterDigest": "fnv1a64-541b9dfeaf6c5f70"
+        }
+      },
+      "sourceEventSeqs": [
+        27
+      ],
+      "surfaceOp": "append",
+      "fixtureOrigin": "probe:samples/tool/result"
+    },
+    {
+      "type": "tool/call",
+      "seq": 39,
+      "time": 1793865658932,
+      "data": {
+        "turn": 1,
+        "step": 3,
+        "callId": "call_00_iZD01HIZ87wHmXvncAwl9807",
+        "name": "media_image_apply_command",
+        "arguments": "{\"commandId\": \"fde-021-step3-conflict-probe-01\", \"editorKind\": \"image\", \"expectedRevision\": 0, \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"mode\": \"assist\", \"operation\": \"layer.add_text\", \"params\": {\"text\": \"FDE 0.2.1 验收\"}, \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\"}"
+      },
+      "fixtureOrigin": "probe:samples/tool/call"
+    },
+    {
+      "type": "tool/result",
+      "seq": 40,
+      "time": 1793865658990,
+      "data": {
+        "turn": 1,
+        "step": 3,
+        "message": {
+          "role": "tool",
+          "source": {
+            "kind": "tool",
+            "callId": "call_00_iZD01HIZ87wHmXvncAwl9807"
+          },
+          "toolCallId": "call_00_iZD01HIZ87wHmXvncAwl9807",
+          "content": [
+            {
+              "type": "text",
+              "text": "rejected · fde-021-step3-conflict-probe-01 · R1 · REVISION_CONFLICT"
+            }
+          ],
+          "isError": false,
+          "id": "b6545419-fe82-4bc4-868b-2398544a6fa8"
+        },
+        "meta": {
+          "operation": "layer.add_text",
+          "status": "rejected",
+          "editorKind": "image",
+          "stateDigest": "fnv1a64-541b9dfeaf6c5f70",
+          "commandId": "fde-021-step3-conflict-probe-01",
+          "appliedRevision": 1,
+          "errorCode": "REVISION_CONFLICT"
+        }
+      },
+      "sourceEventSeqs": [
+        39
+      ],
+      "surfaceOp": "append",
+      "fixtureOrigin": "probe:samples/tool/result"
+    },
+    {
+      "type": "tool/call",
+      "seq": 48,
+      "time": 1793865661711,
+      "data": {
+        "turn": 1,
+        "step": 4,
+        "callId": "call_00_TfCqIiDf8dJQ4RqJ2eMT7846",
+        "name": "media_image_export_start",
+        "arguments": "{\"commandId\": \"fde-021-step4-export-png-01\", \"editorKind\": \"image\", \"expectedRevision\": 1, \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\", \"format\": \"png\"}"
+      },
+      "fixtureOrigin": "probe:samples/tool/call"
+    },
+    {
+      "type": "tool/result",
+      "seq": 49,
+      "time": 1793865661924,
+      "data": {
+        "turn": 1,
+        "step": 4,
+        "message": {
+          "role": "tool",
+          "source": {
+            "kind": "tool",
+            "callId": "call_00_TfCqIiDf8dJQ4RqJ2eMT7846"
+          },
+          "toolCallId": "call_00_TfCqIiDf8dJQ4RqJ2eMT7846",
+          "content": [
+            {
+              "type": "text",
+              "text": "applied · fde-021-step4-export-png-01 · R1 · exportId 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · artifactRef blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
+            }
+          ],
+          "isError": false,
+          "id": "653051da-0818-426b-8029-8559566195bc"
+        },
+        "meta": {
+          "status": "applied",
+          "editorKind": "image",
+          "projectId": "0f0a0faf-030b-45e3-bac4-67899ea3ef97",
+          "stateDigest": "fnv1a64-541b9dfeaf6c5f70",
+          "commandId": "fde-021-step4-export-png-01",
+          "appliedRevision": 1,
+          "exportId": "6fc84fc2-3c0e-4204-b949-f7cd2eaa0287",
+          "artifactRef": "blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082",
+          "format": "png"
+        }
+      },
+      "sourceEventSeqs": [
+        48
+      ],
+      "surfaceOp": "append",
+      "fixtureOrigin": "probe:samples/tool/result"
+    },
+    {
+      "type": "tool/call",
+      "seq": 54,
+      "time": 1793865663367,
+      "data": {
+        "turn": 1,
+        "step": 5,
+        "callId": "call_00_oQITkVJTOuAbp64YlOr60428",
+        "name": "media_image_export_status",
+        "arguments": "{\"editorKind\": \"image\", \"exportId\": \"6fc84fc2-3c0e-4204-b949-f7cd2eaa0287\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\"}"
+      },
+      "fixtureOrigin": "probe:samples/tool/call"
+    },
+    {
+      "type": "tool/result",
+      "seq": 55,
+      "time": 1793865663549,
+      "data": {
+        "turn": 1,
+        "step": 5,
+        "message": {
+          "role": "tool",
+          "source": {
+            "kind": "tool",
+            "callId": "call_00_oQITkVJTOuAbp64YlOr60428"
+          },
+          "toolCallId": "call_00_oQITkVJTOuAbp64YlOr60428",
+          "content": [
+            {
+              "type": "text",
+              "text": "applied · 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · exportId 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · artifactRef blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
+            }
+          ],
+          "isError": false,
+          "id": "eaaf1dd2-9ecf-435a-aa22-506289ad60e2"
+        },
+        "meta": {
+          "status": "applied",
+          "editorKind": "image",
+          "exportId": "6fc84fc2-3c0e-4204-b949-f7cd2eaa0287",
+          "artifactRef": "blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
+        }
+      },
+      "sourceEventSeqs": [
+        54
+      ],
+      "surfaceOp": "append",
+      "fixtureOrigin": "probe:samples/tool/result"
+    },
+    {
+      "type": "tool/call",
+      "seq": 60,
+      "time": 1793865666622,
+      "data": {
+        "turn": 1,
+        "step": 6,
+        "callId": "call_00_Pa19hfzujYO6YRY77f9s9427",
+        "name": "media_image_export_status",
+        "arguments": "{\"editorKind\": \"image\", \"exportId\": \"6fc84fc2-3c0e-4204-b949-f7cd2eaa0287\", \"instanceId\": \"bb6aed74-ebfd-494c-b870-4136d34dab1c\", \"projectId\": \"0f0a0faf-030b-45e3-bac4-67899ea3ef97\"}"
+      },
+      "fixtureOrigin": "probe:samples/tool/call"
+    },
+    {
+      "type": "tool/result",
+      "seq": 61,
+      "time": 1793865666858,
+      "data": {
+        "turn": 1,
+        "step": 6,
+        "message": {
+          "role": "tool",
+          "source": {
+            "kind": "tool",
+            "callId": "call_00_Pa19hfzujYO6YRY77f9s9427"
+          },
+          "toolCallId": "call_00_Pa19hfzujYO6YRY77f9s9427",
+          "content": [
+            {
+              "type": "text",
+              "text": "applied · 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · exportId 6fc84fc2-3c0e-4204-b949-f7cd2eaa0287 · artifactRef blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
+            }
+          ],
+          "isError": false,
+          "id": "8061e155-e18c-44cb-88c3-6da1461fd2d4"
+        },
+        "meta": {
+          "status": "applied",
+          "editorKind": "image",
+          "exportId": "6fc84fc2-3c0e-4204-b949-f7cd2eaa0287",
+          "artifactRef": "blob:http://127.0.0.1:59302/8285894f-abf6-4dd7-956a-045d1b628082"
+        }
+      },
+      "sourceEventSeqs": [
+        60
+      ],
+      "surfaceOp": "append",
+      "fixtureOrigin": "probe:samples/tool/result"
+    },
+    {
+      "type": "tool/call",
+      "seq": 900,
+      "time": 1793865846673,
+      "data": {
+        "turn": 9,
+        "step": 1,
+        "callId": "call-fixture-unknown",
+        "name": "media_image_apply_command",
+        "arguments": "{}"
+      },
+      "fixtureOrigin": "synthetic:explicit-unknown"
+    },
+    {
+      "type": "tool/result",
+      "seq": 901,
+      "time": 1793865846674,
+      "data": {
+        "turn": 9,
+        "step": 1,
+        "message": {
+          "role": "tool",
+          "toolCallId": "call-fixture-unknown",
+          "isError": false,
+          "content": [
+            {
+              "type": "text",
+              "text": "unknown · 结果未知"
+            }
+          ]
+        },
+        "meta": {
+          "status": "unknown",
+          "operation": "layer.add_text"
+        }
+      },
+      "fixtureOrigin": "synthetic:explicit-unknown"
+    }
+  ]
+}

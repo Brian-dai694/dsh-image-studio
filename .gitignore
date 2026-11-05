@@ -5,3 +5,6 @@ dist/*.map
 plugin/dist/*.tgz
 .DS_Store
 Thumbs.db
+
+# 本地诊断脚本与静态服务日志，不入库
+.qa/
