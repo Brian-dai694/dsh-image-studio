@@ -74,7 +74,29 @@ $('editor').addEventListener('load', () => {
 });
 // Parent client can read identity, never dispatch writes through this channel.
 window.addEventListener('message', async event => {
-  if (event.origin !== location.origin || event.source !== parent || event.data?.type !== 'media.binding.read') return;
+  if (event.origin !== location.origin || event.source !== parent || typeof event.data?.type !== 'string') return;
+  // Real save entry for an agent export: the Host keeps only a synthetic artifact ref, so the
+  // file can only be produced here, inside the page that holds the editor.
+  if (event.data.type === 'media.export.download') {
+    const requestId = event.data.requestId, format = event.data.format === 'jpeg' ? 'jpeg' : 'png';
+    try {
+      const connection = await connect();
+      const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+      const result = await transport.request({
+        type: 'editor.export_start', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
+        documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(), format,
+      });
+      if (!result || result.status !== 'completed' || !result.artifactRef) throw new Error('导出未完成，无法保存');
+      const link = document.createElement('a');
+      link.href = result.artifactRef; link.download = 'image.' + (format === 'jpeg' ? 'jpg' : 'png');
+      link.click();
+      parent.postMessage({ type: 'media.export.result', requestId, ok: true, artifactRef: result.artifactRef, bytes: result.bytes ?? null }, location.origin);
+    } catch (error) {
+      parent.postMessage({ type: 'media.export.result', requestId, ok: false, error: error.message }, location.origin);
+    }
+    return;
+  }
+  if (event.data.type !== 'media.binding.read') return;
   const requestId = event.data.requestId;
   try {
     const connection = await connect();
