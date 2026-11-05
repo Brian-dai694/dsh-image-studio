@@ -406,8 +406,13 @@ window.__ModuleLoader__.load({
         var key = row && row.id ? row.id : 'row-' + Math.random().toString(16).slice(2)
         if (!row || typeof row !== 'object') return { key: key, kind: 'assistant', badge: null, blocks: [{ kind: 'paragraph', text: '' }], actions: [] }
         if (row.role === 'approval') {
+          // 审批也只显示四态：允许一次=applied；拒绝/取消=rejected；不可用或结果未知=unknown。
+          // 三态之外没有第五种，也不提供任何"代为作答"的入口。
+          var approvalBadge = !row.decided ? 'pending'
+            : row.outcome === 'allowed-once' ? 'applied'
+            : row.outcome === 'rejected' || row.outcome === 'cancelled' ? 'rejected' : 'unknown'
           return {
-            key: key, kind: 'approval', badge: row.decided ? 'applied' : 'pending', tone: row.decided ? 'muted' : 'warn',
+            key: key, kind: 'approval', badge: approvalBadge, tone: approvalBadge === 'rejected' ? 'error' : approvalBadge === 'pending' ? 'warn' : 'muted',
             title: row.title || (row.decided ? '审批结果' : '等待本人在原生会话确认'),
             blocks: [{ kind: 'paragraph', text: row.text || '审批状态来自原生会话，本面板只显示状态，不代为作答。' }],
             // 审批永远只给"打开原生会话"：没有可提交的按钮，避免伪造授权入口。
@@ -482,7 +487,7 @@ window.__ModuleLoader__.load({
           } else if (e.type === 'approval/asked') {
             rows.push({ id: 'event-'+e.seq, role: 'approval', text: '等待本人在原生会话确认审批：' + (d.toolName || '') + (d.reason ? '\n' + (typeof d.reason === 'string' ? d.reason : JSON.stringify(d.reason)) : '') })
           } else if (e.type === 'approval/decided') {
-            rows.push({ id: 'event-'+e.seq, role: 'approval', decided: true, text: approvalText(d.outcome) })
+            rows.push({ id: 'event-'+e.seq, role: 'approval', decided: true, outcome: d.outcome, text: approvalText(d.outcome) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
             var isCall = e.type === 'tool/call'
             rows.push({ id: 'event-'+e.seq, role: 'tool', card: toolCard(d, isCall), issue: isCall ? null : resultIssue(d, 0), exportRef: isCall ? null : exportEvidence(d, 0), undo: !isCall && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: '' })
@@ -824,7 +829,9 @@ window.__ModuleLoader__.load({
             padding: '9px 12px', borderRadius: 14, fontSize: 13, lineHeight: 1.5,
             background: mine ? '#0071e3' : '#f5f5f7', color: mine ? '#ffffff' : '#1d1d1f', wordBreak: 'break-word',
           },
-        }, blocks(item.blocks))
+        }, blocks(item.blocks),
+        item.diagnostic ? btn({ label: '复制诊断信息', style: { marginTop: 8, background: 'rgba(255,255,255,.16)', color: mine ? '#ffffff' : '#0071e3' },
+          onClick: function () { copyText(item.diagnostic, '已复制这条消息的诊断信息') } }) : null)
       }
 
       function skeletonRows() {

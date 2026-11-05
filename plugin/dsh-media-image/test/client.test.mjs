@@ -451,13 +451,16 @@ test('dialog plan maps every message kind and never carries raw JSON into the vi
     { id: 't3', role: 'tool', card: { name: '读取工程', status: 'rejected', revision: null, line: '', error: true } },
     { id: 't4', role: 'tool', card: { name: '执行编辑', status: '', revision: null, line: '' } },
     { id: 'v1', role: 'approval', text: '等待本人在原生会话确认审批：media_image_read_state' },
-    { id: 'v2', role: 'approval', decided: true, text: '审批已拒绝（也可能由 never 策略自动拒绝），本次请求未获授权。' },
+    { id: 'v2', role: 'approval', decided: true, outcome: 'rejected', text: '审批已拒绝（也可能由 never 策略自动拒绝），本次请求未获授权。' },
+    { id: 'v3', role: 'approval', decided: true, outcome: 'unavailable', text: '原生审批不可用或没有可回答的界面，本次请求未获授权。' },
     { id: 'e1', role: 'error', text: '{"error":{"code":"REVISION_CONFLICT"}}' },
     { id: 'raw1', role: 'assistant', text: '{"quite":"a long raw json body that must not reach the dom at all","n":1}' },
   ]);
-  assert.deepEqual(plan.map(item => item.kind), ['user', 'assistant', 'tool', 'tool', 'tool', 'tool', 'approval', 'approval', 'error', 'assistant']);
+  assert.deepEqual(plan.map(item => item.kind), ['user', 'assistant', 'tool', 'tool', 'tool', 'tool', 'approval', 'approval', 'approval', 'error', 'assistant']);
   // 四态徽标：unknown 单独一态，不能画成失败
   assert.deepEqual(plan.slice(2, 6).map(item => item.badge), ['applied', 'unknown', 'rejected', 'pending']);
+  // 审批也收敛到四态：pending / rejected / unknown（unavailable 不冒充拒绝）
+  assert.deepEqual(plan.filter(item => item.kind === 'approval').map(item => item.badge), ['pending', 'rejected', 'unknown']);
   // 审批只读：唯一动作是打开原生会话，没有任何"允许/拒绝"按钮
   for (const item of plan.filter(entry => entry.kind === 'approval')) {
     assert.deepEqual(item.actions.map(action => action.kind), ['open-native']);
