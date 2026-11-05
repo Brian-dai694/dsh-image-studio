@@ -124,9 +124,6 @@ export function createGuard() {
     if (args.editorKind !== undefined && args.editorKind !== expectedKind) {
       return `${name} targets the ${expectedKind} editor; editorKind="${String(args.editorKind)}" is not accepted.`;
     }
-    if (expectedKind === 'video' && name === 'media_video_apply_command' && typeof args.operation === 'string' && !args.operation.startsWith('media.video.')) {
-      return 'media_video_apply_command accepts only media.video.* operations.';
-    }
     if (expectedKind === 'image' && name === 'media_image_apply_command' && typeof args.operation === 'string' && !['layer.', 'canvas.', 'history.'].some(prefix => args.operation.startsWith(prefix))) {
       return 'media_image_apply_command accepts only layer.* operations, canvas.* or history.* operations.';
     }

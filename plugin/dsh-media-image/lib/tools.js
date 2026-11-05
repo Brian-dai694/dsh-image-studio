@@ -1,4 +1,4 @@
-// The eight model-facing tools: three per editor plus the asynchronous video export pair.
+// The five model-facing image tools: read, apply, query plus the export start/status pair.
 // Parameters are the 0.2.x schema DSL (property table), not raw JSON Schema.
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { MediaBridgeError } from './bridge.js';
@@ -18,7 +18,7 @@ const RESULT_SCHEMA = {
   properties: {
     status: { type: 'string', required: true, enum: ['applied', 'rejected', 'pending', 'unknown'] },
     commandId: { type: 'string', required: true },
-    editorKind: { type: 'string', enum: ['image', 'video'] },
+    editorKind: { type: 'string', enum: ['image'] },
     projectId: { type: 'string' },
     revision: { type: 'integer' },
     stateDigest: { type: 'string' },
@@ -43,7 +43,7 @@ const RESULT_SCHEMA = {
 };
 
 const READ_PARAMS = {
-  editorKind: { type: 'string', enum: ['image', 'video'], description: 'Editor family; must match the tool.' },
+  editorKind: { type: 'string', enum: ['image'], description: 'Editor family; must match the tool.' },
   instanceId: { type: 'string', required: true, description: 'Connected editor instance id reported by the page.' },
   projectId: { type: 'string', required: true, description: 'Explicit project id from the editor panel; omission is rejected.' },
   bind: { type: 'boolean', description: 'First call only: true requests native human approval to bind this real session to this exact editor/page/project. Never bypass approval; subsequent calls omit bind.' },
@@ -51,7 +51,6 @@ const READ_PARAMS = {
 
 const OPERATION_CONTRACT = {
   image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic}}; layer.update_text {layerId,text}; layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
-  video: 'All times are integer microseconds: 1 second = 1000000. Never use startTime/duration. media.video.clip.add {sourceRef,startUs,inUs,outUs} (approval); media.video.clip.trim {clipId,inUs?,outUs?}, omitted boundary is preserved; media.video.clip.move {clipId,startUs}; media.video.clip.remove {clipId} (approval); media.video.overlay.add {kind:"text",text,startUs,durationUs} or {kind:"image",sourceRef,startUs,durationUs}; media.video.overlay.update {overlayId,text?,startUs?,durationUs?,visible?}; media.video.history.undo {} / media.video.history.redo {}. Read state for sourceRef/clipId/overlayId; never invent them.',
 };
 
 const WRITE_PARAMS = kind => ({
@@ -61,14 +60,14 @@ const WRITE_PARAMS = kind => ({
   commandId: { type: 'string', required: true, description: 'Idempotency key; a repeat returns the first outcome.' },
   expectedRevision: { type: 'integer', required: true, description: 'Revision from the latest read_state.' },
   mode: { type: 'string', enum: ['assist', 'autonomous'], description: 'assist writes directly for low risk; autonomous needs a plugin capability.' },
-  operation: { type: 'string', required: true, description: kind === 'video' ? 'media.video.* operation name.' : 'layer.* operation name.' },
+  operation: { type: 'string', required: true, description: 'layer.* or canvas.* or history.* operation name.' },
   targets: { type: 'array', items: { type: 'string' }, description: 'Affected object ids for the audit summary.' },
   params: { type: 'json', description: OPERATION_CONTRACT[kind] },
   approvalId: { type: 'string', description: 'Only for high-risk writes: the id returned by the earlier pending result.' },
 });
 
 const QUERY_PARAMS = {
-  editorKind: { type: 'string', enum: ['image', 'video'] },
+  editorKind: { type: 'string', enum: ['image'] },
   instanceId: { type: 'string', required: true },
   commandId: { type: 'string', required: true, description: 'The original commandId to query.' },
   projectId: { type: 'string', required: true, description: 'Explicit Host-bound project id.' },
@@ -80,9 +79,7 @@ const EXPORT_START_PARAMS = kind => ({
   instanceId: { type: 'string', required: true },
   commandId: { type: 'string', required: true, description: 'Idempotency key for the export request.' },
   expectedRevision: { type: 'integer', required: true, description: 'The exported artifact is traceable to this revision.' },
-  format: kind === 'image'
-    ? { type: 'string', required: true, enum: ['png', 'jpeg'] }
-    : { type: 'string', required: true, enum: ['webm', 'mp4'], description: 'mp4 stays unknown until runtime encoding is proven.' },
+  format: { type: 'string', required: true, enum: ['png', 'jpeg'] },
 });
 
 const EXPORT_STATUS_PARAMS = kind => ({
@@ -186,7 +183,7 @@ export function toLosslessJson(value) {
   return null;
 }
 
-export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (kind, instanceId) => (kind === 'image' ? bridge : null)?.getPage?.(instanceId) ?? null }) }) {
+export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }) }) {
   const appliedCommands = new Map();
   const verify = async (kind, bridge, args, exec) => {
     const binding = bindings.assert(exec, kind, args);
