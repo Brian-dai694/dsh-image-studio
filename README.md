@@ -13,6 +13,35 @@
 
 不是把编辑器塞进聊天窗口，也不是给 Agent 开个后门直改文件：**只有一份原生工程状态，人机共用一条受控命令通道。**
 
+## 对话框静态夹具（NON-RUNTIME，不是验收）
+
+`docs/fixtures/dialog-fixture.html` 是一个可重复运行的**静态夹具**：它喂样例「会话事件」给真实的
+`makeTranscript → buildDialogPlan → Conversation`，因此渲染路径与线上一致，只差数据来源。
+它**没有连接任何 DSH 会话**，不代表运行时行为，**不计入验收通过**。
+
+覆盖：用户消息、助手 Markdown（标题/列表/代码块/行内代码/引用/链接/内联图片）、助手流式增量、
+工具卡片四态（`applied` / `rejected` / `unknown` / `pending`）、审批四态、会话错误、裸 JSON 兜底
+（「这一步已执行（无法解析摘要）」+ 仅剪贴板诊断）、三种空状态（未绑定 / 已绑定无消息 / 解析失败）。
+
+离线复现步骤（仓库根目录执行）：
+
+```bash
+# 1) 只装开发依赖：react / react-dom 固定 18.3.1（与宿主同版本，package-lock.json 已提交）
+cd plugin/dsh-media-image && npm ci && cd ../..
+
+# 2) 在仓库根目录起任意静态服务（示例用 Python 自带模块，不需要联网）
+python -m http.server 8819
+
+# 3) 打开
+#    http://127.0.0.1:8819/docs/fixtures/dialog-fixture.html
+```
+
+`react-dom` 只在 `devDependencies` 里，`npm pack` 产物不含 `docs/`、`node_modules/` 或任何夹具文件
+（`npm pack --dry-run --json` 可自证）。截图见
+[top](docs/screenshots/image-chat-fixture-top.png) · [tools](docs/screenshots/image-chat-fixture-tools.png) ·
+[bottom](docs/screenshots/image-chat-fixture-bottom.png) · [empty](docs/screenshots/image-chat-fixture-empty.png)，
+全部标注 **non-runtime**。
+
 ## 为什么不是「截个图让 AI 改」
 
 图片编辑最难的不是生图，是**改完之后人和 AI 谁的版本算数**。三条硬约束：

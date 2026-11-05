@@ -37,5 +37,9 @@
     "test": "node --test test/*.test.mjs",
     "sync-version": "node scripts/gen-version.mjs",
     "pack:image": "node scripts/pack-image.mjs"
+  },
+  "devDependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   }
 }

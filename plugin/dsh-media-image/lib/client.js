@@ -281,7 +281,7 @@ window.__ModuleLoader__.load({
         else if (payload.documentId) line = '工程 ' + String(payload.documentId).slice(0, 8)
         else if (payload.layersCount !== undefined) line = payload.layersCount + ' 个图层'
       }
-      return { name: name, status: status || (isCall ? 'running' : 'unknown'), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
+      return { name: name, status: status || (isCall ? 'running' : (errorCode ? 'rejected' : 'unknown')), revision: Number.isSafeInteger(revision) ? revision : null, line: line, error: !!errorCode }
     }
     // ---------- 对话框 v1：纯函数层 ----------
     //
@@ -538,6 +538,11 @@ window.__ModuleLoader__.load({
             rows.push({ id: 'event-'+e.seq, role: 'approval', text: '等待本人在原生会话确认审批：' + (d.toolName || '') + (d.reason ? '\n' + (typeof d.reason === 'string' ? d.reason : JSON.stringify(d.reason)) : '') })
           } else if (e.type === 'approval/decided') {
             rows.push({ id: 'event-'+e.seq, role: 'approval', decided: true, outcome: d.outcome, text: approvalText(d.outcome) })
+          } else if (e.type === 'error' || /\/error$/.test(e.type)) {
+            // 会话级错误：只取一句可读文本，原始结构（code/stack）不进界面。
+            var failure = d.message || d.error || {}
+            var failureText = typeof failure === 'string' ? failure : (failure.message || failure.code || '操作没有完成')
+            rows.push({ id: 'event-'+e.seq, role: 'error', text: String(failureText) })
           } else if (e.type === 'tool/call' || e.type === 'tool/result') {
             var isCall = e.type === 'tool/call'
             rows.push({ id: 'event-'+e.seq, role: 'tool', card: toolCard(d, isCall), issue: isCall ? null : resultIssue(d, 0), exportRef: isCall ? null : exportEvidence(d, 0), undo: !isCall && !resultIssue(d, 0) ? undoEvidence(d, 0) : null, text: '' })
@@ -1272,7 +1277,9 @@ window.__ModuleLoader__.load({
     // Exposed for the contract tests; the host only consumes name/inject/apply.
     exports.chat = { undoPrompt: undoPrompt, resultIssue: resultIssue, exportEvidence: exportEvidence, toolCard: toolCard, watchPanel: watchPanel, retainedVisible: retainedVisible, retainedOverlayId: RETAINED_OVERLAY_ID, measureRect: measureRect, resolveAnchor: resolveAnchor, isEditorPanel: isEditorPanel, releaseHiddenFocus: releaseHiddenFocus, makePage: makePage, openNativeSession: openNativeSession, approvalText: approvalText, makeTranscript: makeTranscript, bindingKey: bindingKey, sendPrompt: sendPrompt, textOfEvent: textOfEvent, followSession: followSession, promptBody: promptBody,
       // 对话框 v1 纯函数层：消息映射、Markdown、附件、重试判定、定位透传、动作凭据。
-      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate, sanitizeUndo: sanitizeUndo, sanitizeExport: sanitizeExport }
+      buildDialogPlan: buildDialogPlan, parseMarkdownBlocks: parseMarkdownBlocks, parseInlineTokens: parseInlineTokens, attachmentFromDataUrl: attachmentFromDataUrl, retryState: retryState, normalizeToolStatus: normalizeToolStatus, looksLikeRawJson: looksLikeRawJson, isJsonStructure: isJsonStructure, isRawPayload: isRawPayload, sanitizeLocate: sanitizeLocate, sanitizeUndo: sanitizeUndo, sanitizeExport: sanitizeExport,
+      // 静态夹具复用同一套渲染组件（docs/fixtures/dialog-fixture.html）。
+      Conversation: Conversation }
     return module.exports
   },
 })

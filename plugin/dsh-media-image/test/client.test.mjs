@@ -422,6 +422,19 @@ test('tool cards show fields instead of the raw JSON body', async () => {
   assert.match(failed, /版本已变化/);
 });
 
+test('an empty status with an error code defaults to rejected, not unknown', async () => {
+  const client = await loadClient();
+  // 静态夹具暴露过的缺陷：回执只有 error.code、没有 status 时，卡片曾被默认成 unknown，
+  // 让"未执行"看起来像"结果未知"，而两者在重放语义上完全不同。
+  const card = client.chat.toolCard({ toolName: 'media_image_apply_command', result: { revision: 3, error: { code: 'REVISION_CONFLICT' } } }, false);
+  assert.equal(card.status, 'rejected');
+  assert.equal(card.error, true);
+  const plan = client.chat.buildDialogPlan([{ id: 't1', role: 'tool', card }]);
+  assert.equal(plan[0].badge, 'rejected');
+  const plain = client.chat.toolCard({ toolName: 'media_image_apply_command', result: { revision: 4 } }, false);
+  assert.equal(plain.status, 'unknown', '没有明确结果、也没有错误码时仍然是 unknown');
+});
+
 test('a missing slots service degrades instead of throwing', async () => {
   const client = await loadClient();
   assert.doesNotThrow(() => client.apply({ inject() { throw new Error('no services'); } }));
