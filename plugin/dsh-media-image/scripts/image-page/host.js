@@ -497,4 +497,74 @@ $('font-register')?.addEventListener('click', async () => {
   }
 });
 
-window.addEventListener('pagehide', () => { stopPolling(); void relay?.stop(); });
+// ── 批量面板：一行一条提示词，逐项状态可见 ──
+let batchTimer = null;
+let currentBatchId = null;
+
+function renderBatch(batch) {
+  const list = $('batch-list');
+  if (!list) return;
+  list.textContent = '';
+  for (const item of batch.items) {
+    const row = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = `#${item.index + 1} ${item.prompt.slice(0, 28)}${item.prompt.length > 28 ? '…' : ''}`;
+    const pill = document.createElement('span');
+    pill.className = `pill ${item.status}`;
+    pill.textContent = item.assetRef ? `${item.status} · ${item.assetRef.slice(0, 12)}…` : item.status;
+    row.append(label, pill);
+    list.append(row);
+  }
+}
+
+async function pollBatch(batchId) {
+  try {
+    const value = await api(`/media-image/generate/batch/${encodeURIComponent(batchId)}`);
+    const batch = value.batch;
+    setPill('batch-pill', batch.status);
+    renderBatch(batch);
+    const { succeeded, failed, unknown, queued, running } = batch.counts;
+    $('batch-status').textContent = `成功 ${succeeded} · 失败 ${failed} · 未知 ${unknown} · 进行中 ${running + queued}`;
+    if (batch.status === 'running') {
+      batchTimer = setTimeout(() => void pollBatch(batchId), 1500);
+    } else {
+      batchTimer = null;
+      if (failed > 0) $('batch-status').textContent += '（失败项需重新提交，不会自动重试）';
+    }
+  } catch (error) {
+    setPill('batch-pill', 'unknown');
+    $('batch-status').textContent = `${error.code || 'BATCH_POLL_FAILED'}：${error.message}`;
+    batchTimer = setTimeout(() => void pollBatch(batchId), 2500);
+  }
+}
+
+$('batch-submit')?.addEventListener('click', async () => {
+  const provider = $('gen-provider')?.value;
+  const prompts = ($('batch-prompts')?.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  if (!provider) { $('batch-status').textContent = '先在上方「生成」面板选一个后端。'; return; }
+  if (!prompts.length) { $('batch-status').textContent = '至少写一条提示词。'; return; }
+  if (batchTimer !== null) { clearTimeout(batchTimer); batchTimer = null; }
+  setPill('batch-pill', 'queued');
+  try {
+    const value = await api('/media-image/generate/batch', {
+      method: 'POST',
+      body: { provider, prompts, width: Number($('gen-width')?.value) || undefined, height: Number($('gen-height')?.value) || undefined },
+    });
+    currentBatchId = value.batch.batchId;
+    setPill('batch-pill', value.batch.status);
+    renderBatch(value.batch);
+    $('batch-status').textContent = `已提交 ${value.batch.items.length} 条 · batchId=${value.batch.batchId}`;
+    batchTimer = setTimeout(() => void pollBatch(currentBatchId), 1200);
+  } catch (error) {
+    setPill('batch-pill', 'failed');
+    $('batch-status').textContent = `${error.code || 'BATCH_SUBMIT_FAILED'}：${error.message}`;
+  }
+});
+
+$('batch-refresh')?.addEventListener('click', () => {
+  if (!currentBatchId) { $('batch-status').textContent = '还没有批次。'; return; }
+  if (batchTimer !== null) { clearTimeout(batchTimer); batchTimer = null; }
+  void pollBatch(currentBatchId);
+});
+
+window.addEventListener('pagehide', () => { if (batchTimer !== null) clearTimeout(batchTimer); stopPolling(); void relay?.stop(); });

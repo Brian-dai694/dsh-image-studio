@@ -315,6 +315,31 @@ async function handleGenerate(req, res, { generation, token, prefix, pathname })
   return true;
 }
 
+async function handleBatch(req, res, { batchQueue, token, prefix, pathname }) {
+  const base = `${prefix}/generate/batch`;
+  const batchId = pathname.startsWith(`${base}/`) ? pathname.slice(base.length + 1) : '';
+  const rejection = authorizeSameOrigin(req, token, batchId ? ['GET'] : ['GET', 'POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!batchQueue) { send(res, 501, { code: 'PROVIDER_UNAVAILABLE', message: 'This deployment has no generation backends configured.' }); return true; }
+  if (!batchId && req.method === 'GET') { send(res, 200, { ok: true, batches: batchQueue.list() }); return true; }
+  if (!batchId) {
+    const body = await readJsonBody(req).catch(() => null);
+    if (!body || typeof body !== 'object') { send(res, 400, { code: 'INVALID_REQUEST', message: 'JSON body is required.' }); return true; }
+    try {
+      send(res, 202, { ok: true, batch: await batchQueue.submit(body) });
+    } catch (error) {
+      send(res, error?.code === 'BATCH_BUSY' ? 429 : 400, { code: error.code || 'INVALID_REQUEST', message: error.message });
+    }
+    return true;
+  }
+  try {
+    send(res, 200, { ok: true, batch: await batchQueue.status(batchId) });
+  } catch (error) {
+    send(res, error?.code === 'BATCH_NOT_FOUND' ? 404 : 502, { code: error.code || 'BATCH_FAILED', message: error.message });
+  }
+  return true;
+}
+
 const generationStatus = error => error?.code === 'JOB_NOT_FOUND' ? 404
   : error?.code === 'INVALID_REQUEST' || error?.code === 'PROVIDER_UNKNOWN' ? 400
     : error?.code === 'PROVIDER_UNAVAILABLE' ? 501
@@ -335,7 +360,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, remoteFetch = undefined }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, remoteFetch = undefined }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const assetsPrefix = `${prefix}/assets/`;
@@ -364,6 +389,10 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
       return handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch });
     }
     if (pathname === `${prefix}/generate` || pathname.startsWith(`${prefix}/generate/`)) {
+      // 批量路由必须在单作业路由之前匹配，否则 /generate/batch 会被当成 jobId。
+      if (pathname === `${prefix}/generate/batch` || pathname.startsWith(`${prefix}/generate/batch/`)) {
+        return handleBatch(req, res, { batchQueue, token, prefix, pathname });
+      }
       return handleGenerate(req, res, { generation, token, prefix, pathname });
     }
     if (pathname.startsWith(relayPrefix)) return handleRelay(req, res, { relay, prefix: relayPrefix, token, pathname });

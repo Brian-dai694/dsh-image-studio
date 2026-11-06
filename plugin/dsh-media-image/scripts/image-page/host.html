@@ -77,6 +77,17 @@
         <pre id="gen-result">尚无作业。</pre>
       </section>
 
+      <section class="panel" id="panel-batch">
+        <h2>批量</h2>
+        <div class="field">
+          <label for="batch-prompts">每行一条提示词（最多 20 条，并发 2）</label>
+          <textarea id="batch-prompts" placeholder="极简办公室背景&#10;浅灰渐变背景&#10;木质桌面俯拍"></textarea>
+        </div>
+        <div class="row"><button class="primary" id="batch-submit">提交批次</button><button id="batch-refresh">刷新进度</button><span class="pill" id="batch-pill">idle</span></div>
+        <p class="status" id="batch-status">失败项不会自动重试；重试等于重新提交一条。</p>
+        <ul class="list" id="batch-list"></ul>
+      </section>
+
       <section class="panel" id="panel-asset">
         <h2>素材</h2>
         <div class="field">

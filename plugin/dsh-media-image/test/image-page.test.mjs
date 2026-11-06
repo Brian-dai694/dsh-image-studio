@@ -163,7 +163,7 @@ test('packaged wrapper binds the editor to the image relay only', async () => {
 test('每个可点面板控件都真的绑了处理器（防"面板空壳"）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
-  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'gen-insert', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
+  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'gen-insert', 'batch-submit', 'batch-refresh', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
   const lines = script.split('\n');
   for (const id of interactive) {
     assert.match(html, new RegExp(`id="${id}"`), `host.html 缺少控件 ${id}`);

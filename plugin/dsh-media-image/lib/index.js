@@ -12,6 +12,7 @@ import { registerMediaTools } from './tools.js';
 import { createMediaRouter } from './http.js';
 import { createAssetStore } from './assets.js';
 import { createGenerationService } from './generation.js';
+import { createBatchQueue } from './batch.js';
 import { createFontStore } from './fonts.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
@@ -55,6 +56,11 @@ export function apply(ctx, config = {}) {
       console.warn(`[dsh-media-image] 生成后端配置无效，已禁用生成能力：${error.message}`);
     }
   }
+  // 批量队列只在有生成后端时才有意义：没有后端就没有可排的作业。
+  let batchQueue = null;
+  if (generation) {
+    batchQueue = createBatchQueue({ generation, maxConcurrency: config?.generation?.maxConcurrency });
+  }
   const approvals = createApprovalStore();
   // 面板授权票据：桌面端 approval=never 时的授权路径（本人点一次，票据一次性、5 分钟）。
   const tickets = createBindTickets();
@@ -78,6 +84,7 @@ export function apply(ctx, config = {}) {
     assets,
     generation,
     fonts,
+    batchQueue,
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,
   });
