@@ -34,6 +34,14 @@ test('unwired production registration fails closed; no tool reaches editor witho
   for (const [name, tool] of tools) {
     const kind = name.includes('image') ? 'image' : 'video';
     const args = { editorKind: kind, projectId: 'p1', instanceId: 'i1', commandId: 'c1', expectedRevision: 0, operation: kind === 'image' ? 'history.undo' : 'media.video.history.undo', params: {}, format: kind === 'image' ? 'png' : 'webm', exportId: 'x1' };
+    // 生成工具不碰工程，没有会话绑定可查；它的 fail-closed 是"没配后端就拒绝"，
+    // 与编辑器工具的 SESSION_* 是两回事，分开断言而不是放宽循环。
+    if (name === 'media_image_generate') {
+      const generated = await tool.execute({ editorKind: 'image' }, exec('s1'));
+      assert.equal(generated.status, 'rejected');
+      assert.equal(generated.error.code, 'PROVIDER_UNAVAILABLE');
+      continue;
+    }
     for (const context of [{}, exec('s1')]) {
       const result = await tool.execute(args, context);
       assert.equal(result.status, 'rejected');

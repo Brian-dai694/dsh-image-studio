@@ -25,7 +25,10 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+
+// 与编辑器 modules/layer/composition.js 同源：Canvas globalCompositeOperation 全集。
+export const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
 const fieldsOnly = (payload, fields) => {
   const unknown = Object.keys(payload).find(key => !fields.includes(key));
   if (unknown) throw new MediaBridgeError('INVALID_REQUEST', `Unsupported payload field: ${unknown}. Read the operation parameter contract.`);
@@ -43,10 +46,11 @@ function validateImageCommand(command) {
   const fields = {
     'history.undo': ['targetCommandId', 'afterDigest'], 'history.redo': [], 'canvas.resize': ['width', 'height'],
     'canvas.crop': ['x', 'y', 'width', 'height'], 'layer.remove': ['layerId'],
-    'layer.add_text': ['text', 'x', 'y', 'style'], 'layer.update_text': ['layerId', 'text'],
+    'layer.add_text': ['text', 'x', 'y', 'style', 'fontUrl'], 'layer.update_text': ['layerId', 'text', 'fontUrl'],
     'layer.set_transform': ['layerId', 'x', 'y', 'scaleX', 'scaleY', 'rotationDeg'],
     'layer.set_visibility': ['layerId', 'visible'], 'layer.reorder': ['layerId', 'toIndex'],
-    'layer.add_image': ['sourceRef', 'x', 'y', 'width', 'height', 'fit', 'name'],
+    'layer.set_appearance': ['layerId', 'opacity', 'blendMode', 'name'],
+    'layer.add_image': ['sourceRef', 'x', 'y', 'width', 'height', 'fit', 'name', 'maskRef', 'maskRect', 'maskMode', 'maskInvert', 'featherPx'],
     'layer.set_frame': ['layerId', 'x', 'y', 'width', 'height', 'fit', 'anchor'],
     'layer.feather': ['layerId', 'radiusPx'],
     'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
@@ -77,6 +81,10 @@ function validateImageCommand(command) {
       }
       if (p.x !== undefined) { finite(p.x, 'x'); finite(p.y, 'y'); }
     }
+    // 字体只认已登记字体的同源地址；跨站 URL 一律拒绝，避免 fontUrl 变成任意下载口。
+    if (p.fontUrl !== undefined && (typeof p.fontUrl !== 'string' || !/^\/media-image\/fonts\/[a-f0-9]{48}$/.test(p.fontUrl))) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'fontUrl must be /media-image/fonts/<48-char id> from POST /media-image/fonts.');
+    }
   }
   if (command.type === 'layer.set_transform') {
     opaqueId(p.layerId, 'layerId');
@@ -87,6 +95,13 @@ function validateImageCommand(command) {
   if (command.type === 'layer.set_visibility') {
     opaqueId(p.layerId, 'layerId');
     if (typeof p.visible !== 'boolean') throw new MediaBridgeError('INVALID_REQUEST', 'visible must be boolean.');
+  }
+  if (command.type === 'layer.set_appearance') {
+    opaqueId(p.layerId, 'layerId');
+    if (['opacity', 'blendMode', 'name'].every(key => p[key] === undefined)) throw new MediaBridgeError('INVALID_REQUEST', 'Provide at least one of opacity, blendMode or name.');
+    if (p.opacity !== undefined) finite(p.opacity, 'opacity', { min: 0, max: 100 });
+    if (p.blendMode !== undefined && !BLEND_MODES.has(p.blendMode)) throw new MediaBridgeError('INVALID_REQUEST', 'blendMode is not a supported compositing mode.');
+    if (p.name !== undefined && (typeof p.name !== 'string' || !p.name.trim() || p.name.length > 120)) throw new MediaBridgeError('INVALID_REQUEST', 'name must be a non-empty string up to 120 characters.');
   }
   if (command.type === 'layer.reorder') {
     opaqueId(p.layerId, 'layerId');
@@ -101,15 +116,36 @@ function validateImageCommand(command) {
   };
   const FRAME_FITS = ['stretch', 'contain', 'cover'];
   if (command.type === 'layer.add_image') {
-    // sourceRef 只有三种合法形态：文档素材表 asset:<id>、复制已有图层 layer:<layerId>、
-    // 或受限内联图 data:image/(png|jpeg|webp);base64,...（解码后 ≤256 KB，超限请走编辑器导入）。
-    // Host 只校验形态，素材是否存在由编辑器判定；像素只在编辑器里，不进模型上下文。
+    // 仅支持复制已有图层或受限内联图 data:image/(png|jpeg|webp);base64,...（解码后 ≤256 KB）。
+    // asset:<id> 暂保留为格式兼容，但当前编辑器没有 asset 注册表，运行时会明确返回 ASSET_NOT_FOUND。
     validateImageSourceRef(p.sourceRef);
     if ((p.width === undefined) !== (p.height === undefined)) throw new MediaBridgeError('INVALID_REQUEST', 'layer.add_image needs both width and height, or neither (the source size is kept).');
     for (const key of ['width', 'height']) if (p[key] !== undefined) pixelSize(key);
     for (const key of ['x', 'y']) if (p[key] !== undefined) pixelPos(key);
     if (p.fit !== undefined && !FRAME_FITS.includes(p.fit)) throw new MediaBridgeError('INVALID_REQUEST', `fit must be one of ${FRAME_FITS.join(', ')}.`);
     if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 120)) throw new MediaBridgeError('INVALID_REQUEST', 'name must be a string up to 120 characters.');
+    // 蒙版：maskRef 与 maskRect 互斥且至少给一个；附属参数不能脱离蒙版单独出现。
+    const maskExtras = ['maskMode', 'maskInvert', 'featherPx'].filter(key => p[key] !== undefined);
+    const hasRef = p.maskRef !== undefined;
+    const hasRect = p.maskRect !== undefined;
+    if (!hasRef && !hasRect) {
+      if (maskExtras.length) throw new MediaBridgeError('INVALID_REQUEST', 'maskMode/maskInvert/featherPx require maskRef or maskRect.');
+    } else if (hasRef && hasRect) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'Provide either maskRef or maskRect, not both.');
+    } else if (hasRect) {
+      // 矩形在画布坐标系里，Host 没有画布尺寸，只校验整数与取值范围。
+      const rect = p.maskRect;
+      if (!isObject(rect) || Object.keys(rect).some(key => !['x', 'y', 'width', 'height'].includes(key)) || ['x', 'y', 'width', 'height'].some(key => rect[key] === undefined)) {
+        throw new MediaBridgeError('INVALID_REQUEST', 'maskRect needs x, y, width and height only.');
+      }
+      for (const key of ['x', 'y']) if (!Number.isSafeInteger(rect[key]) || rect[key] < -16384 || rect[key] > 16384) throw new MediaBridgeError('INVALID_REQUEST', `maskRect.${key} must be an integer within ±16384 pixels.`);
+      for (const key of ['width', 'height']) if (!Number.isSafeInteger(rect[key]) || rect[key] < 1 || rect[key] > 16384) throw new MediaBridgeError('INVALID_REQUEST', `maskRect.${key} must be an integer between 1 and 16384 pixels.`);
+    } else {
+      validateImageSourceRef(p.maskRef, 'maskRef', { allowSelection: true });
+      if (p.maskMode !== undefined && !['luminance', 'alpha'].includes(p.maskMode)) throw new MediaBridgeError('INVALID_REQUEST', 'maskMode must be luminance or alpha.');
+    }
+    if (p.maskInvert !== undefined && typeof p.maskInvert !== 'boolean') throw new MediaBridgeError('INVALID_REQUEST', 'maskInvert must be boolean.');
+    if (p.featherPx !== undefined && (!Number.isSafeInteger(p.featherPx) || p.featherPx < 0 || p.featherPx > 64)) throw new MediaBridgeError('INVALID_REQUEST', 'featherPx must be an integer between 0 and 64.');
   }
   if (command.type === 'layer.set_frame') {
     // 模型给的是像素框，不是缩放比；至少改一项，不然是无意义写入。
@@ -150,21 +186,23 @@ function validateImageCommand(command) {
   // layer.drop_shadow 本轮不做：它需要改渲染管线，等单独立项后再进白名单。
 }
 
-// 图片 sourceRef 的三种合法形态，互斥且必须整体匹配：
-//   asset:<id>          文档素材表里的素材（由编辑器在导入/粘贴/PSD 图层时登记）
-//   layer:<layerId>     复制一个已有图层的像素（Agent 可以再放一份）
-//   data:image/...      受限内联图：只允许 png/jpeg/webp，base64 解码后 ≤256 KB
-// 像素本身永不进入模型上下文，read_state 只回素材元数据（id/名称/尺寸）。
+// layer:<id> copies an existing layer; data:image/... is limited to PNG/JPEG/WebP at 256 KB decoded.
+// asset:<id> resolves through the bounded upload route (see lib/assets.js). Mask refs use the same three forms.
 const INLINE_IMAGE = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
 const INLINE_IMAGE_MAX_BYTES = 256 * 1024;
-function validateImageSourceRef(sourceRef) {
-  if (typeof sourceRef !== 'string' || !sourceRef) throw new MediaBridgeError('INVALID_REQUEST', 'sourceRef is required.');
-  if (sourceRef.startsWith('asset:') || sourceRef.startsWith('layer:')) {
-    if (sourceRef.length < 3 || sourceRef.length > 256) throw new MediaBridgeError('INVALID_REQUEST', 'sourceRef must be asset:<id> or layer:<layerId>.');
+function validateImageSourceRef(sourceRef, name = 'sourceRef', { allowSelection = false } = {}) {
+  if (typeof sourceRef !== 'string' || !sourceRef) throw new MediaBridgeError('INVALID_REQUEST', `${name} is required.`);
+  if (allowSelection && sourceRef === 'selection:') return;
+  if (sourceRef.startsWith('layer:')) {
+    if (sourceRef.length < 7 || sourceRef.length > 256) throw new MediaBridgeError('INVALID_REQUEST', `${name} must be layer:<layerId>.`);
+    return;
+  }
+  if (sourceRef.startsWith('asset:')) {
+    if (!/^asset:[a-f0-9]{48}$/.test(sourceRef)) throw new MediaBridgeError('INVALID_REQUEST', `${name} must be asset:<48-char id> from an upload.`);
     return;
   }
   const inline = INLINE_IMAGE.exec(sourceRef);
-  if (!inline) throw new MediaBridgeError('INVALID_REQUEST', 'sourceRef must be asset:<id>, layer:<layerId> or data:image/(png|jpeg|webp);base64,...');
+  if (!inline) throw new MediaBridgeError('INVALID_REQUEST', `${name} must be layer:<layerId>, asset:<id> or data:image/(png|jpeg|webp);base64,...`);
   // base64 每 4 字符解出 3 字节；用上界判断，避免在 Host 里真正解码大图。
   if (Math.ceil(inline[2].length * 3 / 4) > INLINE_IMAGE_MAX_BYTES) throw new MediaBridgeError('INVALID_REQUEST', 'Inline image data must be at most 256 KB; import larger images through the editor.');
 }

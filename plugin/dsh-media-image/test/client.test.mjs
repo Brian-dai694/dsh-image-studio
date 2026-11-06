@@ -395,7 +395,7 @@ test('the image package registers under its own plugin name and overlay id', asy
   assert.notEqual(client.chat.retainedOverlayId, 'media-retained-editors', '共用 overlay id 会被 root list 槽位拒绝并吞掉侧栏入口');
 });
 
-test('the image package registers a native tool card for each of its five tools', async () => {
+test('the image package registers a native tool card for each of its six tools', async () => {
   const client = await loadClient();
   const { ctx, registered, injected, flush } = makeContext();
   client.apply(ctx);
@@ -403,7 +403,7 @@ test('the image package registers a native tool card for each of its five tools'
   assert.ok(injected.includes('tool.call.toolview'));
   const views = registered.filter(item => item.definition.name === 'tool.call.toolview');
   const keys = views.map(item => item.definition.key).sort();
-  assert.equal(keys.length, 5);
+  assert.equal(keys.length, 6);
   assert.deepEqual(keys, [...client.toolViewKeys].sort());
   for (const key of keys) assert.match(key, /^media_image_/);
 });

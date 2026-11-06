@@ -10,18 +10,21 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { apply } from '../lib/index.js';
+import { createMediaRouter } from '../lib/http.js';
+import { createAssetStore } from '../lib/assets.js';
 
 const publicImage = resolve(dirname(fileURLToPath(import.meta.url)), '../public/image');
 
 function makeContext() {
   const routes = [];
+  const assets = createAssetStore();
   const ctx = {
     tools: { register: () => () => {}, guard: () => () => {} },
     webServer: { register: route => { routes.push(route); return () => {}; } },
     approval: { request: async () => 'allowed-once' },
     effect: factory => { const dispose = factory(); return () => { if (typeof dispose === 'function') dispose(); }; },
   };
-  return { ctx, routes };
+  return { ctx, routes, assets };
 }
 
 function caller(router) {
@@ -29,13 +32,14 @@ function caller(router) {
     const out = { status: 0, headers: {}, body: '' };
     const res = {
       writeHead(status, headers) { out.status = status; out.headers = headers ?? {}; return res; },
-      end(chunk) { out.body = chunk === undefined ? '' : String(chunk); },
+      end(chunk) { out.body = chunk === undefined ? '' : Buffer.isBuffer(chunk) && /^image\//.test(String(out.headers['content-type'] || '')) ? Buffer.from(chunk) : String(chunk); },
     };
     return { res, out };
   };
-  return async ({ method = 'GET', url, headers = {} }) => {
+  return async ({ method = 'GET', url, headers = {}, body, rawBody }) => {
     const { res, out } = respond();
-    const handled = await router({ method, url, headers }, res);
+    const req = { method, url, headers, async *[Symbol.asyncIterator]() { if (rawBody !== undefined) yield rawBody; else if (body !== undefined) yield Buffer.from(JSON.stringify(body)); } };
+    const handled = await router(req, res);
     return { handled, ...out };
   };
 }
@@ -61,8 +65,8 @@ test('BUILD.json lists every packaged file so the artifact stays auditable', asy
 });
 
 test('router serves /media/image/ from the packaged tree without config', async () => {
-  const { ctx, routes } = makeContext();
-  apply(ctx, {});
+  const { ctx, routes, assets } = makeContext();
+  apply(ctx, { assets });
   const call = caller(routes[0].handler);
 
   const page = await call({ url: '/media-image/image/' });
@@ -82,6 +86,8 @@ test('router serves /media/image/ from the packaged tree without config', async 
   assert.match(bundle.body, /Math\.max\(1,/, 'readState 需要钳制非正尺寸');
   // A write used to land in the canvas while the tool reported rejected, because the
   // mutation result lacked the fields the Host validates.
+  assert.match(bundle.body, /layer.add_image/, '打包编辑器必须实现生成图回流为图层');
+  assert.match(bundle.body, /ASSET_FETCH_FAILED|ASSET_NOT_FOUND/, '素材获取失败必须返回明确错误');
   assert.match(bundle.body, /changedObjectIds/, 'mutation 结果需要 changedObjectIds');
   assert.equal(/changedLayerIds/.test(bundle.body), false, '旧字段名不应再出现');
   assert.match(bundle.body, /redo_button/, '页面需要可点击的重做控件');
@@ -93,6 +99,33 @@ test('router serves /media/image/ from the packaged tree without config', async 
   const icon = await call({ url: '/media-image/image/images/favicon.png' });
   assert.equal(icon.status, 200);
   assert.match(icon.headers['content-type'], /image\/png/);
+});
+
+test('same-origin asset route uploads bounded real image bytes and serves them by random id', async () => {
+  const assets = createAssetStore();
+  const router = createMediaRouter({ relay: { request: async () => ({}) }, editorKind: 'image', prefix: '/media-image', token: 'secret-token', publicDir: '.', assets });
+  const call = caller(router);
+  const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]);
+  const headers = { host: 'localhost', origin: 'http://localhost', 'x-dsh-media-asset': '1', authorization: 'Bearer secret-token', 'content-type': 'image/png', 'content-length': String(png.length) };
+  const uploaded = await call({ method: 'POST', url: '/media-image/assets/upload', headers, rawBody: png });
+  assert.equal(uploaded.status, 201, uploaded.body);
+  const uploadValue = JSON.parse(uploaded.body);
+  assert.match(uploadValue.sourceRef, /^asset:[a-f0-9]{48}$/);
+  assert.equal(uploadValue.asset.mime, 'image/png');
+  const id = uploadValue.asset.id;
+  const fetched = await call({ method: 'GET', url: `/media-image/assets/${id}`, headers: { host: 'localhost', origin: 'http://localhost', authorization: 'Bearer secret-token', 'x-dsh-media-asset': '1' } });
+  assert.equal(fetched.status, 200);
+  assert.equal(fetched.headers['content-type'], 'image/png');
+  assert.deepEqual(Buffer.from(fetched.body, 'binary'), png);
+  assert.equal(assets.get(id).bytes.length, png.length);
+
+  const spoofed = await call({ method: 'POST', url: '/media-image/assets/upload', headers: { ...headers, 'content-type': 'image/png' }, rawBody: Buffer.from('not a png') });
+  assert.equal(spoofed.status, 400);
+  assert.equal(JSON.parse(spoofed.body).code, 'UNSUPPORTED_IMAGE_TYPE');
+  const cross = await call({ method: 'POST', url: '/media-image/assets/upload', headers: { ...headers, origin: 'http://evil.example' }, rawBody: png });
+  assert.equal(cross.status, 403);
+  const invalid = await call({ method: 'GET', url: '/media-image/assets/%2e%2e%2fpackage.json', headers: { host: 'localhost', origin: 'http://localhost', authorization: 'Bearer secret-token' } });
+  assert.equal(invalid.status, 404);
 });
 
 test('packaged wrapper binds the editor to the image relay only', async () => {

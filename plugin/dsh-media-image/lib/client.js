@@ -453,7 +453,7 @@ window.__ModuleLoader__.load({
       if (outcome === 'unavailable') return '原生审批不可用或没有可回答的界面，本次请求未获授权。'
       return '审批结果未知，请核对原生会话；不能确认授权。'
     }
-    var TOOL_NAMES = { media_image_read_state: '读取工程', media_image_apply_command: '执行编辑', media_image_get_command_result: '查询命令结果', media_image_export_start: '开始导出', media_image_export_status: '查询导出', media_video_read_state: '读取工程', media_video_apply_command: '执行编辑', media_video_get_command_result: '查询命令结果', media_video_export_start: '开始导出', media_video_export_status: '查询导出' }
+    var TOOL_NAMES = { media_image_read_state: '读取工程', media_image_apply_command: '执行编辑', media_image_get_command_result: '查询命令结果', media_image_export_start: '开始导出', media_image_export_status: '查询导出', media_image_generate: '生成图片', media_video_read_state: '读取工程', media_video_apply_command: '执行编辑', media_video_get_command_result: '查询命令结果', media_video_export_start: '开始导出', media_video_export_status: '查询导出' }
     var ERROR_TEXT = {
       SESSION_BINDING_REQUIRED: '本会话还没有绑定工程，需要本人在原生会话中授权一次',
       APPROVAL_TIMEOUT: '等待授权超时，本次请求已取消，需要重新发起',
@@ -1919,7 +1919,7 @@ window.__ModuleLoader__.load({
     }
 
     // 每个包只注册自己 5 个工具；split-packages.mjs 会按包名重写这个数组。
-    var TOOL_VIEW_KEYS = ['media_image_read_state', 'media_image_apply_command', 'media_image_get_command_result', 'media_image_export_start', 'media_image_export_status']
+    var TOOL_VIEW_KEYS = ['media_image_read_state', 'media_image_apply_command', 'media_image_get_command_result', 'media_image_export_start', 'media_image_export_status', 'media_image_generate']
 
     // ---------- wiring ----------
 

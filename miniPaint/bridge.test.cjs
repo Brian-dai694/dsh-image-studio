@@ -29,6 +29,7 @@ context.Base_gui_class = function () {return app.GUI;};
 context.Helper_class = function () {this.is_input = () => false;};
 app.State = new (load('core/base-state.js', 'Base_state_class'))();
 app.Actions.Update_config_action = load('actions/update-config.js', 'Update_config_action');
+app.Actions.Autoresize_canvas_action = class { constructor() {} async do() {} async undo() {} free() {} };
 // test-only 画布桩：只让羽化/色匹的结构可测（路由、校验、快照、撤销回退、read_state 字段），
 // 不断言像素颜色；像素摘要用「确定性填充值」模拟内容变化，真实像素效果由浏览器验收。
 function makeCanvas(w = 8, h = 8, content = 1) {
@@ -37,7 +38,9 @@ function makeCanvas(w = 8, h = 8, content = 1) {
     getContext() {
       return {
         globalAlpha: 1,
+        fillStyle: '#000',
         clearRect() {},
+        fillRect(x, y, w, h) { canvas._drawn = (Number(canvas._drawn ?? 0) + Math.max(1, Math.round(w * h))) & 0xff; },
         drawImage(source) { if (source && (source._drawn !== undefined || source._content !== undefined)) canvas._drawn = source._drawn ?? source._content; },
         putImageData(image) {
           // 用抽样和代表「内容」：只要像素内容变了，这个值就会变，用来观察摘要是否跟随。
@@ -52,9 +55,13 @@ function makeCanvas(w = 8, h = 8, content = 1) {
         },
       };
     },
+    // 只有真的改了像素（蒙版合成）才需要重编码；返回带尺寸标记的稳定假 dataURL。
+    toDataURL() { toDataUrlCalls += 1; return `data:image/png;base64,stub-${canvas.width}x${canvas.height}-${Number(canvas._drawn ?? canvas._content) & 0xff}`; },
   };
   return canvas;
 }
+// 蒙版路径必须重编码、透传路径不该重编码：用调用次数作为可核对的证据。
+let toDataUrlCalls = 0;
 context.document = Object.assign(context.document || {}, { createElement: () => makeCanvas() });
 // 与原生 Update_layer_image_action 同形的桩：只做 link/尺寸写回，验证历史与状态同步。
 app.Actions.Update_layer_image_action = class {
@@ -117,6 +124,287 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     assert.notEqual(afterRedo.stateDigest,initialStateDigest);
     assert.equal(afterRedo.history.redoDepth,0); assert.equal(afterRedo.history.undoDepth,2);
     assert.equal(afterRedo.revision,4);
+  });
+  await test('layer.add_image inserts a decoded image as one undoable layer and rejects unresolved assets', async () => {
+    const previousImage = context.Image;
+    context.Image = class {
+      constructor() { this.naturalWidth = 2; this.naturalHeight = 1; }
+      set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); }
+    };
+    try {
+      const before = bridge.readState();
+      const added = await send({ type: 'layer.add_image', payload: {
+        sourceRef: 'data:image/png;base64,iVBORw0KGgo=', x: 7, y: 9, name: 'AI background'
+      } });
+      assert.equal(added.ok, true, JSON.stringify(added));
+      assert.equal(bridge.revision, before.revision + 1);
+      assert.equal(config.layer.name, 'AI background');
+      assert.equal(config.layer.x, 7); assert.equal(config.layer.y, 9);
+      assert.equal(config.layer.width, 2); assert.equal(config.layer.height, 1);
+      assert.equal(bridge.readState().history.undoDepth, before.history.undoDepth + 1);
+      await app.State.undo();
+      assert.equal(config.layers.some(layer => layer.name === 'AI background'), false);
+      assert.equal(bridge.revision, before.revision + 2);
+      const missing = await send({ type: 'layer.add_image', payload: { sourceRef: 'asset:missing' } });
+      assert.equal(missing.ok, false);
+      assert.equal(missing.error.code, 'INVALID_REQUEST');
+    } finally {
+      if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
+    }
+  });
+  await test('asset:<id> fetches bytes after the parent token handshake and inserts one undoable layer', async () => {
+    const previous = {
+      parent: context.window.parent, location: context.window.location, fetch: context.fetch,
+      FileReader: context.FileReader, Image: context.Image,
+      addEventListener: context.window.addEventListener, removeEventListener: context.window.removeEventListener,
+    };
+    const messageListeners = new Set();
+    const token = 'a'.repeat(64);
+    context.window.addEventListener = (type, fn) => { if (type === 'message') messageListeners.add(fn); };
+    context.window.removeEventListener = (type, fn) => { if (type === 'message') messageListeners.delete(fn); };
+    context.window.location = { origin: 'http://localhost' };
+    context.window.parent = {
+      postMessage(message) {
+        if (message.type !== 'dsh.asset.token.request') return;
+        queueMicrotask(() => {
+          for (const fn of [...messageListeners]) fn({ source: context.window.parent, origin: 'http://localhost',
+            data: { type: 'dsh.asset.token', requestId: message.requestId, token } });
+        });
+      },
+    };
+    let requested = null;
+    context.fetch = async (url, options) => {
+      requested = { url, options };
+      return { ok: true, status: 200, blob: async () => ({ size: 12 }) };
+    };
+    context.FileReader = class {
+      readAsDataURL() { this.result = 'data:image/png;base64,iVBORw0KGgo='; queueMicrotask(() => this.onload?.()); }
+    };
+    context.Image = class {
+      constructor() { this.naturalWidth = 4; this.naturalHeight = 3; }
+      set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); }
+    };
+    try {
+      const before = bridge.readState();
+      const assetId = 'c'.repeat(48);
+      const added = await send({ type: 'layer.add_image', payload: { sourceRef: `asset:${assetId}`, name: '生成背景' } });
+      assert.equal(added.ok, true, JSON.stringify(added));
+      assert.equal(requested.url, `/media-image/assets/${assetId}`);
+      assert.equal(requested.options.headers.Authorization, `Bearer ${token}`);
+      assert.equal(requested.options.headers['x-dsh-media-asset'], '1');
+      assert.equal(config.layer.name, '生成背景');
+      assert.equal(config.layer.width, 4);
+      assert.equal(config.layer.height, 3);
+      assert.equal(bridge.revision, before.revision + 1);
+      await app.State.undo();
+      assert.equal(config.layers.some(layer => layer.name === '生成背景'), false);
+    } finally {
+      context.window.parent = previous.parent;
+      context.window.location = previous.location;
+      context.window.addEventListener = previous.addEventListener;
+      context.window.removeEventListener = previous.removeEventListener;
+      context.fetch = previous.fetch;
+      context.FileReader = previous.FileReader;
+      context.Image = previous.Image;
+    }
+  });
+  await test('applyMask cuts alpha by luminance or alpha coverage, inverts, and feathers', async () => {
+    const ops = await import('./src/js/dsh-pixel-ops.js');
+    // 2x1：source 两个不透明像素（红、绿）。
+    const source = { width: 2, height: 1, data: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 0, 255]) };
+    // 灰度蒙版：左白（保留）、右黑（挖掉）。
+    const luminanceMask = { width: 2, height: 1, data: new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255]) };
+    const clipped = ops.applyMask(source, luminanceMask, { mode: 'luminance' });
+    assert.equal(clipped.data[3], 255, '白色区域保留不透明');
+    assert.equal(clipped.data[7], 0, '黑色区域被挖空');
+    assert.deepEqual([clipped.data[0], clipped.data[1], clipped.data[2]], [255, 0, 0], 'RGB 不变，只改 alpha');
+
+    const inverted = ops.applyMask(source, luminanceMask, { mode: 'luminance', invert: true });
+    assert.equal(inverted.data[3], 0);
+    assert.equal(inverted.data[7], 255);
+
+    // alpha 模式：用蒙版自身 alpha 作覆盖度（取图层轮廓时用）。
+    const alphaMask = { width: 2, height: 1, data: new Uint8ClampedArray([0, 0, 0, 0, 123, 45, 67, 255]) };
+    const byAlpha = ops.applyMask(source, alphaMask, { mode: 'alpha' });
+    assert.equal(byAlpha.data[3], 0, '蒙版 alpha=0 处挖空');
+    assert.equal(byAlpha.data[7], 255, '蒙版 alpha=255 处保留');
+
+    // 半透明蒙版与亮度相乘，不会越界。
+    const halfGray = { width: 2, height: 1, data: new Uint8ClampedArray([128, 128, 128, 255, 255, 255, 255, 128]) };
+    const half = ops.applyMask(source, halfGray, { mode: 'luminance' });
+    assert.ok(half.data[3] > 0 && half.data[3] < 255, '半透明蒙版得到中间 alpha');
+    assert.ok(half.data[7] > 0 && half.data[7] < 255, '带 alpha 的蒙版同样按比例衰减');
+
+    // 羽化把硬边界摊开：右侧原本 0，羽化后仍应 <= 原值的邻域内取值（只验单调性）。
+    const feathered = ops.applyMask(source, luminanceMask, { mode: 'luminance', featherPx: 1 });
+    assert.ok(feathered.data[3] >= 0 && feathered.data[3] < 255, '羽化后边缘不再是不透明的硬边');
+    assert.ok(feathered.data[7] > 0, '羽化后挖空处出现过渡');
+
+    // 尺寸不一致必须显式失败，不能悄悄拉伸。
+    assert.throws(() => ops.applyMask(source, { width: 3, height: 1, data: new Uint8ClampedArray(12) }), /蒙版尺寸/);
+  });
+  await test('layer.add_image with maskRef recomposes pixels and rejects mask params without maskRef', async () => {
+    const previousImage = context.Image;
+    context.Image = class {
+      constructor() { this.naturalWidth = 2; this.naturalHeight = 1; }
+      set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); }
+    };
+    try {
+    const before = bridge.readState();
+    // 蒙版合成走 pixelOps()：vm 里没有动态 import，按桥约定注入纯像素模块。
+    context.globalThis.__dshPixelOps = await import('./src/js/dsh-pixel-ops.js');
+    const inline = 'data:image/png;base64,iVBORw0KGgo=';
+    const masked = await send({ type: 'layer.add_image', payload: {
+      sourceRef: inline, maskRef: inline, maskMode: 'luminance', featherPx: 0, name: '生成背景（挖洞）'
+    } });
+    assert.equal(masked.ok, true, JSON.stringify(masked));
+    assert.equal(config.layer.name, '生成背景（挖洞）');
+    // 蒙版路径必须重编码（像素真的变了），不能把原 dataUrl 透传。
+    assert.ok(toDataUrlCalls > 0, '蒙版合成后应重新编码');
+    assert.equal(config.layer.width, 2);
+    assert.equal(config.layer.height, 1);
+    assert.equal(bridge.revision, before.revision + 1);
+    await app.State.undo();
+    assert.equal(config.layers.some(layer => layer.name === '生成背景（挖洞）'), false);
+
+    const orphan = await send({ type: 'layer.add_image', payload: { sourceRef: inline, featherPx: 4 } });
+    assert.equal(orphan.ok, false);
+    assert.equal(orphan.error.code, 'INVALID_REQUEST');
+    const badMode = await send({ type: 'layer.add_image', payload: { sourceRef: inline, maskRef: inline, maskMode: 'chroma' } });
+    assert.equal(badMode.ok, false);
+    assert.equal(badMode.error.code, 'INVALID_REQUEST');
+    } finally {
+      if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
+    }
+  });
+  await test('layer.set_appearance changes opacity/blend/name, shows in read_state, and undoes as one step', async () => {
+    const target = { id: 'appearance-1', name: '原名称', type: 'image', link: makeCanvas(4, 4), opacity: 100,
+      composition: 'source-over', x: 0, y: 0, width: 4, height: 4, width_original: 4, height_original: 4, order: 99, visible: true };
+    config.layers.push(target);
+    bridge.refreshRevision();
+    const before = bridge.readState();
+    const applied = await send({ type: 'layer.set_appearance', payload: { layerId: 'appearance-1', opacity: 40, blendMode: 'multiply', name: '背景·正片叠底' } });
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    const shown = bridge.readState().layers.find(item => item.id === 'appearance-1');
+    assert.equal(shown.opacity, 40);
+    assert.equal(shown.blendMode, 'multiply');
+    assert.equal(shown.name, '背景·正片叠底');
+    // 合成模式必须进内容摘要，否则「写后回读校验」对 blendMode 等于没校验。
+    assert.notEqual(bridge.readState().stateDigest, before.stateDigest);
+    await app.State.undo();
+    const undone = bridge.readState().layers.find(item => item.id === 'appearance-1');
+    assert.equal(undone.opacity, 100);
+    assert.equal(undone.blendMode, 'source-over');
+    assert.equal(undone.name, '原名称');
+    for (const payload of [{ layerId: 'appearance-1' }, { layerId: 'appearance-1', opacity: 120 },
+      { layerId: 'appearance-1', blendMode: 'carve' }, { layerId: 'appearance-1', name: '  ' }]) {
+      const bad = await send({ type: 'layer.set_appearance', payload });
+      assert.equal(bad.ok, false, JSON.stringify(payload));
+    }
+    config.layers = config.layers.filter(item => item.id !== 'appearance-1');
+    bridge.refreshRevision();
+  });
+  await test('maskRect clips by an explicit canvas rect, and selection: refuses without a marquee', async () => {
+    const previousImage = context.Image;
+    context.Image = class {
+      constructor() { this.naturalWidth = 2; this.naturalHeight = 1; }
+      set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); }
+    };
+    try {
+      context.globalThis.__dshPixelOps = await import('./src/js/dsh-pixel-ops.js');
+      const inline = 'data:image/png;base64,iVBORw0KGgo=';
+      const before = bridge.readState();
+      const rectMasked = await send({ type: 'layer.add_image', payload: {
+        sourceRef: inline, maskRect: { x: 0, y: 0, width: 120, height: 80 }, featherPx: 0, name: '矩形蒙版层'
+      } });
+      assert.equal(rectMasked.ok, true, JSON.stringify(rectMasked));
+      assert.equal(config.layer.name, '矩形蒙版层');
+      assert.equal(bridge.revision, before.revision + 1);
+      await app.State.undo();
+
+      // 不是选择工具时没有选区：必须明确报 NO_SELECTION，不能悄悄画成全图。
+      const noSelection = await send({ type: 'layer.add_image', payload: { sourceRef: inline, maskRef: 'selection:' } });
+      assert.equal(noSelection.ok, false);
+      assert.equal(noSelection.error.code, 'NO_SELECTION');
+      assert.equal(config.layers.some(layer => layer.name === 'AI 生成图层'), false, '失败不得留下半成品图层');
+
+      // 互斥：同时给 maskRef 与 maskRect 应被拒绝。
+      const both = await send({ type: 'layer.add_image', payload: { sourceRef: inline, maskRef: 'selection:', maskRect: { x: 0, y: 0, width: 10, height: 10 } } });
+      assert.equal(both.ok, false);
+      assert.equal(both.error.code, 'INVALID_REQUEST');
+    } finally {
+      if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
+    }
+  });
+  await test('read_state reports the live marquee only while the selection tool is active', async () => {
+    const previousTool = config.TOOL.name;
+    const previousSelection = app.Layers.Base_selection;
+    try {
+      app.Layers.Base_selection = { get_selection: () => ({ x: 12, y: 34, width: 200, height: 150 }) };
+      config.TOOL.name = 'selection';
+      // vm 里造出来的对象原型不同，deepEqual 会因原型不等失败，逐字段比。
+      const live = bridge.readState().selection;
+      assert.equal(live?.x, 12); assert.equal(live?.y, 34);
+      assert.equal(live?.width, 200); assert.equal(live?.height, 150);
+      // 切到别的工具后选区不可信（编辑器会清空），必须报 null 而不是给旧矩形。
+      config.TOOL.name = 'brush';
+      assert.equal(bridge.readState().selection, null);
+      // 选择工具下但选区为空（x/y/width/height 全 null）也算没有选区。
+      config.TOOL.name = 'selection';
+      app.Layers.Base_selection = { get_selection: () => ({ x: null, y: null, width: null, height: null }) };
+      assert.equal(bridge.readState().selection, null);
+      // 读状态不得因为 Base_selection 缺失而抛错。
+      app.Layers.Base_selection = undefined;
+      assert.equal(bridge.readState().selection, null);
+    } finally {
+      config.TOOL.name = previousTool;
+      app.Layers.Base_selection = previousSelection;
+    }
+  });
+  await test('layer.add_text loads a registered font via token fetch before inserting', async () => {
+    const previous = { fetch: context.fetch, FontFace: context.FontFace, fonts: context.document.fonts, createObjectURL: context.URL };
+    const requested = [];
+    context.fetch = async (url, init) => {
+      requested.push({ url, headers: init?.headers || {} });
+      return { ok: true, status: 200, blob: async () => ({ size: 32 }) };
+    };
+    const registered = [];
+    context.FontFace = class {
+      constructor(family, source) { this.family = family; this.source = source; this.status = 'loaded'; }
+      async load() { this.loaded = true; return this; }
+    };
+    context.URL = { createObjectURL: () => 'blob:font-1' };
+    context.document.fonts = { add: face => registered.push(face) };
+    try {
+      const before = bridge.readState();
+      const fontUrl = `/media-image/fonts/${'d'.repeat(48)}`;
+      const added = await send({ type: 'layer.add_text', payload: {
+        text: '思源黑体标题', x: 10, y: 20, style: { size: 40, family: 'Source Han Sans' }, fontUrl,
+      } });
+      assert.equal(added.ok, true, JSON.stringify(added));
+      assert.equal(requested.length, 1);
+      assert.equal(requested[0].url, fontUrl);
+      assert.match(requested[0].headers.Authorization, /^Bearer .+/);
+      assert.equal(registered.length, 1);
+      assert.equal(registered[0].family, 'Source Han Sans');
+      assert.match(registered[0].source, /^url\(blob:/);
+      assert.equal(bridge.revision, before.revision + 1);
+      // 同一字体再次使用不应重复下载。
+      await send({ type: 'layer.add_text', payload: { text: '副标题', style: { size: 20, family: 'Source Han Sans' }, fontUrl } });
+      assert.equal(requested.length, 1, '同一 family+url 只加载一次');
+      // 只给 fontUrl 不给 family：必须拒绝，不能静默忽略。
+      const noFamily = await send({ type: 'layer.add_text', payload: { text: 'x', fontUrl } });
+      assert.equal(noFamily.ok, false);
+      assert.equal(noFamily.error.code, 'INVALID_REQUEST');
+      // 跨站 URL 直接挡掉。
+      const foreign = await send({ type: 'layer.add_text', payload: { text: 'x', style: { family: 'A' }, fontUrl: 'https://evil.example/f.woff2' } });
+      assert.equal(foreign.ok, false);
+    } finally {
+      context.fetch = previous.fetch;
+      if (previous.FontFace === undefined) delete context.FontFace; else context.FontFace = previous.FontFace;
+      context.URL = previous.createObjectURL;
+      context.document.fonts = previous.fonts;
+    }
   });
   await test('cached applied and rejected outcomes contain contract fields', async () => {
     const commandId = 'idempotent'; const cmd = {type:'layer.set_visibility', payload:{layerId,visible:false}};

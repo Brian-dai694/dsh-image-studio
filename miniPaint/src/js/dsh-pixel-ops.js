@@ -134,3 +134,52 @@ export function pixelDigest(image) {
   }
   return 'fnv1a64-' + hash.toString(16).padStart(16, '0');
 }
+
+/**
+ * 蒙版裁剪：把 source 的 alpha 乘上蒙版的覆盖度，用于「生成图按产品轮廓挖洞」。
+ *
+ * 只改 alpha，不动 RGB —— ImageData 是非预乘的，按覆盖率缩放 RGB 会让半透明边缘发暗，
+ * 而挖洞场景要的是「同样的颜色、不同的覆盖面」。
+ *
+ * mode：
+ * - 'luminance' 灰度蒙版（白=保留，黑=挖掉），典型是用户上传的蒙版 PNG；
+ * - 'alpha'     用蒙版自身的 alpha 作覆盖度，典型是「取某个图层的轮廓」（产品层）。
+ * 两种模式都先乘以蒙版自身的 alpha，因此带透明边的蒙版不会越界。
+ *
+ * featherPx > 0 时先用 blurAlpha 软化覆盖度，得到自然的边缘过渡。
+ */
+export function applyMask(source, mask, { mode = 'luminance', invert = false, featherPx = 0 } = {}) {
+  if (mask.width !== source.width || mask.height !== source.height) {
+    throw new Error('蒙版尺寸必须与源图一致');
+  }
+  const { width, height } = source;
+  const coverage = new Uint8ClampedArray(width * height);
+  for (let i = 0, p = 0; i < coverage.length; i += 1, p += 4) {
+    const alpha = mask.data[p + 3];
+    let value;
+    if (mode === 'alpha') {
+      value = alpha;
+    } else {
+      const luminance = 0.2126 * mask.data[p] + 0.7152 * mask.data[p + 1] + 0.0722 * mask.data[p + 2];
+      value = Math.round(luminance * alpha / 255);
+    }
+    coverage[i] = value;
+  }
+  let soft = coverage;
+  if (featherPx > 0) {
+    const carrier = { width, height, data: new Uint8ClampedArray(width * height * 4) };
+    for (let i = 0, p = 0; i < coverage.length; i += 1, p += 4) {
+      carrier.data[p] = 255; carrier.data[p + 1] = 255; carrier.data[p + 2] = 255;
+      carrier.data[p + 3] = coverage[i];
+    }
+    const blurred = blurAlpha(carrier, featherPx);
+    soft = new Uint8ClampedArray(width * height);
+    for (let i = 0, p = 0; i < soft.length; i += 1, p += 4) soft[i] = blurred.data[p + 3];
+  }
+  const out = { width, height, data: new Uint8ClampedArray(source.data) };
+  for (let i = 0, p = 0; i < soft.length; i += 1, p += 4) {
+    const maskValue = invert ? 255 - soft[i] : soft[i];
+    out.data[p + 3] = Math.round(source.data[p + 3] * maskValue / 255);
+  }
+  return out;
+}

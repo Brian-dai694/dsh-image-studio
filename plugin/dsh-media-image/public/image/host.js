@@ -9,10 +9,32 @@ const $ = id => document.getElementById(id);
 const show = value => { $('output').textContent = JSON.stringify(value, null, 2); };
 const fail = error => show({ code: error.code || 'UI_ERROR', message: error.message, ...(error.outcomeUnknown ? { outcomeUnknown: true } : {}) });
 
+window.addEventListener('message', async event => {
+  if (event.source !== $('editor')?.contentWindow || event.origin !== location.origin || event.data?.type !== 'dsh.asset.token.request' || typeof event.data.requestId !== 'string') return;
+  // 编辑器可能先于本页 boot() 就绪：先确保拿到令牌再应答，否则请求会被静默丢弃、编辑器 5 秒后超时。
+  let token;
+  try { token = await boot(); } catch (error) { fail(error); return; }
+  $('editor').contentWindow.postMessage({ type: 'dsh.asset.token', requestId: event.data.requestId, token }, location.origin);
+});
+
 let accessToken = null;
 let transport = null;
 let relay = null;
 let connecting = null;
+
+export async function uploadImageAsset(file, { fetchImpl = fetch, baseUrl = '/media-image/assets' } = {}) {
+  if (!(file instanceof Blob) || file.size < 1) throw new Error('请选择非空图片文件');
+  if (file.size > 32 * 1024 * 1024) throw new Error('图片不能超过 32 MiB');
+  const token = await boot();
+  const name = file.name || 'generated-image';
+  const response = await fetchImpl(`${baseUrl}/upload`, {
+    method: 'POST', credentials: 'same-origin', body: file,
+    headers: { Authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1', 'x-dsh-media-name': encodeURIComponent(name) },
+  });
+  const result = await response.json();
+  if (!response.ok) throw Object.assign(new Error(result.message || '素材上传失败'), { code: result.code || 'ASSET_UPLOAD_FAILED' });
+  return result.asset;
+}
 
 async function boot() {
   if (accessToken) return accessToken;
@@ -36,9 +58,9 @@ async function connect() {
   if (relay) return relay;
   if (connecting) return connecting;
   connecting = (async () => {
-    await boot();
+    const token = await boot();
     transport = createIframeTransport({
-      iframe: $('editor'), origin: location.origin,
+      iframe: $('editor'), origin: location.origin, connectPayload: { assetToken: token },
       // 只读推送：转给面板渲染建议，不在这里缓存成第二份文档状态。
       onEvent: frame => {
         if (frame && frame.type === 'editor.selection_changed') {
@@ -167,4 +189,17 @@ window.addEventListener('message', async event => {
     parent.postMessage({ type: 'media.binding.result', requestId, error: error.message }, location.origin);
   }
 });
+$('asset-upload')?.addEventListener('click', async () => {
+  const file = $('asset-file')?.files?.[0];
+  if (!file) { $('asset-status').textContent = '先选择一张图片。'; return; }
+  try {
+    $('asset-status').textContent = '正在上传并校验图片…';
+    const asset = await uploadImageAsset(file);
+    $('asset-status').textContent = `已注册临时素材 · ${asset.bytes} bytes`;
+    $('asset-result').textContent = JSON.stringify({ ...asset, sourceRef: `asset:${asset.id}` }, null, 2);
+  } catch (error) {
+    $('asset-status').textContent = `${error.code || 'UPLOAD_FAILED'}：${error.message}`;
+  }
+});
+
 window.addEventListener('pagehide', () => { void relay?.stop(); });

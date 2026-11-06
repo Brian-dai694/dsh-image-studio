@@ -86,21 +86,53 @@ const imageCmd = (type, payload) => COMMAND_VALIDATORS.image({ type, payload });
 
 test('placement/blend/color commands validate exact field domains', () => {
   const tinyPng = 'data:image/png;base64,iVBORw0KGgo=';
-  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: 'asset:asset-1' }));
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: 'asset:' + 'a'.repeat(48) }));
   assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: 'layer:l0' }));
   assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: tinyPng }));
-  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: 'asset:asset-1', x: 0, y: 0, width: 800, height: 600, fit: 'contain', name: '前景' }));
+  const assetRef = 'asset:' + 'b'.repeat(48);
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, x: 0, y: 0, width: 800, height: 600, fit: 'contain', name: '前景' }));
   assert.throws(() => imageCmd('layer.add_image', { x: 0 }), { code: 'INVALID_REQUEST' });
   assert.throws(() => imageCmd('layer.add_image', { sourceRef: 'https://example.com/a.png' }), { code: 'INVALID_REQUEST' });
   assert.throws(() => imageCmd('layer.add_image', { sourceRef: 'data:image/svg+xml;base64,PHN2Zz4=' }), { code: 'INVALID_REQUEST' });
   // 解码后超过 256 KB 的内联图必须在 Host 侧拒绝，而不是塞给编辑器。
   assert.throws(() => imageCmd('layer.add_image', { sourceRef: `data:image/png;base64,${'A'.repeat(400000)}` }), { code: 'INVALID_REQUEST' });
-  assert.throws(() => imageCmd('layer.add_image', { sourceRef: 'asset:asset-1', width: 800 }), { code: 'INVALID_REQUEST' });
-  assert.throws(() => imageCmd('layer.add_image', { sourceRef: 'asset:asset-1', width: 0, height: 10 }), { code: 'INVALID_REQUEST' });
-  assert.throws(() => imageCmd('layer.add_image', { sourceRef: 'asset:asset-1', fit: 'fill' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, width: 800 }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, width: 0, height: 10 }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, fit: 'fill' }), { code: 'INVALID_REQUEST' });
+
+  // 蒙版：三种引用形态都可用；不带 maskRef 的附属参数必须拒绝，不能静默忽略。
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: 'layer:product' }));
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: assetRef, maskMode: 'luminance', maskInvert: true, featherPx: 8 }));
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: assetRef, maskMode: 'alpha', featherPx: 0 }));
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, featherPx: 4 }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskInvert: true }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: assetRef, maskMode: 'chroma' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: assetRef, maskInvert: 'yes' }), { code: 'INVALID_REQUEST' });
+  for (const featherPx of [-1, 65, 1.5]) assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: assetRef, featherPx }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: 'https://example.com/m.png' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: 'asset:short' }), { code: 'INVALID_REQUEST' });
+  // 选区与显式矩形：selection: 只能当蒙版；矩形只接受整数，且与 maskRef 互斥。
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: 'selection:' }));
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRect: { x: 10, y: 20, width: 100, height: 50 } }));
+  assert.doesNotThrow(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRect: { x: -10, y: 0, width: 1, height: 1 }, maskInvert: true, featherPx: 3 }));
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: 'selection:' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRef: 'selection:', maskRect: { x: 0, y: 0, width: 10, height: 10 } }), { code: 'INVALID_REQUEST' });
+  for (const maskRect of [{ x: 0, y: 0, width: 0, height: 10 }, { x: 0, y: 0, width: 10 }, { x: 0.5, y: 0, width: 10, height: 10 }, { x: 0, y: 0, width: 10, height: 10, extra: 1 }]) {
+    assert.throws(() => imageCmd('layer.add_image', { sourceRef: assetRef, maskRect }), { code: 'INVALID_REQUEST' }, JSON.stringify(maskRect));
+  }
 
   assert.doesNotThrow(() => imageCmd('layer.set_frame', { layerId: 'l1', width: 10, height: 10 }));
-  assert.throws(() => imageCmd('layer.set_frame', { layerId: 'l1' }), { code: 'INVALID_REQUEST' });
+  // 外观三元组：至少一项；枚举与数值域都要在 Host 侧挡住。
+  assert.doesNotThrow(() => imageCmd('layer.set_appearance', { layerId: 'l1', opacity: 40 }));
+  assert.doesNotThrow(() => imageCmd('layer.set_appearance', { layerId: 'l1', blendMode: 'multiply', name: '背景' }));
+  assert.doesNotThrow(() => imageCmd('layer.set_appearance', { layerId: 'l1', opacity: 0 }));
+  assert.doesNotThrow(() => imageCmd('layer.set_appearance', { layerId: 'l1', opacity: 100 }));
+  assert.throws(() => imageCmd('layer.set_appearance', { layerId: 'l1' }), { code: 'INVALID_REQUEST' });
+  for (const opacity of [-1, 101, Number.NaN]) assert.throws(() => imageCmd('layer.set_appearance', { layerId: 'l1', opacity }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.set_appearance', { layerId: 'l1', blendMode: 'carve' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.set_appearance', { layerId: 'l1', name: '' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.set_appearance', { layerId: 'l1', name: '  ' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => imageCmd('layer.set_appearance', { layerId: 'l1', opacity: 40, extra: 1 }), { code: 'INVALID_REQUEST' });  assert.throws(() => imageCmd('layer.set_frame', { layerId: 'l1' }), { code: 'INVALID_REQUEST' });
   assert.throws(() => imageCmd('layer.set_frame', { layerId: 'l1', width: 10 }), { code: 'INVALID_REQUEST' });
   assert.throws(() => imageCmd('layer.set_frame', { layerId: 'l1', anchor: 'bottom' }), { code: 'INVALID_REQUEST' });
 

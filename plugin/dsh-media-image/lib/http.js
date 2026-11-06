@@ -3,6 +3,8 @@
 import { randomUUID } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, relative, resolve, sep } from 'node:path';
+import { fetchRemoteBytes } from './remote.js';
+import { MAX_FONT_BYTES } from './fonts.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -22,6 +24,8 @@ const MIME = {
 
 const SAFE = /^[a-zA-Z0-9._/-]+$/;
 const RELAY_ACTIONS = new Set(['register', 'poll', 'respond', 'disconnect']);
+const MAX_ASSET_BYTES = 32 * 1024 * 1024;
+const ASSET_HEADER = 'x-dsh-media-asset';
 
 /**
  * boot 令牌的同源校验（与视频包同形）。
@@ -101,13 +105,13 @@ const RELAY_HEADER = 'x-dsh-media-relay';
  *
  * 返回 `null` 表示放行，否则返回 `{ reason, message, observed }`，403 正文原样带出。
  */
-function authorizeSameOrigin(req, token, methods = ['POST']) {
+function authorizeSameOrigin(req, token, methods = ['POST'], { requireJson = true } = {}) {
   const h = req?.headers || {};
   const host = h.host;
   const origin = h.origin;
   const site = h['sec-fetch-site'];
   const mode = h['sec-fetch-mode'];
-  const hasRelayHeader = h[RELAY_HEADER] === '1';
+  const hasRelayHeader = h[RELAY_HEADER] === '1' || h[ASSET_HEADER] === '1';
   const observed = { origin: origin ?? null, site: site ?? null, mode: mode ?? null, hasRelayHeader };
   if (site === 'cross-site' || site === 'same-site') return { reason: 'sec-fetch-site', message: 'Cross-site relay request rejected', observed };
   if (typeof host !== 'string') return { reason: 'missing-host', message: 'Host required', observed };
@@ -119,12 +123,59 @@ function authorizeSameOrigin(req, token, methods = ['POST']) {
     return { reason: 'missing-relay-header', message: 'Relay header required when Origin is absent', observed };
   }
   if (h.authorization !== `Bearer ${token}`) return { reason: 'relay-auth-failed', message: 'Relay authentication failed', observed };
-  if (methods.includes('POST') && h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
+  if (requireJson && methods.includes('POST') && h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
   if (!methods.includes(req.method)) return { reason: 'method', message: `${methods.join('/')} required`, observed };
   return null;
 }
 
 function authorizeRelay(req, token) { return authorizeSameOrigin(req, token, ['POST']); }
+
+async function readBinaryBody(req, limit = MAX_ASSET_BYTES) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw Object.assign(new Error(`Image exceeds ${limit} byte limit.`), { code: 'PAYLOAD_TOO_LARGE' });
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks, size);
+}
+
+async function handleAssets(req, res, { assets, token, prefix, pathname }) {
+  const assetPrefix = `${prefix}/assets/`;
+  const rawId = pathname.slice(assetPrefix.length);
+  const upload = rawId === 'upload' && req.method === 'POST';
+  const id = rawId;
+  if (!upload && !/^[a-f0-9]{48}$/.test(id)) { send(res, 404, { code: 'ASSET_NOT_FOUND', message: 'Image asset not found.' }); return true; }
+  const rejection = authorizeSameOrigin(req, token, ['GET', 'POST'], { requireJson: false });
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (req.method === 'GET' && (req.headers?.[ASSET_HEADER] !== '1' || req.headers?.authorization !== `Bearer ${token}`)) { send(res, 403, { code: 'INVALID_REQUEST', message: 'Asset authentication failed.' }); return true; }
+  const asset = assets?.get(id);
+  if (req.method === 'GET') {
+    if (!asset) { send(res, 404, { code: 'ASSET_NOT_FOUND', message: 'Image asset not found.' }); return true; }
+    res.writeHead(200, { 'content-type': asset.mime, 'content-length': asset.bytes.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'cross-origin-resource-policy': 'same-origin' });
+    res.end(asset.bytes);
+    return true;
+  }
+  if (req.method !== 'POST') { send(res, 405, { code: 'INVALID_REQUEST', message: 'GET or POST required.' }); return true; }
+  const length = Number(req.headers?.['content-length']);
+  if (Number.isFinite(length) && length > MAX_ASSET_BYTES) { send(res, 413, { code: 'PAYLOAD_TOO_LARGE', message: 'Image exceeds upload limit.' }); return true; }
+  if (req.headers?.[ASSET_HEADER] !== '1') { send(res, 403, { code: 'INVALID_REQUEST', message: 'Asset upload header required.' }); return true; }
+  if (req.headers?.authorization !== `Bearer ${token}`) { send(res, 403, { code: 'INVALID_REQUEST', message: 'Asset authentication failed.' }); return true; }
+  const contentType = req.headers?.['content-type']?.split(';')[0]?.toLowerCase();
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(contentType)) { send(res, 415, { code: 'UNSUPPORTED_IMAGE_TYPE', message: 'Only PNG, JPEG and WebP uploads are supported.' }); return true; }
+  try {
+    const bytes = await readBinaryBody(req);
+    let assetName = req.headers?.['x-dsh-media-name'] || `generated-${Date.now()}`;
+    try { assetName = decodeURIComponent(assetName); } catch { send(res, 400, { code: 'INVALID_REQUEST', message: 'Invalid asset name encoding.' }); return true; }
+    const uploaded = assets.add({ bytes, name: assetName });
+    send(res, 201, { ok: true, asset: uploaded, sourceRef: `asset:${uploaded.id}` });
+  } catch (error) {
+    const status = error.code === 'PAYLOAD_TOO_LARGE' ? 413 : error.code === 'ASSET_STORE_FULL' ? 507 : 400;
+    send(res, status, { code: error.code || 'INVALID_IMAGE', message: error.message });
+  }
+  return true;
+}
 
 // 只有本人能在面板上点这一下：入口要求同源（自定义头）+ 页面令牌，Agent 没有 HTTP 调用面。
 // 契约（project-grant-v1）：票据只绑 (editorKind, projectId, instanceId, pageId)，
@@ -194,6 +245,81 @@ async function handleBind(req, res, { tickets, bindings, relay, editorKind, pref
   return true;
 }
 
+async function handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch }) {
+  const base = `${prefix}/fonts`;
+  const id = pathname.startsWith(`${base}/`) ? pathname.slice(base.length + 1) : '';
+  const rejection = authorizeSameOrigin(req, token, id ? ['GET'] : ['GET', 'POST'], { requireJson: false });
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!fonts) { send(res, 501, { code: 'FONT_UNAVAILABLE', message: 'This deployment has no font store.' }); return true; }
+  if (!id && req.method === 'GET') { send(res, 200, { ok: true, fonts: fonts.list() }); return true; }
+  if (!id) {
+    const body = await readJsonBody(req).catch(() => null);
+    if (!body || typeof body !== 'object') { send(res, 400, { code: 'INVALID_REQUEST', message: 'JSON body is required.' }); return true; }
+    if (typeof body.url !== 'string' || !body.url) { send(res, 400, { code: 'INVALID_REQUEST', message: 'url is required.' }); return true; }
+    try {
+      const fetched = await fetchRemoteBytes(body.url, { maxBytes: MAX_FONT_BYTES, fetchImpl: remoteFetch });
+      const font = fonts.add({ bytes: fetched.bytes, family: body.family });
+      send(res, 201, { ok: true, font });
+    } catch (error) { send(res, remoteStatus(error), { code: error.code || 'INVALID_REQUEST', message: error.message }); }
+    return true;
+  }
+  const font = fonts.get(id);
+  if (!font) { send(res, 404, { code: 'FONT_NOT_FOUND', message: 'Font not found.' }); return true; }
+  res.writeHead(200, {
+    'content-type': font.mime, 'content-length': font.bytes.length,
+    'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'cross-origin-resource-policy': 'same-origin',
+  });
+  res.end(font.bytes);
+  return true;
+}
+
+// 素材 URL 导入：把远程图片拉进素材库，后续照常 asset:<id> 使用。
+async function handleAssetImport(req, res, { assets, token, prefix, remoteFetch }) {
+  if (!assets) { send(res, 501, { code: 'ASSET_UNAVAILABLE', message: 'This deployment has no asset store.' }); return true; }
+  const body = await readJsonBody(req).catch(() => null);
+  if (!body || typeof body !== 'object') { send(res, 400, { code: 'INVALID_REQUEST', message: 'JSON body is required.' }); return true; }
+  if (typeof body.url !== 'string' || !body.url) { send(res, 400, { code: 'INVALID_REQUEST', message: 'url is required.' }); return true; }
+  try {
+    const fetched = await fetchRemoteBytes(body.url, { maxBytes: MAX_ASSET_BYTES, fetchImpl: remoteFetch });
+    // 内容类型不信任响应头：assets.add 按文件签名判定，伪装扩展名会被拒。
+    const asset = assets.add({ bytes: fetched.bytes, name: typeof body.name === 'string' && body.name ? body.name : 'remote-import' });
+    send(res, 201, { ok: true, asset, sourceRef: `asset:${asset.id}` });
+  } catch (error) { send(res, remoteStatus(error), { code: error.code || 'INVALID_REQUEST', message: error.message }); }
+  return true;
+}
+
+const remoteStatus = error => error?.code === 'PAYLOAD_TOO_LARGE' ? 413
+  : error?.code === 'URL_FORBIDDEN' ? 403
+    : error?.code === 'URL_UNREACHABLE' ? 502
+      : error?.code === 'FONT_STORE_FULL' || error?.code === 'ASSET_STORE_FULL' ? 507 : 400;
+
+async function handleGenerate(req, res, { generation, token, prefix, pathname }) {
+  const base = `${prefix}/generate`;
+  const jobId = pathname.startsWith(`${base}/`) ? pathname.slice(base.length + 1) : '';
+  const rejection = authorizeSameOrigin(req, token, jobId ? ['GET'] : ['GET', 'POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!generation) { send(res, 501, { code: 'PROVIDER_UNAVAILABLE', message: 'This deployment has no generation backends configured.' }); return true; }
+  if (!jobId && req.method === 'GET') { send(res, 200, { ok: true, providers: generation.list() }); return true; }
+  if (!jobId) {
+    const body = await readJsonBody(req).catch(() => null);
+    if (!body || typeof body !== 'object') { send(res, 400, { code: 'INVALID_REQUEST', message: 'JSON body is required.' }); return true; }
+    try {
+      const job = await generation.submit(body);
+      send(res, 202, { ok: true, job });
+    } catch (error) { send(res, generationStatus(error), { code: error.code || 'GENERATION_FAILED', message: error.message }); }
+    return true;
+  }
+  try {
+    send(res, 200, { ok: true, job: await generation.status(jobId) });
+  } catch (error) { send(res, generationStatus(error), { code: error.code || 'GENERATION_FAILED', message: error.message }); }
+  return true;
+}
+
+const generationStatus = error => error?.code === 'JOB_NOT_FOUND' ? 404
+  : error?.code === 'INVALID_REQUEST' || error?.code === 'PROVIDER_UNKNOWN' ? 400
+    : error?.code === 'PROVIDER_UNAVAILABLE' ? 501
+      : error?.code === 'GENERATION_BUSY' ? 429 : 502;
+
 async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   const action = pathname.slice(prefix.length);
   if (!RELAY_ACTIONS.has(action)) { send(res, 404, { code: 'INVALID_REQUEST', message: 'Unknown relay route' }); return true; }
@@ -209,9 +335,10 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, remoteFetch = undefined }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
+  const assetsPrefix = `${prefix}/assets/`;
   const editorPrefix = `${prefix}/${editorKind}/`;
   const bootPath = `${prefix}/boot`;
   const bindPath = `${prefix}/bind`;
@@ -225,6 +352,20 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     const pathname = url.pathname;
     if (!pathname.startsWith(prefix)) return false;
 
+    if (pathname.startsWith(assetsPrefix)) {
+      if (pathname === `${assetsPrefix}import` && req.method === 'POST') {
+        const rejection = authorizeSameOrigin(req, token, ['POST']);
+        if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+        return handleAssetImport(req, res, { assets, token, prefix, remoteFetch });
+      }
+      return handleAssets(req, res, { assets, token, prefix, pathname });
+    }
+    if (pathname === `${prefix}/fonts` || pathname.startsWith(`${prefix}/fonts/`)) {
+      return handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch });
+    }
+    if (pathname === `${prefix}/generate` || pathname.startsWith(`${prefix}/generate/`)) {
+      return handleGenerate(req, res, { generation, token, prefix, pathname });
+    }
     if (pathname.startsWith(relayPrefix)) return handleRelay(req, res, { relay, prefix: relayPrefix, token, pathname });
     // 面板授权入口在 GET 拦截之前：签发/解绑是 POST。
     if (pathname === bindPath || pathname === bindStatusPath || pathname === grantTicketPath || pathname === grantUnbindPath) {

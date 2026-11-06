@@ -30,7 +30,7 @@ function makeContext() {
 test('every registered tool and metric kind belongs to the image editor', () => {
   const { ctx, tools } = makeContext();
   apply(ctx, { dataDir: 'C:/tmp/image-scope' });
-  assert.equal(tools.size, 5);
+  assert.equal(tools.size, 6);
   for (const name of tools.keys()) assert.match(name, /^media_image_/);
   assert.deepEqual([...new Set(Object.values(TOOL_KINDS))], ['image']);
   for (const definition of tools.values()) {
@@ -44,7 +44,7 @@ test('the guard accepts only image operations and still denies video ones', () =
   apply(ctx, { dataDir: 'C:/tmp/image-scope' });
   const guard = guards[0];
   const check = operation => guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation } });
-  for (const operation of ['layer.add_text', 'layer.update_text', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']) assert.equal(check(operation), undefined, operation);
+  for (const operation of ['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_appearance', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']) assert.equal(check(operation), undefined, operation);
   for (const operation of ['media.video.clip.move', 'media.video.history.undo', 'media.video.overlay.add', 'overlay.add', 'clip.trim']) assert.match(check(operation), /layer\.\* operations/, operation);
   assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'video', operation: 'media.video.clip.move' } }), /targets the image editor/);
 });

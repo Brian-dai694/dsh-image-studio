@@ -29,6 +29,11 @@ const RESULT_SCHEMA = {
     auditRef: { type: 'string' },
     exportId: { type: 'string' },
     artifactRef: { type: 'string' },
+    // 生成作业：assetRef 复用上面那个字段，这里只补作业自身的标识与阶段。
+    jobId: { type: 'string' },
+    provider: { type: 'string' },
+    jobStatus: { type: 'string', enum: ['queued', 'running', 'succeeded', 'failed', 'unknown'] },
+    providers: { type: 'array', items: { type: 'object', additionalProperties: true } },
     changedObjectIds: { type: 'array', items: { type: 'string' } },
     objectKind: { type: 'string', enum: ['layer', 'clip', 'overlay', 'track'] },
     // 本次调用实际使用的授权（binding 是 Host 侧事实，模型只能读不能改）。
@@ -66,7 +71,7 @@ const READ_PARAMS = {
 };
 
 const OPERATION_CONTRACT = {
-  image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic}}; layer.update_text {layerId,text}; layer.add_image {sourceRef,x?,y?,width?,height?,fit?:"stretch"|"contain"|"cover",name?} (approval; keeps alpha, width/height as a pair or omitted for source size). sourceRef is one of asset:<id> (imported document asset), layer:<layerId> (copy an existing layer) or data:image/(png|jpeg|webp);base64,... up to 256 KB decoded; pixels never enter this context, read_state lists assets as id/name/width/height/bytes. layer.set_frame {layerId,x?,y?,width?,height?,fit?,anchor?:"top-left"|"center"} (pixel frame; one side derives the other from the layer ratio; at least one field); layer.feather {layerId,radiusPx 1..64} (alpha edge only, recomputed from the editor-internal pre-edit snapshot, idempotent); layer.color_match {layerId,method:"reinhard",strength? 0..1,reference?:"canvas"|"below"|{x,y,width,height}} (idempotent from the same snapshot; read_state exposes only colorMatch{applied,strength,fromDigest} and feather{radiusPx,fromDigest}); layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). read_state layers carry sourceRef/frame/hasAlpha/maskSource plus the derived feather/colorMatch fields. Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
+  image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic},fontUrl?} (fontUrl must be /media-image/fonts/<48-char id> from POST /media-image/fonts, and needs style.family; the editor fetches the bytes with its token and registers a FontFace); layer.update_text {layerId,text,fontUrl?}; layer.add_image {sourceRef,x?,y?,width?,height?,fit?:"stretch"|"contain"|"cover",name?,maskRef?,maskMode?:"luminance"|"alpha",maskInvert?,featherPx?} (approval; keeps alpha, width/height as a pair or omitted for source size). sourceRef supports layer:<layerId> (copy an existing layer), uploaded asset:<48-char-id>, or data:image/(png|jpeg|webp);base64,... up to 256 KB decoded; read_state lists only asset metadata. maskRef clips the new layer by a mask and uses the same three forms plus "selection:" (the live marquee of the editor; requires the selection tool to be active, otherwise NO_SELECTION). maskRect {x,y,width,height} clips by an explicit canvas-space rectangle and needs no tool state; maskRef and maskRect are mutually exclusive. maskMode defaults to alpha for layer:<id>/selection: and luminance for assets, maskInvert flips coverage, featherPx 0..64 softens the edge (pixel math in dsh-pixel-ops.applyMask). read_state.selection reports the live marquee bounds (null when absent) so callers can choose between selection: and maskRect. Typical cut-out: insert a generated background with maskRef=layer:<product> so the product area stays transparent. layer.set_frame {layerId,x?,y?,width?,height?,fit?,anchor?:"top-left"|"center"} (pixel frame; one side derives the other from the layer ratio; at least one field); layer.feather {layerId,radiusPx 1..64} (alpha edge only, recomputed from the editor-internal pre-edit snapshot, idempotent); layer.color_match {layerId,method:"reinhard",strength? 0..1,reference?:"canvas"|"below"|{x,y,width,height}} (idempotent from the same snapshot; read_state exposes only colorMatch{applied,strength,fromDigest} and feather{radiusPx,fromDigest}); layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_appearance {layerId,opacity?,blendMode?,name?} (at least one field; opacity 0..100, blendMode is a canvas globalCompositeOperation such as source-over/multiply/screen/overlay, name 1..120 chars; read_state echoes opacity and blendMode); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). read_state layers carry sourceRef/frame/hasAlpha/maskSource plus the derived feather/colorMatch fields. Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
 };
 
 const WRITE_PARAMS = kind => ({
@@ -105,6 +110,18 @@ const EXPORT_STATUS_PARAMS = kind => ({
   projectId: { type: 'string', required: true, description: 'Explicit Host-bound project id.' },
 });
 
+// 生成工具：不带 instanceId/projectId —— 它不碰工程，只产出素材。
+// 给 jobId 就是查询该作业，否则是提交新作业。
+const GENERATE_PARAMS = {
+  editorKind: { type: 'string', enum: ['image'] },
+  provider: { type: 'string', description: 'Provider id (see the provider list). Required when submitting a new job.' },
+  prompt: { type: 'string', description: 'Generation prompt used when submitting; keep it descriptive and concrete.' },
+  width: { type: 'integer', description: 'Requested width 16..8192 when submitting.' },
+  height: { type: 'integer', description: 'Requested height 16..8192 when submitting.' },
+  idempotencyKey: { type: 'string', description: 'Optional key: the same key returns the same job instead of submitting twice.' },
+  jobId: { type: 'string', description: 'Poll an existing job instead of submitting a new one.' },
+};
+
 // The model only ever sees this text, never the canonical value. An export therefore has
 // to surface `exportId` (the only handle for the follow-up status call) and the finished
 // `artifactRef`; writes keep the compact status/command/revision shape.
@@ -114,6 +131,7 @@ const renderSummary = (_args, value) => [{
     `${value.status} · ${value.commandId}${value.revision === undefined ? '' : ` · R${value.revision}`}`,
     ...(value.exportId ? [`exportId ${value.exportId}`] : []),
     ...(value.artifactRef ? [`artifactRef ${value.artifactRef}`] : []),
+    ...(value.jobId ? [`jobId ${value.jobId}${value.jobStatus ? ` (${value.jobStatus})` : ''}`] : []),
     ...(value.error ? [value.error.code] : []),
   ].join(' · '),
 }];
@@ -173,6 +191,9 @@ const presentationMeta = (args, value) => ({
   ...(typeof value.afterDigest === 'string' && value.afterDigest ? { afterDigest: value.afterDigest } : {}),
   ...(typeof value.exportId === 'string' && value.exportId ? { exportId: value.exportId } : {}),
   ...(typeof value.artifactRef === 'string' && value.artifactRef ? { artifactRef: value.artifactRef } : {}),
+  ...(typeof value.jobId === 'string' && value.jobId ? { jobId: value.jobId } : {}),
+  ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+  ...(typeof value.jobStatus === 'string' && value.jobStatus ? { jobStatus: value.jobStatus } : {}),
   ...(typeof args.format === 'string' ? { format: args.format } : {}),
   ...(value.error?.code ? { errorCode: value.error.code } : {}),
   ...(Array.isArray(value.changedObjectIds) && value.changedObjectIds.length
@@ -197,7 +218,8 @@ function failure(kind, commandId, error) {
     error: {
       code,
       message: error?.message || 'Editor request failed.',
-      retryable: error?.code === 'EDITOR_TIMEOUT' || error?.code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN' || code === 'SESSION_BINDING_REQUIRED' || code === 'SESSION_APPROVAL_UNAVAILABLE',
+      retryable: error?.code === 'EDITOR_TIMEOUT' || error?.code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN' || code === 'SESSION_BINDING_REQUIRED' || code === 'SESSION_APPROVAL_UNAVAILABLE'
+        || code === 'GENERATION_UNREACHABLE' || code === 'GENERATION_BUSY',
     },
     ...(hint ? { hint } : {}),
     // Any error that may have landed a write is `unknown`, never `rejected`.
@@ -250,7 +272,7 @@ export function toLosslessJson(value) {
 // 注册本包的全部模型工具（图片 5 个 / 视频 5 个）。
 // 每个 execute 先过 toLosslessJson 再做 schema 快照校验，避免 undefined 导致
 // "non-lossless JSON"；binding 校验与审批在各自 execute 内完成。
-export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }) }) {
+export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null }) {
   const appliedCommands = new Map();
   const verify = async (kind, bridge, args, exec) => {
     const binding = bindings.assert(exec, kind, args);
@@ -290,6 +312,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         approve: (reason, signal) => requestHumanApproval(ctx, { agent: exec.agent, toolName: `media_${kind}_read_state`, callId: exec.callId, reason, signal: signal ?? exec.signal }),
       });
       const state = await verify(kind, bridge, args, exec);
+      if (kind === 'image' && assets) state.assets = assets.list();
       const binding = bindings.bindingOf?.(agentKey(exec)) ?? null;
       // 契约 §4：grant:{source,grantId,issuedAt,expiresAt,expiresInMs}|null
       const grant = binding ? {
@@ -421,6 +444,53 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     }
   };
 
+  // 生成：不碰工程，因此不做会话绑定、不要 expectedRevision。成功只产出 asset:<id>，
+  // 由模型再用 layer.add_image 显式落层 —— 生成永远不能自己改画布。
+  const mapJob = (kind, job) => {
+    const base = {
+      commandId: job.jobId,
+      editorKind: kind,
+      jobId: job.jobId,
+      provider: job.provider,
+      jobStatus: job.status,
+      ...(job.assetRef ? { artifactRef: job.assetRef } : {}),
+    };
+    if (job.status === 'succeeded') return { status: 'applied', ...base };
+    if (job.status === 'failed') return { ...base, status: 'rejected', error: { code: 'GENERATION_FAILED', message: job.error || '生成失败', retryable: false } };
+    if (job.status === 'unknown') return { ...base, status: 'unknown', error: { code: 'GENERATION_UNKNOWN', message: job.error || '生成结果未知，请再次查询该 jobId', retryable: true } };
+    return { status: 'pending', ...base };
+  };
+
+  const generate = (kind, generation) => async args => {
+    const commandId = args.jobId || 'generate';
+    if (!generation || !generation.configured()) {
+      return envelope(kind, {
+        commandId,
+        error: { code: 'PROVIDER_UNAVAILABLE', message: '未配置任何生成后端。', retryable: false },
+        hint: '设置插件配置 generation.providers 或环境变量 DSH_MEDIA_IMAGE_PROVIDERS（JSON 数组）后重载插件。',
+      });
+    }
+    try {
+      if (args.jobId) return mapJob(kind, await generation.status(args.jobId));
+      if (typeof args.prompt !== 'string' || !args.prompt.trim()) {
+        // 没给 prompt 也没给 jobId：只做能力发现，列一下可用的 provider。
+        return { status: 'applied', commandId, editorKind: kind, providers: generation.list() };
+      }
+      if (typeof args.provider !== 'string' || !args.provider) {
+        return envelope(kind, {
+          commandId,
+          error: { code: 'INVALID_REQUEST', message: '提交生成任务必须指定 provider。', retryable: false },
+          hint: '省略 prompt 调用本工具可列出已配置的 provider。',
+        });
+      }
+      return mapJob(kind, await generation.submit({
+        provider: args.provider, prompt: args.prompt, width: args.width, height: args.height, idempotencyKey: args.idempotencyKey,
+      }));
+    } catch (error) {
+      return failure(kind, commandId, error);
+    }
+  };
+
   register(defineTool({
     name: 'media_image_read_state',
     description: 'Read the shared image project: revision, digest, canvas, layers and native undo history. Call this before any write.',
@@ -509,6 +579,15 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     parameters: EXPORT_STATUS_PARAMS('image'),
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: exportStatus('image', bridge),
+    timeoutMs: 10_000,
+  }));
+
+  register(defineTool({
+    name: 'media_image_generate',
+    description: 'Submit or poll an image generation job against a configured backend. On success it returns assetRef (asset:<id>) which layer.add_image can insert; generation never edits the project by itself. Use jobId to poll; a running job returns pending, and an unverifiable poll returns unknown (poll again, do not resubmit).',
+    parameters: GENERATE_PARAMS,
+    output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+    execute: generate('image', generation),
     timeoutMs: 10_000,
   }));
 

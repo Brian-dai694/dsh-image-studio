@@ -1,6 +1,35 @@
-# dsh-media-image bundle patch: insert one Host plugin row.
+# dsh-media-image bundle patch.
+#
+# 两行：
+# - dsh-media-image：Host 插件本体（工具 + 路由 + 编辑器页面）。
+# - dsh-media-image-skills：把本包 skills/ 挂成技能源；providerName 必须唯一，
+#   否则会与内置 runtime / 其他插件（如 codewhale-toolkit）抢同一个 provider 名。
 - insert:
     - id: dsh-media-image
       name: dsh-media-image
       config:
         dataDir: !!js dshHomePath('image-studio')
+        # 生成后端（可选）。留空即不注册任何 provider，/media-image/generate 会如实返回
+        # PROVIDER_UNAVAILABLE。也可改用环境变量 DSH_MEDIA_IMAGE_PROVIDERS（JSON 数组）。
+        #
+        # generation:
+        #   providers:
+        #     - id: local-comfy
+        #       kind: comfyui
+        #       baseUrl: http://127.0.0.1:8188
+        #       workflow: !!js readJson('path/to/comfy-api-workflow.json')   # 需宿主提供该加载器
+        #       promptNode: { nodeId: '6', field: text }
+        #     - id: cloud
+        #       kind: http-json
+        #       baseUrl: https://api.example.com
+        #       submitPath: /generate
+        #       pollPath: /jobs/{jobId}
+        #       # apiKey 请走环境变量注入，不要写进这个文件
+
+    - id: dsh-media-image-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: dsh-media-image
+        includeDefaultRoots: false
+        watch: false
+        bundledSkillDir: !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('node_modules/dsh-media-image/skills/', baseUrl))"

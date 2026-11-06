@@ -2,7 +2,10 @@ import app from './app.js';
 import config from './config.js';
 import zoomView from './libs/zoomView.js';
 
-const COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+// 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
+// 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
+const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -66,6 +69,8 @@ export class DshEditorBridge {
     this.composing = false;
     this.commandResults = new Map();
     this.exports = new Map();
+    this.assets = new Map();
+    this.assetToken = '';
     // 羽化/色彩匹配的首帧快照与已应用参数：只活在编辑器内，不进图层字段、不进 read_state。
     this.pixelBases = new Map();
     this.pixelApplied = new Map();
@@ -90,6 +95,7 @@ export class DshEditorBridge {
         id: layer.id, name: layer.name, type: layer.type,
         x: layer.x, y: layer.y, width: layer.width, height: layer.height, rotate: layer.rotate,
         visible: layer.visible, order: layer.order, opacity: layer.opacity, color: layer.color,
+        composition: layer.composition,
         params: layer.params, filters: layer.filters,
         data: Array.isArray(layer.data) ? layer.data : null,
         pixels: this.layerPixelDigest(layer),
@@ -222,6 +228,7 @@ export class DshEditorBridge {
         id: layer.id, name: layer.name, type: layer.type,
         x: layer.x, y: layer.y, width: layer.width, height: layer.height, rotate: layer.rotate,
         visible: layer.visible, order: layer.order, opacity: layer.opacity, color: layer.color,
+        composition: layer.composition,
         params: layer.params, filters: layer.filters,
         data: Array.isArray(layer.data) ? layer.data : null,
       })),
@@ -318,6 +325,24 @@ export class DshEditorBridge {
     return this.pointerDown || this.composing || !!target?.matches('input,textarea,[contenteditable="true"]');
   }
 
+  requestAssetToken() {
+    if (this.assetToken) return Promise.resolve(this.assetToken);
+    return new Promise((resolve, reject) => {
+      const requestId = randomId();
+      // 与高亮 TTL 同样的环境守卫：没有定时器的宿主（测试沙箱）不装超时，其余行为不变。
+      const timeout = typeof setTimeout === 'function'
+        ? setTimeout(() => { window.removeEventListener('message', onMessage); reject(this.error('ASSET_AUTH_UNAVAILABLE', '素材授权不可用，请重新连接编辑器')); }, 5000)
+        : null;
+      const onMessage = event => {
+        if (event.source !== window.parent || event.origin !== window.location.origin || event.data?.type !== 'dsh.asset.token' || event.data.requestId !== requestId || typeof event.data.token !== 'string') return;
+        if (timeout !== null && typeof clearTimeout === 'function') clearTimeout(timeout);
+        window.removeEventListener('message', onMessage);
+        this.assetToken = event.data.token; resolve(this.assetToken);
+      };
+      window.addEventListener('message', onMessage);
+      window.parent.postMessage({ type: 'dsh.asset.token.request', requestId }, window.location.origin);
+    });
+  }
   onConnect(event) {
     if (window.parent === window || event.source !== window.parent || event.origin !== window.location.origin) return;
     if (event.data?.type !== 'dsh.editor.connect' || typeof event.data.requestId !== 'string' || !event.ports?.[0]) return;
@@ -454,6 +479,8 @@ export class DshEditorBridge {
       const applied = this.pixelApplied.get(String(layer.id)) || {};
       return { id: String(layer.id), name: String(layer.name || ''), type: String(layer.type || 'empty'),
         visible: layer.visible !== false, x: layer.x, y: layer.y, width: layer.width, height: layer.height,
+        // 外观三元组要能被 read_state 看到，否则模型改完无法自我核对。
+        opacity: layer.opacity ?? 100, blendMode: layer.composition || 'source-over',
         rotationDeg: layer.rotate || 0,
         // 只在真的应用过时出现；快照本身留在编辑器内部，模型看不到原始像素。
         ...(applied.feather ? { feather: applied.feather } : {}),
@@ -473,7 +500,10 @@ export class DshEditorBridge {
     const canvasWidth = Number.isFinite(config.WIDTH) ? Math.max(1, config.WIDTH) : 1;
     const canvasHeight = Number.isFinite(config.HEIGHT) ? Math.max(1, config.HEIGHT) : 1;
     const contentDigest = currentDigest;
+    const selection = this.readSelectionRect();
     return { editorKind: 'image', editorInstanceId: this.editorInstanceId, documentId: this.documentId, revision: this.revision,
+      // 只读快照：模型据此判断该用 selection: 还是显式 maskRect，不用盲猜坐标。
+      selection: selection ? { x: selection.x, y: selection.y, width: selection.width, height: selection.height } : null,
       // 内容摘要与视图态分开：选中/缩放不再算内容变化。
       contentDigest,
       viewState: this.viewState(),
@@ -598,6 +628,172 @@ export class DshEditorBridge {
     return ctx.getImageData(x, y, Math.max(1, Math.min(w, width - x)), Math.max(1, Math.min(h, height - y)));
   }
 
+  /**
+   * 蒙版参数解析：只做形状与取值域校验，像素留给 applyMaskToCanvas。
+   *
+   * 两种来源互斥：
+   * - maskRef：layer:<id> / asset:<48 位 id> / 受限内联图 / "selection:"（当前选框）
+   * - maskRect：{x,y,width,height} 的显式矩形（画布坐标），不依赖任何工具状态
+   * 没有来源时不允许出现蒙版附属参数 —— 否则调用方会以为生效了，实际被静默忽略。
+   */
+  readMaskSpec(p) {
+    const given = ['maskMode', 'maskInvert', 'featherPx'].filter(key => p[key] !== undefined);
+    const hasRef = p.maskRef !== undefined;
+    const hasRect = p.maskRect !== undefined;
+    if (!hasRef && !hasRect) {
+      if (given.length) throw this.error('INVALID_REQUEST', 'maskMode/maskInvert/featherPx 需要同时给 maskRef 或 maskRect');
+      return null;
+    }
+    if (hasRef && hasRect) throw this.error('INVALID_REQUEST', 'maskRef 与 maskRect 只能给一个');
+    if (p.maskInvert !== undefined && typeof p.maskInvert !== 'boolean') throw this.error('INVALID_REQUEST');
+    const featherPx = p.featherPx === undefined ? 0 : p.featherPx;
+    if (!Number.isSafeInteger(featherPx) || featherPx < 0 || featherPx > 64) throw this.error('INVALID_REQUEST', 'featherPx 必须是 0..64 的整数');
+    if (hasRect) {
+      const rect = p.maskRect;
+      if (!plain(rect) || !keysOnly(rect, ['x', 'y', 'width', 'height'])) throw this.error('INVALID_REQUEST', 'maskRect 只接受 x/y/width/height');
+      for (const key of ['x', 'y']) if (!Number.isSafeInteger(rect[key]) || rect[key] < -16384 || rect[key] > 16384) throw this.error('INVALID_REQUEST', `maskRect.${key} 必须是整数像素`);
+      for (const key of ['width', 'height']) if (!Number.isSafeInteger(rect[key]) || rect[key] < 1 || rect[key] > 16384) throw this.error('INVALID_REQUEST', `maskRect.${key} 必须是 1..16384 的整数`);
+      return { rect: { ...rect }, mode: p.maskMode ?? 'alpha', invert: p.maskInvert === true, featherPx };
+    }
+    if (typeof p.maskRef !== 'string' || !p.maskRef) throw this.error('INVALID_REQUEST');
+    const isLayer = p.maskRef.startsWith('layer:');
+    const isSelection = p.maskRef === 'selection:';
+    if (!isLayer && !isSelection && !/^asset:[a-f0-9]{48}$/.test(p.maskRef) && !/^data:image\/(png|jpeg|webp);base64,/.test(p.maskRef)) {
+      throw this.error('INVALID_REQUEST', 'maskRef 只支持 layer:<id>、selection:、asset:<48 位 id> 或受限内联图');
+    }
+    const mode = p.maskMode === undefined ? (isLayer || isSelection ? 'alpha' : 'luminance') : p.maskMode;
+    if (!['luminance', 'alpha'].includes(mode)) throw this.error('INVALID_REQUEST', 'maskMode 只能是 luminance 或 alpha');
+    return { ref: p.maskRef, mode, invert: p.maskInvert === true, featherPx };
+  }
+
+  /**
+   * 当前选框（画布坐标），没有就是 null。
+   * 只有「选择工具」激活时才可信：该工具切走时 on_leave 会清空选区（见 config.TOOLS 的 on_leave）。
+   * 这里只读全局 Base_selection，不去构造工具单例，避免读状态产生副作用。
+   */
+  readSelectionRect() {
+    try {
+      if (config.TOOL?.name !== 'selection') return null;
+      const data = app.Layers?.Base_selection?.get_selection?.();
+      if (!data) return null;
+      const rect = { x: data.x, y: data.y, width: data.width, height: data.height };
+      if (!Number.isFinite(rect.x) || !Number.isFinite(rect.y) || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) return null;
+      if (rect.width < 1 || rect.height < 1) return null;
+      return rect;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** 把任意合法 sourceRef 解码成同尺寸画布；来源统一后，蒙版与 fit 只面对一种输入。 */
+  async decodeSourceCanvas(sourceRef) {
+    if (typeof sourceRef !== 'string' || !sourceRef) throw this.error('INVALID_REQUEST');
+    if (sourceRef.startsWith('layer:')) {
+      const layer = config.layers.find(item => String(item.id) === sourceRef.slice('layer:'.length));
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      const image = this.rasterizeLayer(layer);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width; canvas.height = image.height;
+      canvas.getContext('2d').putImageData(image, 0, 0);
+      return { canvas, width: canvas.width, height: canvas.height };
+    }
+    let dataUrl;
+    if (sourceRef.startsWith('asset:')) {
+      const assetId = sourceRef.slice('asset:'.length);
+      if (!/^[a-f0-9]{48}$/.test(assetId)) throw this.error('INVALID_REQUEST', 'asset id format is invalid');
+      const assetToken = await this.requestAssetToken();
+      const response = await fetch(`/media-image/assets/${assetId}`, { credentials: 'same-origin', headers: { Authorization: `Bearer ${assetToken}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1' } });
+      if (!response.ok) throw this.error(response.status === 404 ? 'ASSET_NOT_FOUND' : 'ASSET_FETCH_FAILED', response.status === 404 ? '素材不存在或已过期，请重新上传' : '素材读取失败，请重试');
+      const blob = await response.blob();
+      dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(this.error('ASSET_FETCH_FAILED', '素材读取失败，请重试'));
+        reader.readAsDataURL(blob);
+      });
+    } else if (/^data:image\/(png|jpeg|webp);base64,/.test(sourceRef)) {
+      dataUrl = sourceRef;
+    } else {
+      throw this.error('INVALID_REQUEST');
+    }
+    const image = new Image();
+    const loaded = await new Promise((resolve, reject) => {
+      image.onload = () => resolve(true);
+      image.onerror = () => reject(this.error('INVALID_IMAGE_DATA', '图片无法解码'));
+      image.src = dataUrl;
+    });
+    if (!loaded || !image.naturalWidth || !image.naturalHeight) throw this.error('INVALID_IMAGE_DATA');
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    canvas.getContext('2d').drawImage(image, 0, 0);
+    return { canvas, width: canvas.width, height: canvas.height, dataUrl };
+  }
+
+  /** 蒙版来源统一成"一张可缩放的画布"：矩形/选区在画布坐标系里绘制，其余按引用解码。 */
+  async maskCanvasFor(spec) {
+    const rect = spec.rect ?? (spec.ref === 'selection:' ? this.readSelectionRect() : null);
+    if (spec.ref === 'selection:' && !rect) {
+      throw this.error('NO_SELECTION', '当前没有选区：请先用选择工具拉一个选框（保持该工具激活），或改用 maskRect 给显式矩形');
+    }
+    if (rect) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, config.WIDTH || 1);
+      canvas.height = Math.max(1, config.HEIGHT || 1);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+      return canvas;
+    }
+    const decoded = await this.decodeSourceCanvas(spec.ref);
+    return decoded.canvas;
+  }
+
+  /** 按蒙版裁剪 alpha：源图颜色不变，只在蒙版为黑处挖空。返回新画布，不改动输入。 */
+  async applyMaskToCanvas(decoded, spec) {
+    const maskSource = await this.maskCanvasFor(spec);
+    const { width, height } = decoded;
+    const scaled = document.createElement('canvas');
+    scaled.width = width; scaled.height = height;
+    const maskCtx = scaled.getContext('2d');
+    maskCtx.drawImage(maskSource, 0, 0, width, height);
+    const sourcePixels = decoded.canvas.getContext('2d').getImageData(0, 0, width, height);
+    const maskPixels = maskCtx.getImageData(0, 0, width, height);
+    const ops = await this.pixelOps();
+    const masked = ops.applyMask(sourcePixels, maskPixels, { mode: spec.mode, invert: spec.invert, featherPx: spec.featherPx });
+    const out = document.createElement('canvas');
+    out.width = width; out.height = height;
+    out.getContext('2d').putImageData(masked, 0, 0);
+    return out;
+  }
+
+  /**
+   * 字体：受控加载已登记的字体文件。
+   * 用带令牌的 fetch 取字节再转 blob URL —— CSS 的 @font-face 请求不带自定义头，
+   * 直接给 FontFace 一个需要鉴权的 URL 会 403，所以先取字节、再喂给 FontFace。
+   */
+  readFontSpec(p) {
+    if (p.fontUrl === undefined) return null;
+    if (typeof p.fontUrl !== 'string' || !/^\/media-image\/fonts\/[a-f0-9]{48}$/.test(p.fontUrl)) {
+      throw this.error('INVALID_REQUEST', 'fontUrl 必须是 /media-image/fonts/<48 位 id>');
+    }
+    return p.fontUrl;
+  }
+
+  async ensureFontLoaded(family, fontUrl) {
+    const key = `${family}\u0000${fontUrl}`;
+    this.loadedFonts ??= new Map();
+    if (this.loadedFonts.has(key)) return;
+    if (typeof FontFace !== 'function' || !document?.fonts?.add) throw this.error('FONT_UNSUPPORTED', '当前浏览器不支持加载自定义字体');
+    const token = await this.requestAssetToken();
+    const response = await fetch(fontUrl, { credentials: 'same-origin', headers: { Authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1' } });
+    if (!response.ok) throw this.error(response.status === 404 ? 'FONT_NOT_FOUND' : 'FONT_FETCH_FAILED', '字体文件读取失败，请重新登记');
+    const blobUrl = URL.createObjectURL(await response.blob());
+    const face = new FontFace(family, `url(${blobUrl})`);
+    await face.load();
+    document.fonts.add(face);
+    this.loadedFonts.set(key, blobUrl);
+  }
+
   async prepare(command) {
     if (!keysOnly(command, ['type', 'payload']) || !COMMANDS.has(command.type)) throw this.error('UNSUPPORTED_COMMAND');
     const p = command.payload;
@@ -609,6 +805,43 @@ export class DshEditorBridge {
         if (!top || p.targetCommandId !== top.commandId || p.afterDigest !== top.afterDigest || top.revision !== this.revision || top.historyIndex !== app.State.action_history_index || top.action !== app.State.action_history[app.State.action_history_index - 1] || digestOf(this.documentState()) !== top.afterDigest) throw this.error('HISTORY_CONFLICT', '已有后续修改，不能单独撤销这一步');
       }
       return { history: command.type.split('.')[1], ids: () => [] };
+    }
+    if (command.type === 'layer.add_image') {
+      if (!keysOnly(p, ['sourceRef', 'x', 'y', 'width', 'height', 'fit', 'name', 'maskRef', 'maskRect', 'maskMode', 'maskInvert', 'featherPx'])) throw this.error('INVALID_REQUEST');
+      if ((p.width === undefined) !== (p.height === undefined)) throw this.error('INVALID_REQUEST');
+      const x = p.x === undefined ? 0 : p.x;
+      const y = p.y === undefined ? 0 : p.y;
+      if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) throw this.error('INVALID_REQUEST');
+      const name = p.name === undefined ? 'AI 生成图层' : p.name;
+      if (typeof name !== 'string' || name.length > 120) throw this.error('INVALID_REQUEST');
+      const fit = p.fit ?? 'contain';
+      if (!['stretch', 'contain', 'cover'].includes(fit)) throw this.error('INVALID_REQUEST');
+      const maskSpec = this.readMaskSpec(p);
+      // 先解码成画布：来源统一化之后，蒙版合成与 fit 计算都只面对同一种输入。
+      const decoded = await this.decodeSourceCanvas(p.sourceRef);
+      let width = p.width ?? decoded.width;
+      let height = p.height ?? decoded.height;
+      if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 16384 || height > 16384) throw this.error('INVALID_REQUEST');
+      // contain/cover 只在显式给了框时改写尺寸；这里用局部变量，不能碰还没构造出来的 layer。
+      if (fit !== 'stretch' && p.width !== undefined) {
+        const sourceRatio = decoded.width / decoded.height;
+        const targetRatio = width / height;
+        if (fit === 'contain' && sourceRatio !== targetRatio) {
+          const scale = Math.min(width / decoded.width, height / decoded.height);
+          width = Math.max(1, Math.round(decoded.width * scale));
+          height = Math.max(1, Math.round(decoded.height * scale));
+        } else if (fit === 'cover' && sourceRatio !== targetRatio) {
+          const scale = Math.max(width / decoded.width, height / decoded.height);
+          width = Math.max(width, Math.round(decoded.width * scale));
+          height = Math.max(height, Math.round(decoded.height * scale));
+        }
+      }
+      const canvas = maskSpec ? await this.applyMaskToCanvas(decoded, maskSpec) : null;
+      // 无蒙版时透传原始 dataUrl，避免对大图做无谓的二次编解码；只有真改了像素才重编码。
+      const data = canvas ? canvas.toDataURL('image/png') : (decoded.dataUrl || decoded.canvas.toDataURL('image/png'));
+      const layer = { name, type: 'image', data, x, y, width, height, width_original: width, height_original: height, visible: true, opacity: 100, rotate: 0 };
+      const action = new app.Actions.Insert_layer_action(layer, false);
+      return { action, ids: () => [String(action.inserted_layer_id)] };
     }
     if (command.type === 'canvas.resize' || command.type === 'canvas.crop') {
       const crop = command.type === 'canvas.crop';
@@ -701,9 +934,10 @@ export class DshEditorBridge {
       return { action: new app.Actions.Update_layer_action(layer.id, { x, y, width, height }), ids: () => [String(layer.id)] };
     }
     const fields = {
-      'layer.add_text': ['text', 'x', 'y', 'style'], 'layer.update_text': ['layerId', 'text'],
+      'layer.add_text': ['text', 'x', 'y', 'style', 'fontUrl'], 'layer.update_text': ['layerId', 'text', 'fontUrl'],
       'layer.set_transform': ['layerId', 'x', 'y', 'scaleX', 'scaleY', 'rotationDeg'],
-      'layer.set_visibility': ['layerId', 'visible'], 'layer.reorder': ['layerId', 'toIndex']
+      'layer.set_visibility': ['layerId', 'visible'], 'layer.reorder': ['layerId', 'toIndex'],
+      'layer.set_appearance': ['layerId', 'opacity', 'blendMode', 'name']
     };
     if (!keysOnly(p, fields[command.type])) throw this.error('INVALID_REQUEST');
     const validText = text => typeof text === 'string' && text.length <= 4000;
@@ -721,6 +955,12 @@ export class DshEditorBridge {
       if (style.family !== undefined && (typeof style.family !== 'string' || !/^[\p{L}\p{N} _-]{1,100}$/u.test(style.family))) throw this.error('INVALID_REQUEST');
       if (style.fill_color !== undefined && !/^#[0-9a-f]{6}$/i.test(style.fill_color)) throw this.error('INVALID_REQUEST');
       for (const key of ['bold', 'italic']) if (style[key] !== undefined && typeof style[key] !== 'boolean') throw this.error('INVALID_REQUEST');
+      const fontUrl = this.readFontSpec(p);
+      if (fontUrl) {
+        // 字体必须绑到一个 family 上才有意义；只给 URL 不给 family 是说明调用方搞错了。
+        if (typeof style.family !== 'string' || !style.family) throw this.error('INVALID_REQUEST', 'fontUrl 需要同时用 style.family 指定字体族');
+        await this.ensureFontLoaded(style.family, fontUrl);
+      }
       const action = new app.Actions.Insert_layer_action({ name: p.text.slice(0, 80) || '文本', type: 'text', x, y, rotate: 0, is_vector: true,
         render_function: ['text', 'render'], data: lines(p.text, style),
         params: { boundary: 'dynamic', kerning: 'metrics', text_direction: 'ltr', wrap_direction: 'ttb', halign: 'left', valign: 'top', wrap: 'letter' } }, false);
@@ -732,7 +972,14 @@ export class DshEditorBridge {
     const ids = () => [String(layer.id)];
     if (command.type === 'layer.update_text') {
       if (layer.type !== 'text' || !validText(p.text)) throw this.error('INVALID_REQUEST');
-      return { action: new app.Actions.Update_layer_action(layer.id, { data: lines(p.text, layer.data?.[0]?.[0]?.meta || {}) }), ids };
+      const existingStyle = layer.data?.[0]?.[0]?.meta || {};
+      const fontUrl = this.readFontSpec(p);
+      if (fontUrl) {
+        const family = existingStyle.family;
+        if (typeof family !== 'string' || !family) throw this.error('INVALID_REQUEST', '该文本层没有字体族，无法绑定 fontUrl');
+        await this.ensureFontLoaded(family, fontUrl);
+      }
+      return { action: new app.Actions.Update_layer_action(layer.id, { data: lines(p.text, existingStyle) }), ids };
     }
     if (command.type === 'layer.set_transform') {
       const settings = {};
@@ -752,6 +999,24 @@ export class DshEditorBridge {
     if (command.type === 'layer.set_visibility') {
       if (typeof p.visible !== 'boolean') throw this.error('INVALID_REQUEST');
       return { action: (layer.visible !== false) === p.visible ? null : new app.Actions.Toggle_layer_visibility_action(layer.id), ids };
+    }
+    if (command.type === 'layer.set_appearance') {
+      // 外观三元组：只写真正给了的字段；一个都没给就是无意义写入，直接拒绝。
+      const settings = {};
+      if (p.opacity !== undefined) {
+        if (typeof p.opacity !== 'number' || !Number.isFinite(p.opacity) || p.opacity < 0 || p.opacity > 100) throw this.error('INVALID_REQUEST', 'opacity 必须是 0..100 的数字');
+        settings.opacity = p.opacity;
+      }
+      if (p.blendMode !== undefined) {
+        if (!BLEND_MODES.has(p.blendMode)) throw this.error('INVALID_REQUEST', 'blendMode 不在支持的合成模式清单里');
+        settings.composition = p.blendMode;
+      }
+      if (p.name !== undefined) {
+        if (typeof p.name !== 'string' || !p.name.trim() || p.name.length > 120) throw this.error('INVALID_REQUEST', 'name 必须是 1..120 字符');
+        settings.name = p.name;
+      }
+      if (!Object.keys(settings).length) throw this.error('INVALID_REQUEST', 'opacity、blendMode、name 至少给一项');
+      return { action: new app.Actions.Update_layer_action(layer.id, settings), ids };
     }
     const sorted = app.Layers.get_sorted_layers();
     if (!Number.isSafeInteger(p.toIndex) || p.toIndex < 0 || p.toIndex >= sorted.length) throw this.error('INVALID_REQUEST');

@@ -202,6 +202,7 @@ export const TOOL_KINDS = {
   media_image_get_command_result: 'image',
   media_image_export_start: 'image',
   media_image_export_status: 'image',
+  media_image_generate: 'image',
 };
 
 export function digestOf(value) {
