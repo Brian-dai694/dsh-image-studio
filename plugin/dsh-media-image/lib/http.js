@@ -123,7 +123,9 @@ function authorizeSameOrigin(req, token, methods = ['POST'], { requireJson = tru
     return { reason: 'missing-relay-header', message: 'Relay header required when Origin is absent', observed };
   }
   if (h.authorization !== `Bearer ${token}`) return { reason: 'relay-auth-failed', message: 'Relay authentication failed', observed };
-  if (requireJson && methods.includes('POST') && h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
+  // 只对真正的 POST 要求 JSON：GET 没有请求体，浏览器也不会带 content-type。
+  // 早先写成"方法白名单里含 POST 就要求"，导致 GET 列表接口（provider / batch 列表）被自己挡成 403。
+  if (requireJson && req.method === 'POST' && h['content-type']?.split(';')[0] !== 'application/json') return { reason: 'content-type', message: 'JSON content type required', observed };
   if (!methods.includes(req.method)) return { reason: 'method', message: `${methods.join('/')} required`, observed };
   return null;
 }

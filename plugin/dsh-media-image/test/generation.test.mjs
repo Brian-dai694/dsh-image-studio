@@ -205,6 +205,37 @@ test('HTTP 路由：未配置 501、鉴权 403、提交 202、未知作业 404',
   assert.equal(unknownProvider.value.code, 'PROVIDER_UNKNOWN');
 });
 
+test('GET 列表路由不需要 content-type（浏览器 GET 不带它），POST 仍强制 JSON', async () => {
+  const assets = createAssetStore();
+  const token = 'ctype-token';
+  const service = createGenerationService({
+    providers: [{ id: 'local', kind: 'comfyui', baseUrl: 'http://x', workflow: WORKFLOW }],
+    assets, fetchImpl: async url => (url.endsWith('/prompt') ? { ok: true, status: 200, json: async () => ({ prompt_id: 'p' }) } : { ok: true, status: 200, json: async () => null }),
+  });
+  const router = createMediaRouter({ relay: { request: async () => ({}) }, editorKind: 'image', prefix: '/media-image', token, publicDir: '.', assets, generation: service });
+  const call = async ({ method = 'GET', url, headers = {}, body }) => {
+    const out = { status: 0, body: '' };
+    const res = { writeHead(status) { out.status = status; return res; }, end(chunk) { out.body = chunk === undefined ? '' : String(chunk); return res; } };
+    const req = { method, url, headers, async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)); } };
+    await router(req, res);
+    let value = null;
+    try { value = JSON.parse(out.body); } catch { value = null; }
+    return { ...out, value };
+  };
+  // 浏览器真实形态：GET 只有 Origin/Authorization，没有 content-type。
+  const browserGet = { host: 'localhost', origin: 'http://localhost', authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1' };
+  const listed = await call({ url: '/media-image/generate', headers: browserGet });
+  assert.equal(listed.status, 200, 'GET 列表不能被 content-type 守卫挡掉');
+  assert.equal(listed.value.providers[0].id, 'local');
+
+  const withJson = { ...browserGet, 'content-type': 'application/json' };
+  const submitted = await call({ method: 'POST', url: '/media-image/generate', headers: withJson, body: { provider: 'local', prompt: 'p' } });
+  assert.equal(submitted.status, 202);
+  const withoutJson = await call({ method: 'POST', url: '/media-image/generate', headers: browserGet, body: { provider: 'local', prompt: 'p' } });
+  assert.equal(withoutJson.status, 403, 'POST 仍然必须有 JSON content-type');
+  assert.equal(withoutJson.value.reason, 'content-type');
+});
+
 test('media_image_generate：未配置拒绝 → 发现列后端 → 提交 pending → 轮询 applied', async () => {
   const register = generation => {
     const tools = new Map();
