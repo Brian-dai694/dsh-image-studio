@@ -197,19 +197,29 @@ test('面板插入图层走真实编辑器命令，且未知结果只查不重�
   assert.equal(/for\s*\(.*retry/i.test(script), false, '插入路径不得含自动重试循环');
 });
 
-test('面板必须可见：不能被自己的样式藏起来（这条曾漏掉，四个面板全是 display:none）', () => {
+test('面板列按用户要求隐藏，能力全部收进助手（取代旧的"面板必须可见"契约）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const raw = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
-  // 先剥注释：注释里提到旧规则（例如说明这条坑）不算生效样式。
   const css = raw.replace(/\/\*[\s\S]*?\*\//g, '');
-  // aside 必须有自己的可见 display
-  assert.match(css, /aside\s*\{[^}]*display:\s*flex/, 'aside 必须设成可见的 flex 布局');
-  // 任何针对 aside 的 display:none 都是把面板藏起来
-  const hides = [...css.matchAll(/[^{}]*aside[^{}]*\{[^}]*display:\s*none[^}]*\}/g)].map(m => m[0].trim());
-  assert.deepEqual(hides, [], `样式里仍有隐藏 aside 的规则：${hides.join(' | ')}`);
-  // 主区必须是两列（编辑器 + 面板），否则面板会被挤到看不见的地方
-  assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+\d{3}px/, '主板式应给面板留一列');
+  // 用户明确要求：下方版块直接隐藏，这些功能助手就能解决
+  assert.match(css, /aside\s*\{\s*display:\s*none/, 'aside 必须隐藏');
+  assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;/, '主区应只剩一列');
+  // 助手自己持有后端与尺寸，不能依赖已隐藏的控件
+  for (const id of ['assist-provider', 'assist-refresh', 'assist-width', 'assist-height', 'assist-file']) {
+    assert.match(html, new RegExp(`id="${id}"`), `助手缺少控件 ${id}`);
+  }
+  for (const id of ['assist-provider', 'assist-refresh', 'assist-file']) {
+    assert.ok(script.includes(`'${id}'`), `${id} 必须在脚本里被使用`);
+  }
+  // 面板隐藏后助手必须覆盖原先把能力
+  for (const capability of ['生成[:：]', '批量[:：]', '导入[:：]', '字体[:：]', '字体列表', '状态', '插入图层']) {
+    assert.ok(script.includes(capability), `助手缺少能力：${capability}`);
+  }
+  // 本地文件上传入口不能在隐藏面板里断掉
+  assert.match(script, /assist-file'\)\?\.addEventListener\('change'/, '助手要接管本地文件上传');
 });
+// 2026-11-06：用户要求隐藏下方版块并把能力收进助手，旧断言"面板必须可见"随之作废。
 
 test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前是本地指令', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');

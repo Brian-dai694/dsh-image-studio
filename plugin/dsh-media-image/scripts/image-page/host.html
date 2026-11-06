@@ -5,22 +5,20 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>图片插件 · DSH 协作宿主</title>
   <style>
-/* finesse · register=product · A=warm-stone+mono-ink · B=600/400 · C=editor+pinned-rail
- * D=none(rAF-meter) · E=darkroom-paper · SOUL=6 SPECTACLE=2 DENSITY=7 */
+/* finesse · register=product · A=dsh-blue+cool-slate · B=600/400 · C=editor+floating-assistant
+ * D=none(rAF-meter) · E=host-consistent · SOUL=5 SPECTACLE=2 DENSITY=6 */
 :root{
-  /* 暖纸基底（Warm Stone）：页面 100，卡片更亮、内嵌更深 —— 三级靠亮度分层 */
-  --page:#f0ece5; --bg:#fbf9f5; --panel-2:#f4f1ea;
-  --border:rgba(41,36,30,.10); --border-soft:rgba(41,36,30,.06);
-  --ink-1:#191612; --ink-2:#4f473c; --ink-3:#7f7462;
-  /* 墨黑强调（Mono）：工具界面不抢画面颜色 */
-  --accent:#23262b; --accent-hover:#33373d; --accent-soft:rgba(35,38,43,.07); --on-accent:#fbf9f5;
-  /* 语义三色 = 状态图例，全页唯一的彩色 */
-  --run:#b77a16; --run-soft:rgba(183,122,22,.12);
-  --ok:#3f6b52; --ok-soft:rgba(63,107,82,.12);
-  --fail:#a8402c; --fail-soft:rgba(168,64,44,.12);
-  --shadow:0 1px 2px rgba(41,36,30,.06);
-  --shadow-lg:0 22px 48px -28px rgba(41,36,30,.42);
-  --r:14px; --r-sm:10px; --r-lg:20px;
+  /* 色系跟随 DSH 宿主：冷灰照明 + 白色卡面 + 宿主蓝强调（#4D6BFE） */
+  --page:#f4f5f7; --bg:#fdfdfe; --panel-2:#f0f1f4;
+  --border:rgba(24,28,38,.10); --border-soft:rgba(24,28,38,.06);
+  --ink-1:#15181f; --ink-2:#475061; --ink-3:#6b7484;
+  --accent:#4d6bfe; --accent-hover:#3d5bf0; --accent-soft:rgba(77,107,254,.10); --on-accent:#ffffff;
+  --run:#b8711a; --run-soft:rgba(184,113,26,.12);
+  --ok:#2f7d57; --ok-soft:rgba(47,125,87,.12);
+  --fail:#b1362a; --fail-soft:rgba(177,54,42,.12);
+  --shadow:0 1px 2px rgba(24,28,38,.06);
+  --shadow-lg:0 24px 52px -30px rgba(24,28,38,.45);
+  --r:14px; --r-sm:10px; --r-lg:18px;
   --tab:tabular-nums;
 }
 *{box-sizing:border-box}
@@ -29,10 +27,13 @@ body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Mic
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 20px;background:var(--bg);box-shadow:inset 0 -1px 0 var(--border)}
 header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:-.02em}
 .tag{font-size:11.5px;color:var(--ink-3);background:var(--panel-2);border:1px solid var(--border-soft);border-radius:999px;padding:3px 10px;font-variant-numeric:var(--tab)}
-main{display:grid;grid-template-columns:minmax(0,1fr) 348px;gap:12px;padding:12px;height:calc(100vh - 55px)}
+main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;height:calc(100vh - 55px)}
+/* 面板列按用户要求隐藏：这些能力已经收进悬浮助手，页面只留编辑器。
+   保留 DOM 与处理器（助手仍复用同一条 api() 通路），只是不再占版面。 */
+aside{display:none}
 .stage{min-width:0;min-height:0;background:var(--bg);border-radius:var(--r);overflow:hidden;box-shadow:var(--shadow),inset 0 0 0 1px var(--border)}
 iframe{width:100%;height:100%;border:0;display:block}
-aside{display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto;padding-right:2px}
+aside{display:none;flex-direction:column;gap:10px;min-height:0;overflow:auto;padding-right:2px}
 .panel{background:var(--bg);border-radius:var(--r);padding:13px;box-shadow:var(--shadow),inset 0 0 0 1px var(--border)}
 .panel h2{margin:0 0 10px;font-size:11.5px;font-weight:600;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:8px}
 .panel h2::after{content:"";flex:1;height:1px;background:var(--border-soft)}
@@ -88,6 +89,9 @@ ul.list li .item-actions{display:flex;gap:4px;flex-shrink:0}
 .bubble.bot{align-self:flex-start;background:var(--panel-2);border:1px solid var(--border-soft);color:var(--ink-1)}
 .bubble.me{align-self:flex-end;background:var(--accent-soft);color:var(--ink-1)}
 .bubble .ref{display:block;margin-top:5px;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-3);word-break:break-all}
+.assist-controls{padding:0 11px 8px}
+.assist-controls select,.assist-controls input[type=number]{font-size:12px;padding:5px 7px;background:var(--panel-2)}
+.assist-controls button{font-size:11.5px;padding:5px 9px}
 .assist-chips{display:flex;flex-wrap:wrap;gap:5px;padding:0 13px 8px}
 .assist-chips button{font-size:11.5px;padding:5px 9px;border-radius:999px;border:1px solid var(--border);background:var(--bg);color:var(--ink-2)}
 .assist-chips button:hover{background:var(--panel-2);color:var(--ink-1)}
@@ -211,6 +215,15 @@ dialog#confirm-modal pre{max-height:200px}
       <button class="assist-icon" id="assist-close" title="关闭">✕</button>
     </div>
     <div class="assist-log" id="assist-log"></div>
+    <div class="assist-controls">
+      <div class="row" style="gap:6px">
+        <select id="assist-provider" aria-label="生成后端" style="flex:1 1 120px"><option value="">后端：点刷新</option></select>
+        <button class="ghost" id="assist-refresh" title="刷新后端">刷新</button>
+        <input type="number" id="assist-width" value="1024" min="16" max="8192" aria-label="宽" style="flex:0 0 66px">
+        <input type="number" id="assist-height" value="1024" min="16" max="8192" aria-label="高" style="flex:0 0 66px">
+      </div>
+      <input type="file" id="assist-file" accept="image/png,image/jpeg,image/webp" hidden>
+    </div>
     <div class="assist-chips" id="assist-chips"></div>
     <div class="assist-input">
       <input id="assist-text" type="text" placeholder="想改什么，直接说" autocomplete="off">

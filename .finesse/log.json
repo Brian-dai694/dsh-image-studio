@@ -36,6 +36,36 @@
           "generation/batch/asset work already runs Host-side; page only reflects it"
         ]
       }
+    },
+    {
+      "at": "2026-11-06",
+      "mode": "redesign · pass 2 (user feedback)",
+      "surface": "scripts/image-page/host.html + host.js",
+      "register": "product",
+      "dials": { "soul": 5, "spectacle": 2, "density": 6 },
+      "axes": {
+        "palette": "DSH host tokens — cool slate neutrals + host blue #4d6bfe (pass 1's warm-stone/mono was rejected: 色系与dsh 一致)",
+        "type": "13/14/11.5px scale, -0.02em headings, tabular-nums",
+        "layout": "editor full-width, panel rail hidden, single floating assistant",
+        "engine": "none (rAF meter only)",
+        "material": "host-consistent chrome — the page should read as part of DSH, not as its own brand"
+      },
+      "userFeedback": [
+        "下面的版块直接隐藏",
+        "这些功能助手就能解决",
+        "色系与dsh 一致"
+      ],
+      "changed": [
+        "aside (生成/批量/素材/字体/回读/边界) hidden; page is editor + assistant only",
+        "assistant took ownership: provider select, width/height, local file upload, font list, read-state",
+        "palette switched to DSH tokens (host blue accent, cool neutral ramp)",
+        "old 'panels must be visible' contract retired and replaced by 'panels hidden + assistant covers the capabilities'"
+      ],
+      "verification": {
+        "sourceLevel": "179/179 tests, incl. retired-contract note and assistant-coverage assertions",
+        "measured": "none — still no fps/latency claim",
+        "boundary": "the hidden panels' DOM and handlers remain (assistant reuses the same api() path); DOM removal is a separate cleanup with no behavioral gain"
+      }
     }
   ]
 }

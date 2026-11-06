@@ -779,10 +779,46 @@ function bubble(role, text, ref) {
 const CHIPS = [
   ['生成', '生成：柔和晨光，浅灰色调'],
   ['批量', '批量：晨光|夜景|木桌'],
+  ['上传', '@upload'],
   ['导入', '导入：https://example.com/a.png'],
-  ['字体', '字体：https://example.com/f.woff2 Source Han Sans'],
+  ['字体', '字体列表'],
+  ['状态', '状态'],
   ['帮助', '能做什么'],
 ];
+
+// 助手自己持有后端与尺寸（面板列已隐藏），所以这里的值就是唯一来源。
+const assistProvider = () => $('assist-provider')?.value || $('gen-provider')?.value || '';
+const assistSize = () => ({
+  width: Number($('assist-width')?.value) || Number($('gen-width')?.value) || 1024,
+  height: Number($('assist-height')?.value) || Number($('gen-height')?.value) || 1024,
+});
+
+async function fillProviders() {
+  const select = $('assist-provider');
+  if (!select) return 0;
+  try {
+    const value = await api('/media-image/generate');
+    const providers = value.providers || [];
+    select.textContent = '';
+    if (!providers.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = '未配置后端';
+      select.append(option);
+      return 0;
+    }
+    for (const provider of providers) {
+      const option = document.createElement('option');
+      option.value = provider.id;
+      option.textContent = provider.id;
+      select.append(option);
+    }
+    return providers.length;
+  } catch (error) {
+    bubble('bot', `拿不到后端列表：${error.code || ''} ${error.message}`);
+    return 0;
+  }
+}
 
 function renderChips() {
   const box = $('assist-chips');
@@ -791,19 +827,48 @@ function renderChips() {
   for (const [label, command] of CHIPS) {
     const button = document.createElement('button');
     button.textContent = label;
-    button.addEventListener('click', () => void sendAssist(command));
+    button.addEventListener('click', () => {
+      if (command === '@upload') { $('assist-file')?.click(); return; }
+      void sendAssist(command);
+    });
     box.append(button);
   }
 }
 
+// 本地文件上传：面板列隐藏后，入口在这里（选完文件立刻上传并回执）。
+$('assist-file')?.addEventListener('change', async event => {
+  const file = event.target?.files?.[0];
+  if (!file) return;
+  bubble('me', `上传：${file.name}（${Math.round(file.size / 1024)} KB）`);
+  const pending = bubble('bot', '正在上传并校验…');
+  try {
+    const asset = await uploadImageAsset(file);
+    rememberAsset(asset);
+    pending.textContent = '已上传。要我插入图层就说「插入图层」。';
+    const ref = document.createElement('span');
+    ref.className = 'ref';
+    ref.textContent = `asset:${asset.id}`;
+    pending.append(ref);
+  } catch (error) {
+    pending.textContent = `${error.code || 'UPLOAD_FAILED'}：${error.message}`;
+  } finally {
+    event.target.value = '';
+  }
+});
+
 const HELP = [
-  '我现在支持这些说法（都走插件已有能力，不需要模型）：',
-  '· 生成：<提示词>             → 提交一个生成作业并轮询结果',
-  '· 批量：<提示词>|<提示词>    → 按行排进批量队列（并发 2）',
+  '面板已经收起来了，下面这些都在这儿说（走插件已有能力，不调模型）：',
+  '· 生成：<提示词>             → 出一张图，完成后可插入图层',
+  '· 批量：<提示词>|<提示词>    → 排队生成（并发 2），逐项状态，失败可单条重试',
+  '· 上传（点上面那颗按钮）      → 本地图片入库（PNG/JPEG/WebP ≤32 MiB）',
   '· 导入：<图片 URL>           → 受控拉取远程素材（拦内网）',
-  '· 字体：<字体 URL> <族名>     → 登记字体，供文字图层使用',
-  '· 插入图层                  → 把最近一次生成结果落成图层（会弹确认框）',
+  '· 字体：<URL> <族名>         → 登记字体；「字体列表」看已登记的',
+  '· 插入图层                  → 把最近一次结果落成图层（会弹确认框）',
+  '· 状态                      → 读一次编辑器：文档、版本、图层数',
 ].join('\n');
+
+// 最近一次生成的 assetRef —— 面板不再可见，状态由助手自己持有。
+let lastAssetRef = '';
 
 // 一句话 → 动作。返回给用户看的文本；失败要说清是哪个环节。
 async function routeAssist(raw) {
@@ -813,10 +878,32 @@ async function routeAssist(raw) {
 
   if (/^(帮助|能做什么|help|\?)$/i.test(text)) { say(HELP); return; }
 
+  if (/^(字体列表|看字体|字体)$/.test(text)) {
+    try {
+      const value = await api('/media-image/fonts');
+      const fonts = value.fonts || [];
+      if (!fonts.length) { say('还没有登记字体。用「字体：<URL> <族名>」登记一个。'); return; }
+      say(`已登记 ${fonts.length} 个字体：\n${fonts.map((font, index) => `${index + 1}. ${font.family} · ${font.mime} · ${font.bytes}B`).join('\n')}`);
+    } catch (error) {
+      say(`${error.code || 'FONT_LIST_FAILED'}：${error.message}`);
+    }
+    return;
+  }
+
+  if (/^(状态|看看画布|read state)$/i.test(text)) {
+    try {
+      const connection = await connect();
+      const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+      say(`工程 ${String(state.documentId).slice(0, 8)}… · R${state.revision} · 画布 ${state.canvas.width}×${state.canvas.height} · 图层 ${state.layers.length} 个${state.selection ? ` · 有选区 ${state.selection.width}×${state.selection.height}` : ''}`);
+    } catch (error) {
+      say(`${error.code || 'READ_FAILED'}：${error.message}（先在编辑器里画点东西，或点「重新连接」）`);
+    }
+    return;
+  }
+
   if (/^(插入|落层|插入图层|放进去)/.test(text)) {
-    const last = $('gen-result')?.textContent || '';
-    const match = /"assetRef":\s*"asset:([a-f0-9]{48})"/.exec(last);
-    if (!match) { say('还没有可插入的生成结果。先用「生成：…」出一张。'); return; }
+    const match = /asset:([a-f0-9]{48})/.exec(lastAssetRef || $('gen-result')?.textContent || '');
+    if (!match) { say('还没有可插入的结果。先用「生成：…」出一张，或点「上传」。'); return; }
     await insertAssetAsLayer({ id: match[1], name: '助手插入的图片' });
     say('已发出插入请求，确认框里点「确认插入」才真正落层。');
     return;
@@ -824,19 +911,19 @@ async function routeAssist(raw) {
 
   const gen = /^生成[:：]\s*(.+)$/s.exec(text);
   if (gen) {
-    const provider = $('gen-provider')?.value;
-    if (!provider) { say('还没选后端：先在上方「生成」面板点「刷新」。'); return; }
+    const provider = assistProvider();
+    if (!provider) { say('还没选后端：点控制条上的「刷新」，选一个后端再试。'); return; }
+    const size = assistSize();
     const pill = bubble('bot', '正在提交生成…');
     try {
-      const value = await api('/media-image/generate', { method: 'POST', body: { provider, prompt: gen[1].trim(), width: 1024, height: 1024 } });
+      const value = await api('/media-image/generate', { method: 'POST', body: { provider, prompt: gen[1].trim(), width: size.width, height: size.height } });
       let job = value.job;
       for (let i = 0; i < 20 && job.status !== 'succeeded' && job.status !== 'failed'; i += 1) {
         await new Promise(resolve => setTimeout(resolve, 800));
         job = (await api(`/media-image/generate/${encodeURIComponent(job.jobId)}`)).job;
       }
       if (job.status === 'succeeded') {
-        $('gen-result').textContent = JSON.stringify(job, null, 2);
-        setPill('gen-pill', 'succeeded');
+        lastAssetRef = job.assetRef;
         pill.textContent = '生成完成。要我插入图层就说「插入图层」。';
         const ref = document.createElement('span');
         ref.className = 'ref';
@@ -844,7 +931,7 @@ async function routeAssist(raw) {
         pill.append(ref);
         rememberAsset({ id: job.assetRef.slice(6), name: '助手生成的图片', bytes: 0 });
       } else {
-        pill.textContent = `生成失败：${job.error || job.status}（不会自动重试）`;
+        pill.textContent = `生成失败：${job.error || job.status} · 改提示词后重新提交（不重放旧作业）`;
       }
     } catch (error) {
       pill.textContent = `${error.code || 'GENERATE_FAILED'}：${error.message}`;
@@ -854,7 +941,7 @@ async function routeAssist(raw) {
 
   const batch = /^批量[:：]\s*(.+)$/s.exec(text);
   if (batch) {
-    const provider = $('gen-provider')?.value;
+    const provider = assistProvider();
     if (!provider) { say('还没选后端：先在上方「生成」面板点「刷新」。'); return; }
     const prompts = batch[1].split(/[|｜\n]/).map(line => line.trim()).filter(Boolean);
     try {
@@ -874,7 +961,7 @@ async function routeAssist(raw) {
     try {
       const value = await api('/media-image/assets/import', { method: 'POST', body: { url: imported[1] } });
       rememberAsset(value.asset);
-      say(`已导入 ${value.asset.bytes} bytes，可以去「素材」面板插入图层。`, `asset:${value.asset.id}`);
+      say(`已导入 ${value.asset.bytes} bytes · 说「插入图层」就落层。`, `asset:${value.asset.id}`);
     } catch (error) {
       say(`${error.code || 'IMPORT_FAILED'}：${error.message}`);
     }
@@ -893,7 +980,7 @@ async function routeAssist(raw) {
     return;
   }
 
-  say('还没听懂。我目前只认「生成：」「批量：」「导入：」「字体：」「插入图层」和「帮助」。');
+  say('还没听懂。点下面的快捷按钮，或说「帮助」看全部说法。');
 }
 
 let assistBusy = false;
@@ -914,6 +1001,11 @@ async function sendAssist(raw) {
   }
 }
 
+$('assist-refresh')?.addEventListener('click', async () => {
+  const count = await fillProviders();
+  bubble('bot', count ? `已发现 ${count} 个后端，选一个就能生成。` : '这个部署没有配置生成后端；素材/字体/导入仍可用。');
+});
+
 function openAssist(open) {
   const card = $('assist-card');
   const launcher = $('assist-open');
@@ -922,7 +1014,8 @@ function openAssist(open) {
   card.classList.toggle('open', next);
   if (launcher) launcher.style.display = next ? 'none' : '';
   if (next) {
-    if (!assistLog.children.length) bubble('bot', '你好，这是一个图片工作台。说「生成：…」出图，说「帮助」看全部说法。');
+    if (!assistLog.children.length) bubble('bot', '这是一个图片工作台：说「生成：…」出图，「上传」放本地图，「状态」看画布。点「帮助」看全部说法。');
+    if (!$('assist-provider')?.value) void fillProviders();
     assistText?.focus();
   }
 }
