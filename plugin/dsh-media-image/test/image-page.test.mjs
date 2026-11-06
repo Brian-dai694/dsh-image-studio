@@ -163,7 +163,7 @@ test('packaged wrapper binds the editor to the image relay only', async () => {
 test('每个可点面板控件都真的绑了处理器（防"面板空壳"）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
-  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
+  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'gen-insert', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
   const lines = script.split('\n');
   for (const id of interactive) {
     assert.match(html, new RegExp(`id="${id}"`), `host.html 缺少控件 ${id}`);
@@ -175,6 +175,26 @@ test('每个可点面板控件都真的绑了处理器（防"面板空壳"）', 
   for (const id of ['gen-pill', 'gen-status', 'gen-result', 'asset-status', 'asset-list', 'font-status', 'font-list']) {
     assert.match(html, new RegExp(`id="${id}"`), `host.html 缺少输出位 ${id}`);
   }
+});
+
+test('面板插入图层走真实编辑器命令，且未知结果只查不重发', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  // 确认对话框必须是页面内的显式确认：点击者即用户本人，这是"人工确认"的落点。
+  for (const id of ['confirm-modal', 'confirm-body', 'confirm-mask', 'confirm-ok', 'confirm-cancel']) {
+    assert.match(html, new RegExp(`id="${id}"`), `缺少确认对话框元素 ${id}`);
+  }
+  assert.match(script, /modal\.addEventListener\('close'/, '对话框结果要靠 close 事件回收');
+  // 走的是编辑器既有契约，不是新协议。
+  assert.match(script, /type: 'editor\.apply_command'/);
+  assert.match(script, /type: 'layer\.add_image'/);
+  assert.match(script, /expectedRevision: state\.revision/, '写入必须带读到的 revision');
+  assert.match(script, /maskRef = 'selection:'/, '选作蒙版时用 selection: 引用');
+  // 冲突与未知结果的处理：冲突让用户重点一次，未知只提示查询、不得重发。
+  assert.match(script, /REVISION_CONFLICT/);
+  assert.match(script, /EDITOR_TIMEOUT_OUTCOME_UNKNOWN/);
+  assert.match(script, /不要重发/);
+  assert.equal(/for\s*\(.*retry/i.test(script), false, '插入路径不得含自动重试循环');
 });
 
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {

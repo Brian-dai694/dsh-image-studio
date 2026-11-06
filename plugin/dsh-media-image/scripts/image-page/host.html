@@ -72,7 +72,7 @@
           <div style="flex:1 1 90px"><label for="gen-width">宽</label><input type="number" id="gen-width" min="16" max="8192" value="1024"></div>
           <div style="flex:1 1 90px"><label for="gen-height">高</label><input type="number" id="gen-height" min="16" max="8192" value="1024"></div>
         </div>
-        <div class="row"><button class="primary" id="gen-submit">提交生成</button><span class="pill" id="gen-pill">idle</span></div>
+        <div class="row"><button class="primary" id="gen-submit">提交生成</button><button id="gen-insert">把结果插入图层</button><span class="pill" id="gen-pill">idle</span></div>
         <p class="status" id="gen-status">提交后按 jobId 轮询；<code>unknown</code> 会继续查，不会重新提交。</p>
         <pre id="gen-result">尚无作业。</pre>
       </section>
@@ -118,6 +118,20 @@
       </section>
     </aside>
   </main>
+  <dialog id="confirm-modal">
+    <form method="dialog" style="min-width:320px;max-width:520px">
+      <h3 id="confirm-title" style="margin:0 0 10px;font-size:15px">确认插入图层</h3>
+      <pre id="confirm-body" style="max-height:220px">—</pre>
+      <label id="confirm-mask-row" style="display:none;margin:12px 0 0;font-size:13px;color:var(--ink)">
+        <input type="checkbox" id="confirm-mask" style="width:auto;margin-right:6px">用当前选区作蒙版（仅选区内的新图层可见）
+      </label>
+      <p class="note" style="margin:12px 0 0">这一步会真实修改工程并进入撤销历史；取消不会产生任何命令。</p>
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button value="cancel" id="confirm-cancel">取消</button>
+        <button value="ok" class="primary" id="confirm-ok">确认插入</button>
+      </div>
+    </form>
+  </dialog>
   <script type="module" src="host.js"></script>
 </body>
 </html>

@@ -231,6 +231,11 @@ function renderAssets() {
       );
     });
     item.append(label, copy);
+    // 每个素材都能直接插成图层（带确认对话框）。
+    const insert = document.createElement('button');
+    insert.textContent = '插入为图层';
+    insert.addEventListener('click', () => void insertAssetAsLayer(asset));
+    item.append(insert);
     list.append(item);
   }
 }
@@ -239,6 +244,88 @@ function rememberAsset(asset) {
   if (!asset?.id || knownAssets.some(item => item.id === asset.id)) return;
   knownAssets.unshift(asset);
   renderAssets();
+}
+
+// ── 面板内直接插入图层 ──
+// 走 editor.apply_command（和模型工具同一条编辑器契约）。人工确认由本页的对话框承担：
+// 点击者就是用户本人，所以不需要再走一次宿主审批。未知结果只允许按 commandId 查询，绝不重发。
+function askConfirm({ title, details, maskAvailable }) {
+  return new Promise(resolve => {
+    const modal = $('confirm-modal');
+    if (!modal || typeof modal.showModal !== 'function') { resolve({ ok: false, reason: 'NO_MODAL' }); return; }
+    $('confirm-title').textContent = title;
+    $('confirm-body').textContent = details;
+    const maskRow = $('confirm-mask-row');
+    const maskBox = $('confirm-mask');
+    maskRow.style.display = maskAvailable ? 'block' : 'none';
+    if (maskBox) maskBox.checked = false;
+    const done = value => {
+      modal.removeEventListener('close', onClose);
+      resolve(typeof value === 'string' ? { ok: value === 'ok', useMask: !!(maskBox && maskBox.checked && maskAvailable) } : { ok: false, reason: 'DISMISSED' });
+    };
+    const onClose = () => done(modal.returnValue);
+    modal.addEventListener('close', onClose);
+    modal.returnValue = '';
+    modal.showModal();
+  });
+}
+
+let lastInsert = null;
+
+async function insertAssetAsLayer(asset) {
+  if (!asset?.id) return;
+  const statusEl = $('asset-status');
+  try {
+    const connection = await connect();
+    const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+    const sourceRef = `asset:${asset.id}`;
+    const maskAvailable = !!(state.selection && state.selection.width > 0 && state.selection.height > 0);
+    const answer = await askConfirm({
+      title: '插入为图层',
+      details: [
+        `sourceRef  ${sourceRef}`,
+        `目标工程  ${state.documentId} · R${state.revision}`,
+        `画布      ${state.canvas.width}×${state.canvas.height}`,
+        maskAvailable ? `蒙版      当前选区 ${state.selection.width}×${state.selection.height}` : '蒙版      无（未检测到选区）',
+      ].join('\n'),
+      maskAvailable,
+    });
+    if (!answer.ok) { statusEl.textContent = '已取消，没有发送任何命令。'; return; }
+
+    const params = { sourceRef, name: asset.name || '插入的素材' };
+    if (answer.useMask) { params.maskRef = 'selection:'; }
+    const commandId = crypto.randomUUID();
+    const result = await transport.request({
+      type: 'editor.apply_command',
+      requestId: crypto.randomUUID(),
+      editorInstanceId: connection.editorInstanceId,
+      documentId: state.documentId,
+      expectedRevision: state.revision,
+      commandId,
+      command: { type: 'layer.add_image', payload: params },
+    }, { timeoutMs: 15000 });
+
+    lastInsert = { commandId, revision: result?.revision, changed: result?.changedObjectIds || [] };
+    statusEl.textContent = `已插入图层 · R${result?.revision}${answer.useMask ? '（带选区蒙版）' : ''}`;
+    show(await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId }));
+  } catch (error) {
+    const code = error.code || 'INSERT_FAILED';
+    if (code === 'REVISION_CONFLICT') {
+      statusEl.textContent = '工程已变化（REVISION_CONFLICT）：请重新点一次插入，会用最新 revision。';
+    } else if (code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN' || error.outcomeUnknown) {
+      statusEl.textContent = `结果未知（${lastInsert?.commandId || '命令已发出'}）：不要重发，用该 commandId 查询结果。`;
+    } else {
+      statusEl.textContent = `${code}：${error.message}`;
+    }
+  }
+}
+
+// 生成完成后的结果也能一键插入（同样带确认）。
+async function insertGenerated() {
+  const text = $('gen-result')?.textContent || '';
+  const match = /"assetRef":\s*"asset:([a-f0-9]{48})"/.exec(text);
+  if (!match) { $('gen-status').textContent = '当前没有可插入的生成结果（需要 succeeded 且带 assetRef）。'; return; }
+  await insertAssetAsLayer({ id: match[1], name: '生成的图片' });
 }
 
 $('asset-upload')?.addEventListener('click', async () => {
@@ -335,6 +422,7 @@ async function pollJob(jobId) {
 }
 
 $('gen-refresh')?.addEventListener('click', () => void loadProviders());
+$('gen-insert')?.addEventListener('click', () => void insertGenerated());
 
 $('gen-submit')?.addEventListener('click', async () => {
   const provider = $('gen-provider')?.value;
