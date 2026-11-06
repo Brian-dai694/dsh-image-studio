@@ -6,7 +6,12 @@
 // 模型只负责"想"：回一段中文 + 一组受限的 ops。执行发生在页面上（它拥有编辑器），
 // 所以模型永远不会声称某个操作已经完成。
 
-export const OP_TYPES = ['generate', 'batch', 'import', 'insert', 'status', 'fontList'];
+import { ALLOWED_COMMANDS } from './bridge.js';
+
+export const OP_TYPES = ['generate', 'batch', 'import', 'insert', 'status', 'fontList', 'command'];
+
+/** 模型可以提议的编辑命令 —— 直接取编辑器白名单，避免两处各写一份而漂移。 */
+export const PROPRIETABLE_COMMANDS = [...ALLOWED_COMMANDS.image].sort();
 
 const SYSTEM = `你是 DeepSeek Harness 图片编辑器插件里的助手。用户用一句话让你在这张画布上做事或回答问题。
 
@@ -20,9 +25,18 @@ ops 只允许这几种（不认识的不要编）：
 - {"type":"insert"}                                                     把最近一次生成的图插成图层
 - {"type":"status"}                                                     读一次编辑器状态（版本/图层数/选区）
 - {"type":"fontList"}                                                   列出已登记字体
+- {"type":"command","command":{"type":"<命令名>","payload":{…}}}        提议一次画布编辑（用户确认后才执行）
+
+command 的 type 只能取下面这些（编辑器白名单，别的会被拒）：
+${PROPRIETABLE_COMMANDS.join('、')}
+
+command 的 payload 要带全该命令必需的字段（例如图层类命令要 layerId；文本类要 text）。
 
 规则：
-- 你**不执行**任何操作，只提议。绝不要说"已经生成/已经插入"；reply 里用"我来生成…""要我插入就说插入图层"。
+- 你**不执行**任何操作，只提议。绝不要说"已经生成/已经插入/已经改好"；reply 里用"我来生成…""要我插入就说插入图层"
+  "我会把不透明度调到 60%，你确认后生效"这类说法。
+- 破坏性命令（layer.remove / canvas.crop / layer.add_image）也允许提议，但 reply 里必须明确说它会删/裁什么。
+- 一次最多提议 1 个 command，不要连着改好几层。
 - 用户问的是画布以外的问题（概念、建议）时 ops 为空，直接用 reply 回答。
 - 用户描述模糊但意图清楚时自己补全合理参数，不要反问一堆问题；真的不清楚才在 reply 里问一句。
 - 不要把 Markdown、代码块、列表写进 reply（界面只显示纯文本）。
@@ -80,6 +94,21 @@ export async function callModel(ctx, { system, user, maxTokens = 1200, signal, o
   }
 }
 
+/** op 的形状校验：命令类必须命中编辑器白名单且带 payload，其它类型只认已知字段。 */
+function validOp(op) {
+  if (op.type === 'command') {
+    const command = op.command;
+    if (!command || typeof command.type !== 'string') return false;
+    if (!ALLOWED_COMMANDS.image.has(command.type)) return false;
+    if (!command.payload || typeof command.payload !== 'object' || Array.isArray(command.payload)) return false;
+    return true;
+  }
+  if (op.type === 'generate') return typeof op.prompt === 'string' && op.prompt.trim().length > 0;
+  if (op.type === 'batch') return Array.isArray(op.prompts) && op.prompts.length > 0;
+  if (op.type === 'import') return typeof op.url === 'string' && /^https?:\/\//i.test(op.url);
+  return true;
+}
+
 /** 从模型文本里取出 JSON；取不到就把整段当 reply（不算失败）。 */
 export function parsePlan(text) {
   const raw = String(text || '').trim();
@@ -92,7 +121,7 @@ export function parsePlan(text) {
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
       const reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : '处理好了。';
-      const ops = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type)) : [];
+      const ops = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type) && validOp(op)) : [];
       return { reply, ops, droppedOps: Array.isArray(parsed.ops) ? parsed.ops.length - ops.length : 0 };
     } catch {
       // 落到下面的纯文本分支
@@ -112,8 +141,11 @@ export async function chatTurn(ctx, { message, history = [], context = null, tim
   const info = modelInfo(ctx);
   if (!info) throw new AssistError('ASSIST_UNAVAILABLE', '当前没有可用的默认模型');
 
+  const layerLine = Array.isArray(context?.layerList) && context.layerList.length
+    ? `图层清单：${context.layerList.map(layer => `${layer.id}=${layer.name || layer.type}${layer.visible === false ? '(隐藏)' : ''}`).join(' / ')}。`
+    : '';
   const contextLine = context
-    ? `画布：${context.width}×${context.height}；图层 ${context.layers} 个；有选区 ${context.hasSelection ? '是' : '否'}；最近结果 ${context.lastAssetRef || '无'}。`
+    ? `画布：${context.width}×${context.height}；图层 ${context.layers} 个；有选区 ${context.hasSelection ? '是' : '否'}；最近结果 ${context.lastAssetRef || '无'}。${layerLine}`
     : '画布信息未知（页面还没连上编辑器）。';
   const historyLine = history.length
     ? `最近对话：${history.slice(-6).map(row => `${row.role === 'user' ? '用户' : '助手'}：${row.text}`).join(' / ')}`

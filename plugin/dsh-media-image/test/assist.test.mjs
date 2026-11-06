@@ -1,7 +1,7 @@
 // 助手模型通路的单元测试：用假 ctx（llm + agentDefaultModel）驱动，不碰真实模型。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chatTurn, callModel, modelInfo, parsePlan, AssistError, OP_TYPES } from '../lib/assist.js';
+import { chatTurn, callModel, modelInfo, parsePlan, AssistError, OP_TYPES, PROPRIETABLE_COMMANDS } from '../lib/assist.js';
 import { createMediaRouter } from '../lib/http.js';
 
 // 假宿主：currentSelection + prepareCall().stream() 吐若干 text-delta。
@@ -116,11 +116,52 @@ test('chatTurn：把画布上下文与历史喂给模型，返回 reply+ops+engi
   assert.ok(OP_TYPES.includes('generate'));
 });
 
+test('chatTurn：图层清单（真实 id）必须进提示词，否则模型只能编 id', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [{ type: 'text-delta', text: '{"reply":"好","ops":[]}' }] });
+  await chatTurn(ctx, {
+    message: '把背景层隐藏',
+    context: {
+      width: 800, height: 600, layers: 2, hasSelection: false, lastAssetRef: null,
+      layerList: [{ id: 'layer-7f3a', name: '背景', type: 'image', visible: true }, { id: 'layer-91b2', name: '文字', type: 'text', visible: false }],
+    },
+  });
+  const user = seen.streamArgs.messages[0].content[0].text;
+  assert.match(user, /layer-7f3a=背景/, '必须给出真实图层 id 供模型引用');
+  assert.match(user, /layer-91b2=文字\(隐藏\)/, '隐藏状态要标出来');
+});
+
 test('chatTurn：空消息与超长消息被拒（不进模型）', async () => {
   const { ctx, seen } = fakeCtx();
   await assert.rejects(() => chatTurn(ctx, { message: '   ' }), error => error.code === 'ASSIST_INVALID');
   await assert.rejects(() => chatTurn(ctx, { message: 'x'.repeat(4001) }), error => error.code === 'ASSIST_INVALID');
   assert.equal(seen.calls.length, 0, '非法入参不该产生模型调用');
+});
+
+test('parsePlan：command op 必须命中编辑器白名单且带 payload，否则丢弃', () => {
+  const good = parsePlan(JSON.stringify({
+    reply: '我把不透明度调到 60%',
+    ops: [{ type: 'command', command: { type: 'layer.set_appearance', payload: { layerId: 'l1', opacity: 60 } } }],
+  }));
+  assert.deepEqual(good.ops.map(op => op.type), ['command']);
+  assert.equal(good.ops[0].command.type, 'layer.set_appearance');
+
+  const offList = parsePlan(JSON.stringify({ reply: 'x', ops: [{ type: 'command', command: { type: 'shell.exec', payload: { cmd: 'rm -rf /' } } }] }));
+  assert.equal(offList.ops.length, 0, '不在白名单的命令必须被丢掉');
+  assert.equal(offList.droppedOps, 1);
+
+  const noPayload = parsePlan(JSON.stringify({ reply: 'x', ops: [{ type: 'command', command: { type: 'layer.remove' } }] }));
+  assert.equal(noPayload.ops.length, 0, '缺 payload 的命令必须被丢掉');
+
+  const badGen = parsePlan(JSON.stringify({ reply: 'x', ops: [{ type: 'generate', prompt: '  ' }] }));
+  assert.equal(badGen.ops.length, 0, '空提示词的生成必须被丢掉');
+  const badImport = parsePlan(JSON.stringify({ reply: 'x', ops: [{ type: 'import', url: 'file:///etc/passwd' }] }));
+  assert.equal(badImport.ops.length, 0, '非 http(s) 导入必须被丢掉');
+});
+
+test('系统提示必须把白名单交给模型，并写死"只提议不执行"', () => {
+  assert.ok(PROPRIETABLE_COMMANDS.includes('layer.set_appearance'));
+  assert.ok(PROPRIETABLE_COMMANDS.includes('layer.add_text'));
+  assert.ok(!PROPRIETABLE_COMMANDS.some(name => /shell|exec|eval/.test(name)), '白名单里不该出现任意执行类命令');
 });
 
 test('HTTP /assist：GET 报状态、POST 转成 reply、无模型 503、非法体 400、鉴权 403', async () => {

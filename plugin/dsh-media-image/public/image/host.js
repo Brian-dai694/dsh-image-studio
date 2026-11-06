@@ -767,6 +767,8 @@ async function assistContext() {
       width: state.canvas.width,
       height: state.canvas.height,
       layers: state.layers.length,
+      // 模型要提议图层命令就必须拿到真实 id —— 只给数量等于让它编 id。
+      layerList: state.layers.slice(0, 12).map(layer => ({ id: layer.id, name: layer.name, type: layer.type, visible: layer.visible })),
       hasSelection: !!(state.selection && state.selection.width > 0),
       lastAssetRef: lastAssetRef || null,
     };
@@ -858,6 +860,42 @@ async function execOps(ops) {
     }
     if (op.type === 'status') { await routeAssist('状态'); continue; }
     if (op.type === 'fontList') { await routeAssist('字体列表'); continue; }
+    if (op.type === 'command') {
+      // 人机协作的关键闸门：模型只能**提议**，落地必须由人点确认。
+      const command = op.command || {};
+      const risky = ['layer.remove', 'canvas.crop', 'layer.add_image'].includes(command.type);
+      try {
+        const connection = await connect();
+        const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+        const answer = await askConfirm({
+          title: risky ? `模型提议（高影响）：${command.type}` : `模型提议：${command.type}`,
+          details: [
+            `命令      ${command.type}`,
+            `参数      ${JSON.stringify(command.payload)}`,
+            `目标工程  ${state.documentId} · R${state.revision}`,
+            '模型没有执行它，点击前它不会生效',
+          ].join('\n'),
+          maskAvailable: false,
+        });
+        if (!answer.ok) { bubble('bot', '已取消，没有发送任何命令。'); continue; }
+        const result = await transport.request({
+          type: 'editor.apply_command',
+          requestId: crypto.randomUUID(),
+          editorInstanceId: connection.editorInstanceId,
+          documentId: state.documentId,
+          expectedRevision: state.revision,
+          commandId: crypto.randomUUID(),
+          command: { type: command.type, payload: command.payload },
+        }, { timeoutMs: 15000 });
+        bubble('bot', `已执行 ${command.type} · 现在 R${result?.revision}`);
+      } catch (error) {
+        const code = error.code || 'COMMAND_FAILED';
+        if (code === 'REVISION_CONFLICT') bubble('bot', '工程已变化（REVISION_CONFLICT），这次没执行；再说一次我会用最新版本重新提议。');
+        else if (code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN') bubble('bot', '结果未知：不要重发，用该 commandId 查询。');
+        else bubble('bot', `${code}：${error.message}`);
+      }
+      continue;
+    }
   }
 }
 

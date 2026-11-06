@@ -247,6 +247,15 @@ test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前�
   assert.match(script, /execOps/, '模型提议的 ops 由页面执行');
   assert.match(script, /ASSIST_UNAVAILABLE/, '模型不可用要能识别并降级');
   assert.match(script, /本地指令·模型未连接/, '降级必须如实标注');
+  // 人机协作闸门：模型提议的 command 必须先弹确认，确认后才 apply_command
+  const commandIdx = script.indexOf("op.type === 'command'");
+  assert.ok(commandIdx > 0, 'execOps 必须处理 command 提议');
+  const branch = script.slice(commandIdx, commandIdx + 2600);
+  assert.match(branch, /askConfirm/, '模型提议的命令必须经人确认');
+  assert.match(branch, /已取消，没有发送任何命令/, '取消要明确说零命令');
+  assert.match(branch, /editor\.apply_command/, '确认后才走编辑器命令');
+  assert.match(branch, /expectedRevision: state\.revision/, '写入必须带读到的 revision');
+  assert.match(branch, /REVISION_CONFLICT/, '冲突要提示重来而不是静默失败');
 });
 
 test('性能与状态契约：rAF 到终态停帧、列表增量更新、逐项重试、可解释状态、减动效降级', () => {
