@@ -197,6 +197,20 @@ test('面板插入图层走真实编辑器命令，且未知结果只查不重�
   assert.equal(/for\s*\(.*retry/i.test(script), false, '插入路径不得含自动重试循环');
 });
 
+test('面板必须可见：不能被自己的样式藏起来（这条曾漏掉，四个面板全是 display:none）', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const raw = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  // 先剥注释：注释里提到旧规则（例如说明这条坑）不算生效样式。
+  const css = raw.replace(/\/\*[\s\S]*?\*\//g, '');
+  // aside 必须有自己的可见 display
+  assert.match(css, /aside\s*\{[^}]*display:\s*flex/, 'aside 必须设成可见的 flex 布局');
+  // 任何针对 aside 的 display:none 都是把面板藏起来
+  const hides = [...css.matchAll(/[^{}]*aside[^{}]*\{[^}]*display:\s*none[^}]*\}/g)].map(m => m[0].trim());
+  assert.deepEqual(hides, [], `样式里仍有隐藏 aside 的规则：${hides.join(' | ')}`);
+  // 主区必须是两列（编辑器 + 面板），否则面板会被挤到看不见的地方
+  assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+340px/, '主板式应给面板留一列');
+});
+
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {
   // 这个坑真踩过：源码改了 highlight 转发，包内 public/image/host.js 还是旧副本，
   // 部署后页面行为与仓库对不上。两边必须逐字节相同。
