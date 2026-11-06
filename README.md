@@ -99,13 +99,15 @@ flowchart LR
 路由前缀 `/media-image`，与视频插件包（`/media-video`）互不依赖、可同时安装。
 ## 下载安装
 
-预打包插件（可直接装进 DSH profile）：[v0.0.1 · dsh-media-image-0.0.1.tgz](https://github.com/Brian-dai694/dsh-image-studio/releases/download/v0.0.1/dsh-media-image-0.0.1.tgz)
+预打包插件（可直接装进 DSH profile）：[v0.4.2 · dsh-media-image-0.4.2.tgz](https://github.com/Brian-dai694/dsh-image-studio/releases/download/v0.4.2/dsh-media-image-0.4.2.tgz)
 
 ```powershell
-dsh plugin --profile <你的profile> add <下载路径>\dsh-media-image-0.0.1.tgz
+dsh plugin --profile <你的profile> add <下载路径>\dsh-media-image-0.4.2.tgz
 ```
 
 包里已含 PSD 导入所需的 `public/image/dist/860.bundle.js`（ag-psd 懒加载 chunk），无需另外构建。
+
+0.4.2 的 tgz SHA-256：`3438cc91f057dabddf7c8deb8cb46b38637f6f66286055df541a2b0a09ddf2e7`（与 Release 资产 digest 一致，可核对）。
 ## 快速开始
 
 ```bash
