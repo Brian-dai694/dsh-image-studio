@@ -1,0 +1,160 @@
+// 助手模型通路的单元测试：用假 ctx（llm + agentDefaultModel）驱动，不碰真实模型。
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { chatTurn, callModel, modelInfo, parsePlan, AssistError, OP_TYPES } from '../lib/assist.js';
+import { createMediaRouter } from '../lib/http.js';
+
+// 假宿主：currentSelection + prepareCall().stream() 吐若干 text-delta。
+function fakeCtx({ chunks = [], failWith = null, selection = { provider: 'deepseek-account', model: 'deepseek-flash' }, llm = true } = {}) {
+  const seen = { calls: [], streamArgs: null };
+  const services = {
+    agentDefaultModel: { currentSelection: () => selection },
+    llm: llm ? {
+      async prepareCall(config) {
+        seen.calls.push(config);
+        return {
+          config: { ...config, temperature: 0.7 },
+          async *stream(args) {
+            seen.streamArgs = args;
+            if (failWith) throw new Error(failWith);
+            for (const chunk of chunks) yield chunk;
+            yield { type: 'finish', reason: { kind: 'stop' } };
+          },
+        };
+      },
+    } : undefined,
+  };
+  return { ctx: { get: name => services[name] }, seen };
+}
+
+test('modelInfo 如实反映宿主选择；没有 llm 或选择时返回 null', () => {
+  assert.equal(modelInfo(fakeCtx().ctx).label, 'deepseek-flash');
+  assert.equal(modelInfo(fakeCtx({ llm: false }).ctx), null);
+  assert.equal(modelInfo(fakeCtx({ selection: {} }).ctx), null);
+  assert.equal(modelInfo({ get: () => undefined }), null);
+});
+
+test('callModel 走宿主 prepareCall/stream，并把 text-delta 拼成完整文本', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [
+    { type: 'text-delta', text: '你好' },
+    { type: 'text-delta', text: '，我是助手' },
+  ] });
+  const result = await callModel(ctx, { system: 'sys', user: 'hi', maxTokens: 321 });
+  assert.equal(result.text, '你好，我是助手');
+  assert.equal(result.model, 'deepseek-flash');
+  assert.equal(seen.calls[0].maxTokens, 321);
+  // 契约细节：system 走顶层字段，消息是 content 数组，source 标记来源
+  assert.equal(seen.streamArgs.system, 'sys');
+  assert.equal(seen.streamArgs.messages[0].content[0].text, 'hi');
+  assert.equal(seen.streamArgs.messages[0].source.kind, 'dsh-media-image');
+  assert.equal(seen.streamArgs.temperature, 0.7, '必须透传宿主 call.config');
+});
+
+test('没有模型时抛 ASSIST_UNAVAILABLE，而不是假装回答', async () => {
+  await assert.rejects(
+    () => callModel(fakeCtx({ llm: false }).ctx, { system: 's', user: 'u' }),
+    error => error instanceof AssistError && error.code === 'ASSIST_UNAVAILABLE',
+  );
+});
+
+test('模型中断（finish.error）抛 ASSIST_FAILED，不把半截文本当答案', async () => {
+  const ctx = {
+    get: name => name === 'agentDefaultModel'
+      ? { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      : {
+        async prepareCall() {
+          return {
+            config: {},
+            async *stream() {
+              yield { type: 'text-delta', text: '半截' };
+              yield { type: 'finish', reason: { kind: 'error', failure: { message: '额度用尽' } } };
+            },
+          };
+        },
+      },
+  };
+  await assert.rejects(() => callModel(ctx, { system: 's', user: 'u' }), error => error.code === 'ASSIST_FAILED' && /额度用尽/.test(error.message));
+});
+
+test('parsePlan：JSON 走结构化、ops 过滤未知类型、纯文本当成 reply', () => {
+  const json = parsePlan('{"reply":"我来生成","ops":[{"type":"generate","prompt":"a cat"},{"type":"rm -rf","x":1}]}');
+  assert.equal(json.reply, '我来生成');
+  assert.deepEqual(json.ops.map(op => op.type), ['generate']);
+  assert.equal(json.droppedOps, 1, '未知 op 必须被丢掉并计数');
+
+  const fenced = parsePlan('```json\n{"reply":"好","ops":[{"type":"insert"}]}\n```');
+  assert.deepEqual(fenced.ops.map(op => op.type), ['insert']);
+
+  const plain = parsePlan('这张图背景偏灰，建议提亮一点。');
+  assert.equal(plain.ops.length, 0);
+  assert.match(plain.reply, /提亮/);
+
+  assert.deepEqual(parsePlan('').ops, []);
+});
+
+test('chatTurn：把画布上下文与历史喂给模型，返回 reply+ops+engine', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [
+    { type: 'text-delta', text: '{"reply":"我来生成一张","ops":[{"type":"generate","prompt":"soft morning light"}]}' },
+  ] });
+  const turn = await chatTurn(ctx, {
+    message: '来个晨光',
+    history: [{ role: 'user', text: '你好' }, { role: 'assistant', text: '你好' }],
+    context: { width: 800, height: 600, layers: 3, hasSelection: true, lastAssetRef: 'asset:abc' },
+  });
+  assert.equal(turn.reply, '我来生成一张');
+  assert.deepEqual(turn.ops.map(op => op.type), ['generate']);
+  assert.equal(turn.engine, 'deepseek-flash');
+  assert.equal(turn.provider, 'deepseek-account');
+  const user = seen.streamArgs.messages[0].content[0].text;
+  assert.match(user, /800×600/);
+  assert.match(user, /图层 3 个/);
+  assert.match(user, /有选区 是/);
+  assert.match(user, /最近对话/);
+  assert.match(user, /用户说：来个晨光/);
+  // 系统提示必须写明"只提议不执行"
+  assert.match(seen.streamArgs.system, /你不执行|不执行/);
+  assert.ok(OP_TYPES.includes('generate'));
+});
+
+test('chatTurn：空消息与超长消息被拒（不进模型）', async () => {
+  const { ctx, seen } = fakeCtx();
+  await assert.rejects(() => chatTurn(ctx, { message: '   ' }), error => error.code === 'ASSIST_INVALID');
+  await assert.rejects(() => chatTurn(ctx, { message: 'x'.repeat(4001) }), error => error.code === 'ASSIST_INVALID');
+  assert.equal(seen.calls.length, 0, '非法入参不该产生模型调用');
+});
+
+test('HTTP /assist：GET 报状态、POST 转成 reply、无模型 503、非法体 400、鉴权 403', async () => {
+  const token = 'assist-token';
+  const caller = router => async ({ method = 'GET', url, headers = {}, body }) => {
+    const out = { status: 0, body: '' };
+    const res = { writeHead(status) { out.status = status; return res; }, end(chunk) { out.body = chunk === undefined ? '' : String(chunk); return res; } };
+    const req = { method, url, headers, async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(JSON.stringify(body)); } };
+    await router(req, res);
+    let value = null;
+    try { value = JSON.parse(out.body); } catch { value = null; }
+    return { ...out, value };
+  };
+  const auth = { host: 'localhost', origin: 'http://localhost', authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  const base = { relay: { request: async () => ({}) }, editorKind: 'image', prefix: '/media-image', token, publicDir: '.' };
+
+  const okCtx = fakeCtx({ chunks: [{ type: 'text-delta', text: '{"reply":"好的","ops":[]}' }] }).ctx;
+  const working = caller(createMediaRouter({ ...base, ctx: okCtx, assist: { status: () => ({ ready: true, model: 'deepseek-flash' }), chat: turn => chatTurn(okCtx, turn) } }));
+  const status = await working({ url: '/media-image/assist', headers: auth });
+  assert.equal(status.status, 200);
+  assert.equal(status.value.model, 'deepseek-flash');
+  const chat = await working({ method: 'POST', url: '/media-image/assist', headers: auth, body: { message: '帮我看下' } });
+  assert.equal(chat.status, 200);
+  assert.equal(chat.value.reply, '好的');
+
+  const downCtx = fakeCtx({ llm: false }).ctx;
+  const down = caller(createMediaRouter({ ...base, ctx: downCtx, assist: { status: () => ({ ready: false }), chat: turn => chatTurn(downCtx, turn) } }));
+  const unavailable = await down({ method: 'POST', url: '/media-image/assist', headers: auth, body: { message: 'hi' } });
+  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.value.code, 'ASSIST_UNAVAILABLE');
+
+  const noAuth = await working({ method: 'POST', url: '/media-image/assist', headers: { ...auth, authorization: 'Bearer nope' }, body: { message: 'hi' } });
+  assert.equal(noAuth.status, 403);
+
+  const badBody = await working({ method: 'POST', url: '/media-image/assist', headers: auth });
+  assert.equal(badBody.status, 400);
+});

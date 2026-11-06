@@ -342,6 +342,31 @@ async function handleBatch(req, res, { batchQueue, token, prefix, pathname }) {
   return true;
 }
 
+async function handleAssist(req, res, { assist, ctx, token, prefix }) {
+  const rejection = authorizeSameOrigin(req, token, req.method === 'GET' ? ['GET'] : ['POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!assist) {
+    send(res, 501, { code: 'ASSIST_UNAVAILABLE', message: 'This deployment has no assistant wired to the host model service.' });
+    return true;
+  }
+  if (req.method === 'GET') {
+    // UI 用它决定标题显示模型名还是"本地指令"
+    send(res, 200, { ok: true, ...assist.status() });
+    return true;
+  }
+  const body = await readJsonBody(req).catch(() => null);
+  if (!body || typeof body !== 'object') { send(res, 400, { code: 'ASSIST_INVALID', message: 'JSON body is required.' }); return true; }
+  try {
+    const result = await assist.chat({ message: body.message, history: body.history, context: body.context });
+    send(res, 200, { ok: true, ...result });
+  } catch (error) {
+    const code = error?.code || 'ASSIST_FAILED';
+    const status = code === 'ASSIST_INVALID' ? 400 : code === 'ASSIST_UNAVAILABLE' ? 503 : 502;
+    send(res, status, { code, message: error.message });
+  }
+  return true;
+}
+
 const generationStatus = error => error?.code === 'JOB_NOT_FOUND' ? 404
   : error?.code === 'INVALID_REQUEST' || error?.code === 'PROVIDER_UNKNOWN' ? 400
     : error?.code === 'PROVIDER_UNAVAILABLE' ? 501
@@ -362,7 +387,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, remoteFetch = undefined }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, ctx = null, remoteFetch = undefined }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const assetsPrefix = `${prefix}/assets/`;
@@ -389,6 +414,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/fonts` || pathname.startsWith(`${prefix}/fonts/`)) {
       return handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch });
+    }
+    if (pathname === `${prefix}/assist`) {
+      return handleAssist(req, res, { assist, ctx, token, prefix });
     }
     if (pathname === `${prefix}/generate` || pathname.startsWith(`${prefix}/generate/`)) {
       // 批量路由必须在单作业路由之前匹配，否则 /generate/batch 会被当成 jobId。

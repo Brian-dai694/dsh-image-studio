@@ -241,7 +241,12 @@ test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前�
   for (const route of ['/media-image/generate', '/media-image/assets/import', '/media-image/fonts']) {
     assert.ok(script.includes(route), `助手应复用已有路由：${route}`);
   }
-  assert.equal(/\/media-image\/assist/.test(script), false, '本版不引入新路由');
+  // 0.7.0 起走真实模型通路：Host 侧 /media-image/assist（模型只提议，页面执行 ops）
+  assert.ok(script.includes('/media-image/assist'), '助手必须走宿主模型通路');
+  assert.match(script, /modelTurn/, '必须走真实模型那一轮');
+  assert.match(script, /execOps/, '模型提议的 ops 由页面执行');
+  assert.match(script, /ASSIST_UNAVAILABLE/, '模型不可用要能识别并降级');
+  assert.match(script, /本地指令·模型未连接/, '降级必须如实标注');
 });
 
 test('性能与状态契约：rAF 到终态停帧、列表增量更新、逐项重试、可解释状态、减动效降级', () => {

@@ -753,9 +753,143 @@ $('batch-stop')?.addEventListener('click', () => {
   $('batch-status').textContent = '已停止查询（批次仍在 Host 侧推进，可点「刷新进度」继续看）';
 });
 
-// ── 悬浮助手：先说人话，再由它翻译成插件已有能力 ──
-// 这一版是**本地指令**：不调模型，靠关键词把一句话路由到已有路由（生成 / 批量 / 导入 / 字体）。
-// 之所以先这样：能立刻可用、行为可预测；模型通路（宿主 ctx.llm）是下一步，UI 不用改。
+// ── 真实模型通路 ──
+// 走宿主 llm（Host 侧 /media-image/assist）：模型只回 {reply, ops}，执行由本页负责 ——
+// 页面拥有编辑器，所以"提议"与"已执行"不会混为一谈。模型不可用时降级到本地指令并标注。
+const assistHistory = [];
+let assistEngine = ''; // 模型名；空串表示本地指令
+
+async function assistContext() {
+  try {
+    const connection = await connect();
+    const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+    return {
+      width: state.canvas.width,
+      height: state.canvas.height,
+      layers: state.layers.length,
+      hasSelection: !!(state.selection && state.selection.width > 0),
+      lastAssetRef: lastAssetRef || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function refreshEngineLabel() {
+  const who = $('assist-who');
+  if (!who) return;
+  try {
+    const value = await api('/media-image/assist');
+    if (value.ready) {
+      assistEngine = value.model || 'model';
+      who.textContent = value.model || '已连模型';
+      who.title = `宿主默认模型 · ${value.provider || ''}`;
+    } else {
+      assistEngine = '';
+      who.textContent = '本地指令·模型未连接';
+      who.title = 'Host 没有可用的默认模型；点「帮助」看本地能做什么';
+    }
+  } catch {
+    assistEngine = '';
+    who.textContent = '本地指令';
+  }
+}
+
+// ops 由页面执行：只认白名单，逐个跑并回报结果。
+async function execOps(ops) {
+  for (const op of ops || []) {
+    if (op.type === 'generate') {
+      const provider = assistProvider();
+      if (!provider) { bubble('bot', '收到生成指令，但这个部署没配后端。'); continue; }
+      const size = { width: op.width || assistSize().width, height: op.height || assistSize().height };
+      const line = bubble('bot', `正在生成：${String(op.prompt || '').slice(0, 40)}…`);
+      try {
+        const value = await api('/media-image/generate', { method: 'POST', body: { provider, prompt: String(op.prompt || '').trim(), ...size } });
+        let job = value.job;
+        for (let i = 0; i < 20 && job.status !== 'succeeded' && job.status !== 'failed'; i += 1) {
+          await new Promise(resolve => setTimeout(resolve, 800));
+          job = (await api(`/media-image/generate/${encodeURIComponent(job.jobId)}`)).job;
+        }
+        if (job.status === 'succeeded') {
+          lastAssetRef = job.assetRef;
+          rememberAsset({ id: job.assetRef.slice(6), name: '助手生成的图片', bytes: 0 });
+          line.textContent = '图好了。说「插入图层」就落到画布上。';
+          const ref = document.createElement('span');
+          ref.className = 'ref';
+          ref.textContent = job.assetRef;
+          line.append(ref);
+        } else {
+          line.textContent = `生成失败：${job.error || job.status}`;
+        }
+      } catch (error) {
+        line.textContent = `${error.code || 'GENERATE_FAILED'}：${error.message}`;
+      }
+      continue;
+    }
+    if (op.type === 'batch') {
+      const provider = assistProvider();
+      if (!provider) { bubble('bot', '收到批量指令，但这个部署没配后端。'); continue; }
+      const prompts = (op.prompts || []).map(p => String(p).trim()).filter(Boolean).slice(0, 20);
+      if (!prompts.length) { bubble('bot', '批量指令里没有可用提示词。'); continue; }
+      try {
+        const value = await api('/media-image/generate/batch', { method: 'POST', body: { provider, prompts, ...assistSize() } });
+        bubble('bot', `已排队 ${prompts.length} 条（并发 2）。失败项可单条重试。`);
+        void pollBatch(value.batch.batchId);
+      } catch (error) {
+        bubble('bot', `${error.code || 'BATCH_FAILED'}：${error.message}`);
+      }
+      continue;
+    }
+    if (op.type === 'import') {
+      try {
+        const value = await api('/media-image/assets/import', { method: 'POST', body: { url: op.url } });
+        rememberAsset(value.asset);
+        bubble('bot', `已导入 ${value.asset.bytes} bytes。说「插入图层」就落层。`, `asset:${value.asset.id}`);
+      } catch (error) {
+        bubble('bot', `${error.code || 'IMPORT_FAILED'}：${error.message}`);
+      }
+      continue;
+    }
+    if (op.type === 'insert') {
+      const match = /asset:([a-f0-9]{48})/.exec(lastAssetRef || '');
+      if (!match) { bubble('bot', '还没有可插入的结果：先让我生成或导入一张。'); continue; }
+      await insertAssetAsLayer({ id: match[1], name: '助手插入的图片' });
+      continue;
+    }
+    if (op.type === 'status') { await routeAssist('状态'); continue; }
+    if (op.type === 'fontList') { await routeAssist('字体列表'); continue; }
+  }
+}
+
+// 一轮真实对话：模型回答 → 渲染 → 执行它提议的 ops。失败才降级本地指令。
+async function modelTurn(text) {
+  const pending = bubble('bot', '…');
+  try {
+    const value = await api('/media-image/assist', {
+      method: 'POST',
+      body: { message: text, history: assistHistory.slice(-6), context: await assistContext() },
+    });
+    pending.remove();
+    bubble('bot', value.reply || '（模型没有给回复）');
+    assistHistory.push({ role: 'user', text }, { role: 'assistant', text: value.reply || '' });
+    if (value.droppedOps) bubble('bot', `（有 ${value.droppedOps} 个不认识的提议被忽略）`);
+    if (assistEngine !== (value.engine || 'model')) {
+      assistEngine = value.engine || 'model';
+      const who = $('assist-who');
+      if (who) { who.textContent = assistEngine; who.title = `宿主默认模型 · ${value.provider || ''}`; }
+    }
+    if (value.ops?.length) await execOps(value.ops);
+    return true;
+  } catch (error) {
+    pending.remove();
+    if (['ASSIST_UNAVAILABLE', 'ASSIST_FAILED'].includes(error.code)) {
+      bubble('bot', `模型这次没连上（${error.code}），先用本地指令处理。`);
+      return false;
+    }
+    bubble('bot', `${error.code || 'ASSIST_FAILED'}：${error.message}`);
+    return true; // 不是"模型不可用"，不再重复走本地
+  }
+}
 const assistLog = $('assist-log');
 const assistText = $('assist-text');
 const assistSend = $('assist-send');
@@ -992,7 +1126,13 @@ async function sendAssist(raw) {
   assistBusy = true;
   if (assistSend) assistSend.disabled = true;
   try {
-    await routeAssist(text);
+    // 先走真实模型；只有"模型不可用"才退回本地指令（并明确告诉用户）。
+    const handled = await modelTurn(text);
+    if (!handled) {
+      const who = $('assist-who');
+      if (who) who.textContent = '本地指令·模型未连接';
+      await routeAssist(text);
+    }
   } catch (error) {
     bubble('bot', `${error.code || 'ASSIST_FAILED'}：${error.message}`);
   } finally {
@@ -1014,8 +1154,9 @@ function openAssist(open) {
   card.classList.toggle('open', next);
   if (launcher) launcher.style.display = next ? 'none' : '';
   if (next) {
-    if (!assistLog.children.length) bubble('bot', '这是一个图片工作台：说「生成：…」出图，「上传」放本地图，「状态」看画布。点「帮助」看全部说法。');
+    if (!assistLog.children.length) bubble('bot', '这是一个图片工作台：直接说你想干什么，我来做（模型连不上时会退回本地指令）。');
     if (!$('assist-provider')?.value) void fillProviders();
+    void refreshEngineLabel();
     assistText?.focus();
   }
 }

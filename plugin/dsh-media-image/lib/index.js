@@ -14,6 +14,7 @@ import { createAssetStore } from './assets.js';
 import { createGenerationService } from './generation.js';
 import { createBatchQueue } from './batch.js';
 import { createFontStore } from './fonts.js';
+import { chatTurn, modelInfo } from './assist.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
 // 两者都没有就不注册任何 provider —— /generate 会如实返回 PROVIDER_UNAVAILABLE，而不是假装能生成。
@@ -31,6 +32,8 @@ function resolveProviders(config) {
 }
 
 export const name = 'dsh-media-image';
+// llm / agentDefaultModel 用 ctx.get(...) 懒解析（与 dsh-media-desk 同一做法）：
+// 不写进 inject，避免服务晚就绪时把整个插件卡住；缺服务时路由如实返回 503。
 export const inject = ['tools', 'webServer', 'approval'];
 
 const hostRoot = dirname(fileURLToPath(import.meta.url));
@@ -73,6 +76,18 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.guard(createGuard());
 
+  // 助手：走宿主模型服务（与 dsh-media-desk 同一契约，不自建密钥）。
+  // 服务在**每次请求时**才解析 —— 插件先于 llm 就绪也不会永久降级。
+  const assistant = {
+    status: () => {
+      const info = modelInfo(ctx);
+      return info
+        ? { ready: true, model: info.label, provider: info.provider }
+        : { ready: false, model: null, reason: 'NO_DEFAULT_MODEL' };
+    },
+    chat: turn => chatTurn(ctx, turn),
+  };
+
   const router = createMediaRouter({
     relay,
     editorKind: 'image',
@@ -85,6 +100,8 @@ export function apply(ctx, config = {}) {
     generation,
     fonts,
     batchQueue,
+    assist: assistant,
+    ctx,
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,
   });
