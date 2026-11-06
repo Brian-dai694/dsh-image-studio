@@ -136,7 +136,10 @@ test('packaged wrapper binds the editor to the image relay only', async () => {
   const page = await call({ url: '/media-image/image/host.html' });
   assert.equal(page.status, 200);
   assert.match(page.body, /src="index.html"/);
-  assert.match(page.body, /media\/boot/);
+  // 三个面板是这页面的对外契约，id 变了就是面板没了。
+  for (const id of ['panel-generate', 'panel-asset', 'panel-font']) {
+    assert.match(page.body, new RegExp(`id="${id}"`), `缺少面板 ${id}`);
+  }
 
   const script = await call({ url: '/media-image/image/host.js' });
   assert.equal(script.status, 200);
@@ -148,8 +151,30 @@ test('packaged wrapper binds the editor to the image relay only', async () => {
   assert.match(script.body, /body\.reason/, '403 正文的 reason 要显示');
   assert.match(script.body, /body\.observed/, '403 正文的观测字段要显示');
   assert.match(script.body, /BOOT_FAILED/);
+  // 面板只走已有路由：不动协议的约束靠这条钉住。
+  assert.match(script.body, /\/media-image\/boot/, '取令牌走 /media-image/boot');
+  for (const route of ['/media-image/generate', '/media-image/assets/import', '/media-image/fonts']) {
+    assert.ok(script.body.includes(route), `面板应只调用已有路由：${route}`);
+  }
   // The page must not pretend it can call the model tool surface.
   assert.equal(/\/media\/(?:image-)?tools/.test(script.body), false);
+});
+
+test('每个可点面板控件都真的绑了处理器（防"面板空壳"）', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
+  const lines = script.split('\n');
+  for (const id of interactive) {
+    assert.match(html, new RegExp(`id="${id}"`), `host.html 缺少控件 ${id}`);
+    // 两种注册形态都要认：逐个 $('id')?.addEventListener，或循环元组里的 ['id', action]。
+    const wired = lines.some(line => line.includes(`'${id}'`) && (line.includes('addEventListener') || line.includes('for (const [id, action] of')));
+    assert.ok(wired, `host.js 没有给 ${id} 绑定处理器`);
+  }
+  // 面板要能显示三态与结果，否则点了没反馈。
+  for (const id of ['gen-pill', 'gen-status', 'gen-result', 'asset-status', 'asset-list', 'font-status', 'font-list']) {
+    assert.match(html, new RegExp(`id="${id}"`), `host.html 缺少输出位 ${id}`);
+  }
 });
 
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {

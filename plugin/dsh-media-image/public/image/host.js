@@ -189,6 +189,58 @@ window.addEventListener('message', async event => {
     parent.postMessage({ type: 'media.binding.result', requestId, error: error.message }, location.origin);
   }
 });
+// 统一的本插件路由调用：同源 + Bearer + 自定义头（桌面端不带 Sec-Fetch-*，靠自定义头过判据）。
+async function api(pathname, { method = 'GET', body } = {}) {
+  const token = await boot();
+  const headers = { authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1' };
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const response = await fetch(pathname, {
+    method, credentials: 'same-origin', headers,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const value = await response.json().catch(() => null);
+  if (!response.ok) throw Object.assign(new Error(value?.message || `HTTP ${response.status}`), { code: value?.code || 'REQUEST_FAILED' });
+  return value;
+}
+
+const setPill = (id, state) => {
+  const pill = $(id);
+  if (!pill) return;
+  pill.textContent = state || 'idle';
+  pill.className = `pill ${state || ''}`.trim();
+};
+
+// 本页已知素材：素材库没有列表路由，这里只记本页产生/导入的，别谎称是"全部"。
+const knownAssets = [];
+
+function renderAssets() {
+  const list = $('asset-list');
+  if (!list) return;
+  list.textContent = '';
+  for (const asset of knownAssets) {
+    const item = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = `${asset.name || 'image'} · ${asset.bytes} B · asset:${String(asset.id).slice(0, 8)}…`;
+    const copy = document.createElement('button');
+    copy.textContent = '复制引用';
+    copy.addEventListener('click', () => {
+      const ref = `asset:${asset.id}`;
+      void navigator.clipboard?.writeText(ref).then(
+        () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制引用'; }, 1200); },
+        () => { $('asset-status').textContent = ref; },
+      );
+    });
+    item.append(label, copy);
+    list.append(item);
+  }
+}
+
+function rememberAsset(asset) {
+  if (!asset?.id || knownAssets.some(item => item.id === asset.id)) return;
+  knownAssets.unshift(asset);
+  renderAssets();
+}
+
 $('asset-upload')?.addEventListener('click', async () => {
   const file = $('asset-file')?.files?.[0];
   if (!file) { $('asset-status').textContent = '先选择一张图片。'; return; }
@@ -197,9 +249,164 @@ $('asset-upload')?.addEventListener('click', async () => {
     const asset = await uploadImageAsset(file);
     $('asset-status').textContent = `已注册临时素材 · ${asset.bytes} bytes`;
     $('asset-result').textContent = JSON.stringify({ ...asset, sourceRef: `asset:${asset.id}` }, null, 2);
+    rememberAsset(asset);
   } catch (error) {
     $('asset-status').textContent = `${error.code || 'UPLOAD_FAILED'}：${error.message}`;
   }
 });
 
-window.addEventListener('pagehide', () => { void relay?.stop(); });
+$('asset-import')?.addEventListener('click', async () => {
+  const url = $('asset-url')?.value?.trim();
+  if (!url) { $('asset-status').textContent = '先填一个图片 URL。'; return; }
+  try {
+    $('asset-status').textContent = '正在拉取并校验远程图片…';
+    const value = await api('/media-image/assets/import', { method: 'POST', body: { url } });
+    $('asset-status').textContent = `已导入 · ${value.asset.bytes} bytes`;
+    $('asset-result').textContent = JSON.stringify(value, null, 2);
+    rememberAsset(value.asset);
+  } catch (error) {
+    $('asset-status').textContent = `${error.code || 'IMPORT_FAILED'}：${error.message}`;
+  }
+});
+
+// ── 生成面板：提交 → 按 jobId 轮询；unknown 继续查，绝不重新提交 ──
+let genTimer = null;
+let genJobId = null;
+
+async function loadProviders() {
+  const select = $('gen-provider');
+  if (!select) return;
+  try {
+    const value = await api('/media-image/generate');
+    select.textContent = '';
+    const providers = value.providers || [];
+    if (!providers.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = '（未配置后端）';
+      select.append(option);
+      setPill('gen-pill', 'idle');
+      $('gen-status').textContent = '未配置任何生成后端：设置 generation.providers 或 DSH_MEDIA_IMAGE_PROVIDERS 后重载插件。';
+      return;
+    }
+    for (const provider of providers) {
+      const option = document.createElement('option');
+      option.value = provider.id;
+      option.textContent = `${provider.id}（${provider.kind}）`;
+      select.append(option);
+    }
+    $('gen-status').textContent = `已发现 ${providers.length} 个后端。`;
+  } catch (error) {
+    setPill('gen-pill', 'failed');
+    $('gen-status').textContent = `${error.code || 'PROVIDER_LIST_FAILED'}：${error.message}`;
+  }
+}
+
+function stopPolling() {
+  if (genTimer !== null) { clearTimeout(genTimer); genTimer = null; }
+}
+
+async function pollJob(jobId) {
+  try {
+    const value = await api(`/media-image/generate/${encodeURIComponent(jobId)}`);
+    const job = value.job;
+    setPill('gen-pill', job.status);
+    $('gen-result').textContent = JSON.stringify(job, null, 2);
+    if (job.status === 'succeeded') {
+      $('gen-status').textContent = `完成 · ${job.assetRef}（用 layer.add_image 落层）`;
+      genTimer = null;
+      return;
+    }
+    if (job.status === 'failed') {
+      $('gen-status').textContent = `失败：${job.error || '未知原因'}（不要重放同一作业）`;
+      genTimer = null;
+      return;
+    }
+    // queued / running / unknown 都继续查；unknown 只代表"这次没查到"，不代表失败。
+    $('gen-status').textContent = job.status === 'unknown'
+      ? `结果未知：${job.error || ''} 继续查询同一个 jobId…`
+      : `作业进行中（${job.status}）…`;
+    genTimer = setTimeout(() => void pollJob(jobId), 1500);
+  } catch (error) {
+    setPill('gen-pill', 'unknown');
+    $('gen-status').textContent = `${error.code || 'POLL_FAILED'}：${error.message}`;
+    genTimer = setTimeout(() => void pollJob(jobId), 2500);
+  }
+}
+
+$('gen-refresh')?.addEventListener('click', () => void loadProviders());
+
+$('gen-submit')?.addEventListener('click', async () => {
+  const provider = $('gen-provider')?.value;
+  const prompt = $('gen-prompt')?.value?.trim();
+  if (!provider) { $('gen-status').textContent = '先选一个后端（点「刷新」）。'; return; }
+  if (!prompt) { $('gen-status').textContent = '先写提示词。'; return; }
+  const width = Number($('gen-width')?.value) || undefined;
+  const height = Number($('gen-height')?.value) || undefined;
+  stopPolling();
+  setPill('gen-pill', 'queued');
+  $('gen-status').textContent = '正在提交…';
+  try {
+    const value = await api('/media-image/generate', { method: 'POST', body: { provider, prompt, width, height } });
+    const job = value.job;
+    genJobId = job.jobId;
+    setPill('gen-pill', job.status);
+    $('gen-result').textContent = JSON.stringify(job, null, 2);
+    if (job.status === 'succeeded') {
+      $('gen-status').textContent = `完成 · ${job.assetRef}`;
+      if (job.assetRef) rememberAsset({ id: job.assetRef.slice('asset:'.length), name: `generated-${provider}`, bytes: 0 });
+      return;
+    }
+    $('gen-status').textContent = `已提交 jobId=${job.jobId}，开始轮询…`;
+    genTimer = setTimeout(() => void pollJob(job.jobId), 1200);
+  } catch (error) {
+    setPill('gen-pill', 'failed');
+    $('gen-status').textContent = `${error.code || 'SUBMIT_FAILED'}：${error.message}`;
+  }
+});
+
+// ── 字体面板：登记后拿到 /media-image/fonts/<id> 供 layer.add_text 的 fontUrl ──
+async function loadFonts() {
+  const list = $('font-list');
+  if (!list) return;
+  try {
+    const value = await api('/media-image/fonts');
+    list.textContent = '';
+    for (const font of value.fonts || []) {
+      const item = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = `${font.family} · ${font.mime} · ${font.bytes} B`;
+      const copy = document.createElement('button');
+      copy.textContent = '复制 fontUrl';
+      copy.addEventListener('click', () => {
+        void navigator.clipboard?.writeText(font.url).then(
+          () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 fontUrl'; }, 1200); },
+          () => { $('font-status').textContent = font.url; },
+        );
+      });
+      item.append(label, copy);
+      list.append(item);
+    }
+    if (!list.children.length) $('font-status').textContent = '还没有登记字体。';
+  } catch (error) {
+    $('font-status').textContent = `${error.code || 'FONT_LIST_FAILED'}：${error.message}`;
+  }
+}
+
+$('font-refresh')?.addEventListener('click', () => void loadFonts());
+
+$('font-register')?.addEventListener('click', async () => {
+  const url = $('font-url')?.value?.trim();
+  const family = $('font-family')?.value?.trim();
+  if (!url || !family) { $('font-status').textContent = 'URL 与字体族名都要填。'; return; }
+  try {
+    $('font-status').textContent = '正在拉取并校验字体…';
+    const value = await api('/media-image/fonts', { method: 'POST', body: { url, family } });
+    $('font-status').textContent = `已登记 ${value.font.family} · ${value.font.url}`;
+    await loadFonts();
+  } catch (error) {
+    $('font-status').textContent = `${error.code || 'FONT_REGISTER_FAILED'}：${error.message}`;
+  }
+});
+
+window.addEventListener('pagehide', () => { stopPolling(); void relay?.stop(); });
