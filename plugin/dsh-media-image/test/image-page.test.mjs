@@ -211,6 +211,29 @@ test('面板必须可见：不能被自己的样式藏起来（这条曾漏掉�
   assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+340px/, '主板式应给面板留一列');
 });
 
+test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前是本地指令', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  for (const id of ['assist-open', 'assist-card', 'assist-log', 'assist-chips', 'assist-text', 'assist-send', 'assist-close', 'assist-reset']) {
+    assert.match(html, new RegExp(`id="${id}"`), `浮层缺少 ${id}`);
+  }
+  assert.match(html, /想改什么，直接说/, '输入框占位与工作台一致');
+  // 交互控件都要有处理器（发送既认点击也认回车）
+  for (const id of ['assist-open', 'assist-send', 'assist-close', 'assist-reset']) {
+    assert.ok(script.split('\n').some(line => line.includes(`'${id}'`) && line.includes('addEventListener')), `${id} 没有绑定处理器`);
+  }
+  assert.ok(/keydown/.test(script) && /Enter/.test(script), '回车要能发送');
+  // 这一版是本地指令，不许打着模型对话的旗号（注释里提到 ctx.llm 不算，先剥注释）
+  assert.match(script, /本地指令/, '必须如实标注实现方式');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal(/ctx\.llm|prepareCall/.test(code), false, '页面侧不应直接调模型（模型通路在 Host）');
+  // 助手只能复用已有路由
+  for (const route of ['/media-image/generate', '/media-image/assets/import', '/media-image/fonts']) {
+    assert.ok(script.includes(route), `助手应复用已有路由：${route}`);
+  }
+  assert.equal(/\/media-image\/assist/.test(script), false, '本版不引入新路由');
+});
+
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {
   // 这个坑真踩过：源码改了 highlight 转发，包内 public/image/host.js 还是旧副本，
   // 部署后页面行为与仓库对不上。两边必须逐字节相同。

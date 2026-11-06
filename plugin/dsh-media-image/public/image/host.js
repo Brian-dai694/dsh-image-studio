@@ -567,4 +567,185 @@ $('batch-refresh')?.addEventListener('click', () => {
   void pollBatch(currentBatchId);
 });
 
+// ── 悬浮助手：先说人话，再由它翻译成插件已有能力 ──
+// 这一版是**本地指令**：不调模型，靠关键词把一句话路由到已有路由（生成 / 批量 / 导入 / 字体）。
+// 之所以先这样：能立刻可用、行为可预测；模型通路（宿主 ctx.llm）是下一步，UI 不用改。
+const assistLog = $('assist-log');
+const assistText = $('assist-text');
+const assistSend = $('assist-send');
+
+function bubble(role, text, ref) {
+  if (!assistLog) return;
+  const el = document.createElement('div');
+  el.className = `bubble ${role}`;
+  el.textContent = text;
+  if (ref) {
+    const code = document.createElement('span');
+    code.className = 'ref';
+    code.textContent = ref;
+    el.append(code);
+  }
+  assistLog.append(el);
+  assistLog.scrollTop = assistLog.scrollHeight;
+  return el;
+}
+
+const CHIPS = [
+  ['生成', '生成：柔和晨光，浅灰色调'],
+  ['批量', '批量：晨光|夜景|木桌'],
+  ['导入', '导入：https://example.com/a.png'],
+  ['字体', '字体：https://example.com/f.woff2 Source Han Sans'],
+  ['帮助', '能做什么'],
+];
+
+function renderChips() {
+  const box = $('assist-chips');
+  if (!box) return;
+  box.textContent = '';
+  for (const [label, command] of CHIPS) {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.addEventListener('click', () => void sendAssist(command));
+    box.append(button);
+  }
+}
+
+const HELP = [
+  '我现在支持这些说法（都走插件已有能力，不需要模型）：',
+  '· 生成：<提示词>             → 提交一个生成作业并轮询结果',
+  '· 批量：<提示词>|<提示词>    → 按行排进批量队列（并发 2）',
+  '· 导入：<图片 URL>           → 受控拉取远程素材（拦内网）',
+  '· 字体：<字体 URL> <族名>     → 登记字体，供文字图层使用',
+  '· 插入图层                  → 把最近一次生成结果落成图层（会弹确认框）',
+].join('\n');
+
+// 一句话 → 动作。返回给用户看的文本；失败要说清是哪个环节。
+async function routeAssist(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return;
+  const say = (msg, ref) => bubble('bot', msg, ref);
+
+  if (/^(帮助|能做什么|help|\?)$/i.test(text)) { say(HELP); return; }
+
+  if (/^(插入|落层|插入图层|放进去)/.test(text)) {
+    const last = $('gen-result')?.textContent || '';
+    const match = /"assetRef":\s*"asset:([a-f0-9]{48})"/.exec(last);
+    if (!match) { say('还没有可插入的生成结果。先用「生成：…」出一张。'); return; }
+    await insertAssetAsLayer({ id: match[1], name: '助手插入的图片' });
+    say('已发出插入请求，确认框里点「确认插入」才真正落层。');
+    return;
+  }
+
+  const gen = /^生成[:：]\s*(.+)$/s.exec(text);
+  if (gen) {
+    const provider = $('gen-provider')?.value;
+    if (!provider) { say('还没选后端：先在上方「生成」面板点「刷新」。'); return; }
+    const pill = bubble('bot', '正在提交生成…');
+    try {
+      const value = await api('/media-image/generate', { method: 'POST', body: { provider, prompt: gen[1].trim(), width: 1024, height: 1024 } });
+      let job = value.job;
+      for (let i = 0; i < 20 && job.status !== 'succeeded' && job.status !== 'failed'; i += 1) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+        job = (await api(`/media-image/generate/${encodeURIComponent(job.jobId)}`)).job;
+      }
+      if (job.status === 'succeeded') {
+        $('gen-result').textContent = JSON.stringify(job, null, 2);
+        setPill('gen-pill', 'succeeded');
+        pill.textContent = '生成完成。要我插入图层就说「插入图层」。';
+        const ref = document.createElement('span');
+        ref.className = 'ref';
+        ref.textContent = job.assetRef;
+        pill.append(ref);
+        rememberAsset({ id: job.assetRef.slice(6), name: '助手生成的图片', bytes: 0 });
+      } else {
+        pill.textContent = `生成失败：${job.error || job.status}（不会自动重试）`;
+      }
+    } catch (error) {
+      pill.textContent = `${error.code || 'GENERATE_FAILED'}：${error.message}`;
+    }
+    return;
+  }
+
+  const batch = /^批量[:：]\s*(.+)$/s.exec(text);
+  if (batch) {
+    const provider = $('gen-provider')?.value;
+    if (!provider) { say('还没选后端：先在上方「生成」面板点「刷新」。'); return; }
+    const prompts = batch[1].split(/[|｜\n]/).map(line => line.trim()).filter(Boolean);
+    try {
+      const value = await api('/media-image/generate/batch', { method: 'POST', body: { provider, prompts } });
+      $('batch-prompts').value = prompts.join('\n');
+      currentBatchId = value.batch.batchId;
+      say(`已排入 ${prompts.length} 条（并发 2）。进度看「批量」面板；失败项不会自动重试。`, `batchId ${value.batch.batchId}`);
+      void pollBatch(currentBatchId);
+    } catch (error) {
+      say(`${error.code || 'BATCH_FAILED'}：${error.message}`);
+    }
+    return;
+  }
+
+  const imported = /^导入[:：]\s*(https?:\/\/\S+)$/i.exec(text);
+  if (imported) {
+    try {
+      const value = await api('/media-image/assets/import', { method: 'POST', body: { url: imported[1] } });
+      rememberAsset(value.asset);
+      say(`已导入 ${value.asset.bytes} bytes，可以去「素材」面板插入图层。`, `asset:${value.asset.id}`);
+    } catch (error) {
+      say(`${error.code || 'IMPORT_FAILED'}：${error.message}`);
+    }
+    return;
+  }
+
+  const font = /^字体[:：]\s*(https?:\/\/\S+)\s+(.+)$/i.exec(text);
+  if (font) {
+    try {
+      const value = await api('/media-image/fonts', { method: 'POST', body: { url: font[1], family: font[2].trim() } });
+      say(`已登记字体 ${value.font.family}。`, value.font.url);
+      await loadFonts();
+    } catch (error) {
+      say(`${error.code || 'FONT_FAILED'}：${error.message}`);
+    }
+    return;
+  }
+
+  say('还没听懂。我目前只认「生成：」「批量：」「导入：」「字体：」「插入图层」和「帮助」。');
+}
+
+let assistBusy = false;
+async function sendAssist(raw) {
+  const text = String(raw ?? assistText?.value ?? '').trim();
+  if (!text || assistBusy) return;
+  bubble('me', text);
+  if (assistText) assistText.value = '';
+  assistBusy = true;
+  if (assistSend) assistSend.disabled = true;
+  try {
+    await routeAssist(text);
+  } catch (error) {
+    bubble('bot', `${error.code || 'ASSIST_FAILED'}：${error.message}`);
+  } finally {
+    assistBusy = false;
+    if (assistSend) assistSend.disabled = false;
+  }
+}
+
+function openAssist(open) {
+  const card = $('assist-card');
+  const launcher = $('assist-open');
+  if (!card) return;
+  const next = open ?? !card.classList.contains('open');
+  card.classList.toggle('open', next);
+  if (launcher) launcher.style.display = next ? 'none' : '';
+  if (next) {
+    if (!assistLog.children.length) bubble('bot', '你好，这是一个图片工作台。说「生成：…」出图，说「帮助」看全部说法。');
+    assistText?.focus();
+  }
+}
+
+$('assist-open')?.addEventListener('click', () => openAssist(true));
+$('assist-close')?.addEventListener('click', () => openAssist(false));
+$('assist-reset')?.addEventListener('click', () => { if (assistLog) assistLog.textContent = ''; openAssist(true); });
+$('assist-send')?.addEventListener('click', () => void sendAssist());
+$('assist-text')?.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void sendAssist(); } });
+renderChips();
+
 window.addEventListener('pagehide', () => { if (batchTimer !== null) clearTimeout(batchTimer); stopPolling(); void relay?.stop(); });

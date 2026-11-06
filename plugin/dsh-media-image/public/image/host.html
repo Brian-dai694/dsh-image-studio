@@ -46,6 +46,33 @@
     ul.list { list-style:none; margin:10px 0 0; padding:0; display:flex; flex-direction:column; gap:6px; }
     ul.list li { font-size:12px; display:flex; gap:8px; align-items:center; justify-content:space-between; background:#f5f5f7; border-radius:8px; padding:6px 9px; }
     ul.list li span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+    /* ── 悬浮助手 ── */
+    .assist-launcher { position:fixed; right:22px; bottom:22px; z-index:40; display:flex; align-items:center; gap:8px; padding:11px 18px; border-radius:999px; border:0; cursor:pointer; font:inherit; font-size:14px; color:#fff; background:#1d1d1f; box-shadow:0 8px 24px rgba(0,0,0,.18); }
+    .assist-launcher:hover { background:#2c2c2e; }
+    .assist-launcher .dot { width:7px; height:7px; border-radius:50%; background:#34c759; }
+    .assist-card { position:fixed; right:22px; bottom:22px; z-index:41; width:353px; max-width:calc(100vw - 32px); height:min(620px, calc(100vh - 44px)); display:none; flex-direction:column; background:#fff; border-radius:16px; overflow:hidden; box-shadow:0 18px 48px rgba(0,0,0,.22); }
+    .assist-card.open { display:flex; }
+    .assist-head { display:flex; align-items:center; gap:8px; padding:13px 14px 11px; border-bottom:1px solid rgba(0,0,0,.06); }
+    .assist-head strong { font-size:14px; font-weight:600; }
+    .assist-head .who { font-size:12px; color:var(--ink-2); }
+    .assist-head .dot { width:6px; height:6px; border-radius:50%; background:#34c759; }
+    .assist-head .spacer { flex:1; }
+    .assist-icon { border:0; background:transparent; color:var(--ink-2); font-size:15px; line-height:1; padding:6px; border-radius:8px; cursor:pointer; }
+    .assist-icon:hover { background:rgba(0,0,0,.06); }
+    .assist-log { flex:1; min-height:0; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+    .bubble { max-width:86%; font-size:13.5px; line-height:1.55; padding:9px 12px; border-radius:14px; white-space:pre-wrap; word-break:break-word; }
+    .bubble.bot { align-self:flex-start; background:#f5f5f7; color:var(--ink); }
+    .bubble.me { align-self:flex-end; background:rgba(0,0,0,.06); color:var(--ink); }
+    .bubble .ref { display:block; margin-top:6px; font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--ink-2); word-break:break-all; }
+    .assist-chips { display:flex; flex-wrap:wrap; gap:6px; padding:0 14px 8px; }
+    .assist-chips button { font-size:12px; padding:6px 10px; border-radius:999px; border:1px solid rgba(0,0,0,.1); background:#fff; color:var(--ink-2); cursor:pointer; }
+    .assist-chips button:hover { background:#f5f5f7; }
+    .assist-input { display:flex; align-items:center; gap:8px; padding:10px 12px 12px; border-top:1px solid rgba(0,0,0,.06); }
+    .assist-input input { flex:1; min-width:0; border:0; outline:none; font:14px/1.4 inherit; padding:9px 12px; border-radius:999px; background:#f5f5f7; color:var(--ink); }
+    .assist-send { width:32px; height:32px; flex:0 0 32px; border-radius:50%; border:0; background:#1d1d1f; color:#fff; font-size:14px; cursor:pointer; display:grid; place-items:center; }
+    .assist-send:hover { background:#2c2c2e; }
+    .assist-send[disabled] { opacity:.4; cursor:not-allowed; }
   </style>
 </head>
 <body>
@@ -133,6 +160,23 @@
       </section>
     </aside>
   </main>
+  <button class="assist-launcher" id="assist-open"><span class="dot"></span>助手</button>
+  <section class="assist-card" id="assist-card" aria-label="助手">
+    <div class="assist-head">
+      <span class="dot"></span>
+      <strong>助手</strong>
+      <span class="who" id="assist-who">本地指令</span>
+      <span class="spacer"></span>
+      <button class="assist-icon" id="assist-reset" title="清空对话">⟳</button>
+      <button class="assist-icon" id="assist-close" title="关闭">✕</button>
+    </div>
+    <div class="assist-log" id="assist-log"></div>
+    <div class="assist-chips" id="assist-chips"></div>
+    <div class="assist-input">
+      <input id="assist-text" type="text" placeholder="想改什么，直接说" autocomplete="off">
+      <button class="assist-send" id="assist-send" title="发送">↑</button>
+    </div>
+  </section>
   <dialog id="confirm-modal">
     <form method="dialog" style="min-width:320px;max-width:520px">
       <h3 id="confirm-title" style="margin:0 0 10px;font-size:15px">确认插入图层</h3>
