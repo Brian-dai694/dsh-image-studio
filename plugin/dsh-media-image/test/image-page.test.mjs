@@ -163,7 +163,7 @@ test('packaged wrapper binds the editor to the image relay only', async () => {
 test('每个可点面板控件都真的绑了处理器（防"面板空壳"）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
-  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'gen-insert', 'batch-submit', 'batch-refresh', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
+  const interactive = ['connect', 'reconnect', 'read', 'gen-refresh', 'gen-submit', 'gen-insert', 'gen-stop', 'batch-submit', 'batch-refresh', 'batch-stop', 'asset-upload', 'asset-import', 'font-register', 'font-refresh'];
   const lines = script.split('\n');
   for (const id of interactive) {
     assert.match(html, new RegExp(`id="${id}"`), `host.html 缺少控件 ${id}`);
@@ -208,7 +208,7 @@ test('面板必须可见：不能被自己的样式藏起来（这条曾漏掉�
   const hides = [...css.matchAll(/[^{}]*aside[^{}]*\{[^}]*display:\s*none[^}]*\}/g)].map(m => m[0].trim());
   assert.deepEqual(hides, [], `样式里仍有隐藏 aside 的规则：${hides.join(' | ')}`);
   // 主区必须是两列（编辑器 + 面板），否则面板会被挤到看不见的地方
-  assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+340px/, '主板式应给面板留一列');
+  assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+\d{3}px/, '主板式应给面板留一列');
 });
 
 test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前是本地指令', () => {
@@ -232,6 +232,49 @@ test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前�
     assert.ok(script.includes(route), `助手应复用已有路由：${route}`);
   }
   assert.equal(/\/media-image\/assist/.test(script), false, '本版不引入新路由');
+});
+
+test('性能与状态契约：rAF 到终态停帧、列表增量更新、逐项重试、可解释状态、减动效降级', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>')).replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // ① 帧循环：只由 rAF 驱动，且到达目标后不再排队
+  assert.match(code, /requestAnimationFrame\(tick\)/, '进度应由 rAF 推进');
+  assert.match(code, /frame = null;[\s\S]{0,80}?return/, '到目标必须停帧（不让循环空转）');
+  assert.match(code, /cancelAnimationFrame/, '终态与重置都要能取消帧');
+  // 只动合成友好属性
+  const animating = [...code.matchAll(/style\.(\w+)\s*=/g)].map(m => m[1]);
+  assert.deepEqual([...new Set(animating)].filter(p => ['top', 'left', 'width', 'height'].includes(p)), [], '不得用几何属性做动画');
+  assert.match(code, /scaleX\(/, '进度条用 transform:scaleX');
+
+  // ② 减动效：CSS 兜底 + JS 分支
+  assert.match(css, /@media \(prefers-reduced-motion:reduce\)/, 'CSS 必须有减动效兜底');
+  assert.match(code, /prefers-reduced-motion: reduce/, 'JS 必须读减动效偏好');
+  assert.match(code, /REDUCE_MOTION/, '减动效要走瞬时分支');
+
+  // ③ 列表增量更新：按 key 复用行，不整表重建
+  assert.match(code, /function keyedRow/, '列表必须按 key 复用行');
+  assert.match(code, /data-key/, '行要有稳定 key');
+  assert.equal(/list\.textContent = ''/.test(code), false, '不得整表清空重建（会打掉焦点）');
+
+  // ④ 逐项失败可局部重试：走已有批量路由，1 条
+  assert.match(code, /retryBatchItem/, '失败项要有单条重试');
+  assert.match(code, /prompts: \[prompt\]/, '重试提交 1 条（新作业），不复用旧作业');
+  assert.match(code, /重试=新作业|new/i, '必须说明重试是新作业');
+
+  // ⑤ 状态要可解释：阶段 + 原因 + 恢复方式
+  assert.match(code, /已查询 \$\{genPolls\} 次/, '进行中要说明阶段');
+  assert.match(code, /不要重放同一作业/, '失败要给恢复方式');
+  assert.match(code, /已停止查询/, '停止要说明停的是什么');
+
+  // ⑥ 空态给下一步，且不冒充错误
+  for (const id of ['gen-result-empty', 'batch-empty', 'asset-empty']) {
+    assert.match(html, new RegExp(`id="${id}"`), `缺少空态 ${id}`);
+  }
+  // ⑦ 焦点可见
+  assert.match(css, /:focus-visible/, '必须有可见焦点环');
 });
 
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {

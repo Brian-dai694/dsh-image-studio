@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "project": "dsh-image-studio / plugin/dsh-media-image · host page",
+  "note": "register=product（工作台，电脑上开）。轮转记录用于下次避开同一方向；产品登记册的分页导航约定不参与轮转。",
+  "builds": [
+    {
+      "at": "2026-11-06",
+      "mode": "redesign",
+      "surface": "scripts/image-page/host.html + host.js",
+      "register": "product",
+      "dials": { "soul": 6, "spectacle": 2, "density": 7 },
+      "axes": {
+        "palette": "warm-stone-ramp + mono-ink-accent + semantic-only color",
+        "type": "13/14/11.5px scale, -0.02em headings, tabular-nums",
+        "layout": "editor stage + fixed 348px rail (2xl→stack at 980px)",
+        "engine": "none (rAF meter only, stops at terminal state)",
+        "material": "darkroom paper — warm neutral surround so image color is judged true"
+      },
+      "rejectedDefault": "white cards + Apple-blue primary + system grey + pill buttons (the generic AI tool page)",
+      "changed": [
+        "tokens: pure #fff and #f5f5f7 replaced by tinted Warm Stone ramp",
+        "primary buttons ink black; only semantic hues (run/ok/fail) carry color",
+        "panel titles: 11.5px uppercase + hairline rule",
+        "empty states now name the next step (作业 / 批次 / 素材)",
+        "focus-visible ring on every interactive control",
+        "rAF progress meters that stop at terminal state; reduced-motion → instant",
+        "batch + asset + font lists update by key (no full rebuild → focus survives polling)",
+        "per-item retry for failed batch items (new job, existing route)",
+        "stop-querying control for generate and batch (stops polling only, says so)"
+      ],
+      "verification": {
+        "sourceLevel": "179/179 tests incl. new perf/state contract test",
+        "measured": "none — no fps or latency claim made",
+        "boundaries": [
+          "pointer-frequency temp state lives in the third-party miniPaint iframe; not touched",
+          "generation/batch/asset work already runs Host-side; page only reflects it"
+        ]
+      }
+    }
+  ]
+}

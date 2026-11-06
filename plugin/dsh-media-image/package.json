@@ -1,6 +1,6 @@
 {
   "name": "dsh-media-image",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "DSH 图片编辑器插件：人和 Agent 共用一份 miniPaint 工程，通过受控命令协作编辑；0.2.0 起右侧为原生对话面板（四态工具卡片、只读审批、撤销只填输入框）。",
   "type": "module",

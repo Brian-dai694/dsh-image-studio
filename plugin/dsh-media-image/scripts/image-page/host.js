@@ -210,33 +210,111 @@ const setPill = (id, state) => {
   pill.className = `pill ${state || ''}`.trim();
 };
 
+// 用户偏好减动效时，一切进度都改成瞬时到位，不起帧循环。
+const REDUCE_MOTION = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// 进度条：由 rAF 推进 transform:scaleX（合成友好），到终态立刻停帧。
+// 只推进 CSS 变量里的一个值，不做 per-poll 的 DOM 结构重排。
+function createMeter(id) {
+  const bar = $(id);
+  const fill = bar?.firstElementChild;
+  let frame = null;
+  let value = 0;
+  let target = 0;
+  const paint = () => { if (fill) fill.style.transform = `scaleX(${value.toFixed(4)})`; };
+  const tick = () => {
+    const delta = target - value;
+    if (Math.abs(delta) < 0.004) {
+      value = target;
+      paint();
+      frame = null;
+      return; // 到达目标 → 停帧，不空转
+    }
+    value += delta * 0.18;
+    paint();
+    frame = requestAnimationFrame(tick);
+  };
+  return {
+    show(on) { bar?.classList.toggle('on', !!on); },
+    set(ratio) {
+      target = Math.max(0, Math.min(1, Number.isFinite(ratio) ? ratio : 0));
+      if (REDUCE_MOTION) { value = target; paint(); return; }
+      if (frame === null) frame = requestAnimationFrame(tick);
+    },
+    done(failed) {
+      target = 1;
+      value = 1;
+      paint();
+      if (frame !== null) { cancelAnimationFrame(frame); frame = null; }
+      if (fill) fill.style.background = failed ? 'var(--fail)' : 'var(--ok)';
+      setTimeout(() => { bar?.classList.remove('on'); if (fill) fill.style.background = 'var(--run)'; }, 900);
+    },
+    reset() {
+      if (frame !== null) { cancelAnimationFrame(frame); frame = null; }
+      value = 0; target = 0; paint();
+      if (fill) fill.style.background = 'var(--run)';
+    },
+  };
+}
+
+const genMeter = createMeter('gen-meter');
+const batchMeter = createMeter('batch-meter');
+
+// 空态与结果区分开：有内容才显示 <pre>，空态给出"下一步做什么"。
+function toggleEmpty(emptyId, preId, hasContent) {
+  const empty = $(emptyId);
+  const pre = $(preId);
+  if (empty) empty.hidden = hasContent;
+  if (pre) pre.hidden = !hasContent;
+}
+
 // 本页已知素材：素材库没有列表路由，这里只记本页产生/导入的，别谎称是"全部"。
 const knownAssets = [];
+
+// 按 id 增量更新列表：存在就改文字，不存在才插入 —— 轮询不再整表重建，
+// 键盘焦点与滚动位置都不会被打掉。
+function keyedRow(list, key, build) {
+  let row = list.querySelector(`[data-key="${key}"]`);
+  if (row) return { row, fresh: false };
+  row = document.createElement('li');
+  row.dataset.key = key;
+  list.append(row);
+  build(row);
+  return { row, fresh: true };
+}
 
 function renderAssets() {
   const list = $('asset-list');
   if (!list) return;
-  list.textContent = '';
+  toggleEmpty('asset-empty', 'asset-result', knownAssets.length > 0);
   for (const asset of knownAssets) {
-    const item = document.createElement('li');
-    const label = document.createElement('span');
-    label.textContent = `${asset.name || 'image'} · ${asset.bytes} B · asset:${String(asset.id).slice(0, 8)}…`;
-    const copy = document.createElement('button');
-    copy.textContent = '复制引用';
-    copy.addEventListener('click', () => {
-      const ref = `asset:${asset.id}`;
-      void navigator.clipboard?.writeText(ref).then(
-        () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制引用'; }, 1200); },
-        () => { $('asset-status').textContent = ref; },
-      );
+    const { row, fresh } = keyedRow(list, `asset:${asset.id}`, el => {
+      const label = document.createElement('span');
+      label.dataset.role = 'label';
+      const actions = document.createElement('div');
+      actions.className = 'item-actions';
+      const copy = document.createElement('button');
+      copy.className = 'ghost';
+      copy.textContent = '复制引用';
+      copy.addEventListener('click', () => {
+        const ref = `asset:${asset.id}`;
+        void navigator.clipboard?.writeText(ref).then(
+          () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制引用'; }, 1200); },
+          () => { $('asset-status').textContent = ref; },
+        );
+      });
+      const insert = document.createElement('button');
+      insert.textContent = '插入为图层';
+      insert.addEventListener('click', () => void insertAssetAsLayer(asset));
+      actions.append(copy, insert);
+      el.append(label, actions);
     });
-    item.append(label, copy);
-    // 每个素材都能直接插成图层（带确认对话框）。
-    const insert = document.createElement('button');
-    insert.textContent = '插入为图层';
-    insert.addEventListener('click', () => void insertAssetAsLayer(asset));
-    item.append(insert);
-    list.append(item);
+    if (!fresh) {
+      const label = row.querySelector('[data-role="label"]');
+      if (label) label.textContent = `${asset.name || 'image'} · ${asset.bytes} B · asset:${String(asset.id).slice(0, 8)}…`;
+    } else {
+      row.querySelector('[data-role="label"]').textContent = `${asset.name || 'image'} · ${asset.bytes} B · asset:${String(asset.id).slice(0, 8)}…`;
+    }
   }
 }
 
@@ -336,6 +414,7 @@ $('asset-upload')?.addEventListener('click', async () => {
     const asset = await uploadImageAsset(file);
     $('asset-status').textContent = `已注册临时素材 · ${asset.bytes} bytes`;
     $('asset-result').textContent = JSON.stringify({ ...asset, sourceRef: `asset:${asset.id}` }, null, 2);
+    toggleEmpty('asset-empty', 'asset-result', true);
     rememberAsset(asset);
   } catch (error) {
     $('asset-status').textContent = `${error.code || 'UPLOAD_FAILED'}：${error.message}`;
@@ -350,6 +429,7 @@ $('asset-import')?.addEventListener('click', async () => {
     const value = await api('/media-image/assets/import', { method: 'POST', body: { url } });
     $('asset-status').textContent = `已导入 · ${value.asset.bytes} bytes`;
     $('asset-result').textContent = JSON.stringify(value, null, 2);
+    toggleEmpty('asset-empty', 'asset-result', true);
     rememberAsset(value.asset);
   } catch (error) {
     $('asset-status').textContent = `${error.code || 'IMPORT_FAILED'}：${error.message}`;
@@ -391,38 +471,57 @@ async function loadProviders() {
 
 function stopPolling() {
   if (genTimer !== null) { clearTimeout(genTimer); genTimer = null; }
+  if ($('gen-stop')) $('gen-stop').hidden = true;
 }
+
+const running = () => { const b = $('gen-stop'); if (b) b.hidden = false; };
 
 async function pollJob(jobId) {
   try {
     const value = await api(`/media-image/generate/${encodeURIComponent(jobId)}`);
     const job = value.job;
     setPill('gen-pill', job.status);
-    $('gen-result').textContent = JSON.stringify(job, null, 2);
+    const result = $('gen-result');
+    if (result) result.textContent = JSON.stringify(job, null, 2);
+    toggleEmpty('gen-result-empty', 'gen-result', true);
+    // 进度用"轮询了第几次"粗略推进，只到 0.9 —— 剩下 0.1 留给真正拿到终态，不假装知道服务端百分比。
+    genMeter.set(Math.min(0.9, 0.25 + genPolls * 0.12));
+    genPolls += 1;
     if (job.status === 'succeeded') {
-      $('gen-status').textContent = `完成 · ${job.assetRef}（用 layer.add_image 落层）`;
+      $('gen-status').textContent = `完成 · ${job.assetRef}（用「插入图层」落层）`;
+      genMeter.done(false);
       genTimer = null;
+      if ($('gen-stop')) $('gen-stop').hidden = true;
       return;
     }
     if (job.status === 'failed') {
-      $('gen-status').textContent = `失败：${job.error || '未知原因'}（不要重放同一作业）`;
+      $('gen-status').innerHTML = `<span class="err">失败：${job.error || '未知原因'}</span> · 不要重放同一作业；改提示词后重新提交`;
+      genMeter.done(true);
       genTimer = null;
+      if ($('gen-stop')) $('gen-stop').hidden = true;
       return;
     }
     // queued / running / unknown 都继续查；unknown 只代表"这次没查到"，不代表失败。
     $('gen-status').textContent = job.status === 'unknown'
-      ? `结果未知：${job.error || ''} 继续查询同一个 jobId…`
-      : `作业进行中（${job.status}）…`;
+      ? `结果未知：${job.error || ''} · 继续查询同一个 jobId，不重新提交`
+      : `作业进行中（${job.status}）· 已查询 ${genPolls} 次`;
     genTimer = setTimeout(() => void pollJob(jobId), 1500);
   } catch (error) {
     setPill('gen-pill', 'unknown');
-    $('gen-status').textContent = `${error.code || 'POLL_FAILED'}：${error.message}`;
+    $('gen-status').innerHTML = `<span class="err">${error.code || 'POLL_FAILED'}</span>：${error.message} · 稍后自动重查`;
     genTimer = setTimeout(() => void pollJob(jobId), 2500);
   }
 }
 
+let genPolls = 0;
+
 $('gen-refresh')?.addEventListener('click', () => void loadProviders());
 $('gen-insert')?.addEventListener('click', () => void insertGenerated());
+// 「停止查询」只停本页轮询，不取消 Host 侧作业（取消作业是另一件事，这里不冒充）。
+$('gen-stop')?.addEventListener('click', () => {
+  stopPolling();
+  $('gen-status').textContent = `已停止查询（jobId 仍有效，可用同一 id 再查，不会重建作业）`;
+});
 
 $('gen-submit')?.addEventListener('click', async () => {
   const provider = $('gen-provider')?.value;
@@ -432,24 +531,38 @@ $('gen-submit')?.addEventListener('click', async () => {
   const width = Number($('gen-width')?.value) || undefined;
   const height = Number($('gen-height')?.value) || undefined;
   stopPolling();
+  genPolls = 0;
+  genMeter.reset();
+  genMeter.show(true);
+  running();
   setPill('gen-pill', 'queued');
   $('gen-status').textContent = '正在提交…';
+  const submit = $('gen-submit');
+  if (submit) submit.disabled = true;
   try {
     const value = await api('/media-image/generate', { method: 'POST', body: { provider, prompt, width, height } });
     const job = value.job;
     genJobId = job.jobId;
     setPill('gen-pill', job.status);
-    $('gen-result').textContent = JSON.stringify(job, null, 2);
+    const result = $('gen-result');
+    if (result) result.textContent = JSON.stringify(job, null, 2);
+    toggleEmpty('gen-result-empty', 'gen-result', true);
     if (job.status === 'succeeded') {
       $('gen-status').textContent = `完成 · ${job.assetRef}`;
+      genMeter.done(false);
+      stopPolling();
       if (job.assetRef) rememberAsset({ id: job.assetRef.slice('asset:'.length), name: `generated-${provider}`, bytes: 0 });
       return;
     }
-    $('gen-status').textContent = `已提交 jobId=${job.jobId}，开始轮询…`;
+    $('gen-status').textContent = `已提交 jobId=${job.jobId} · 开始轮询`;
     genTimer = setTimeout(() => void pollJob(job.jobId), 1200);
   } catch (error) {
     setPill('gen-pill', 'failed');
-    $('gen-status').textContent = `${error.code || 'SUBMIT_FAILED'}：${error.message}`;
+    $('gen-status').innerHTML = `<span class="err">${error.code || 'SUBMIT_FAILED'}</span>：${error.message} · 检查后端是否在运行`;
+    genMeter.done(true);
+    stopPolling();
+  } finally {
+    if (submit) submit.disabled = false;
   }
 });
 
@@ -459,25 +572,35 @@ async function loadFonts() {
   if (!list) return;
   try {
     const value = await api('/media-image/fonts');
-    list.textContent = '';
-    for (const font of value.fonts || []) {
-      const item = document.createElement('li');
-      const label = document.createElement('span');
-      label.textContent = `${font.family} · ${font.mime} · ${font.bytes} B`;
-      const copy = document.createElement('button');
-      copy.textContent = '复制 fontUrl';
-      copy.addEventListener('click', () => {
-        void navigator.clipboard?.writeText(font.url).then(
-          () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 fontUrl'; }, 1200); },
-          () => { $('font-status').textContent = font.url; },
-        );
+    const fonts = value.fonts || [];
+    // 同样按 key 增量更新：刷新列表不该把「复制 fontUrl」按钮换掉、也不该丢焦点。
+    for (const font of fonts) {
+      const { row, fresh } = keyedRow(list, `font:${font.id}`, el => {
+        const label = document.createElement('span');
+        label.dataset.role = 'label';
+        const copy = document.createElement('button');
+        copy.className = 'ghost';
+        copy.textContent = '复制 fontUrl';
+        copy.addEventListener('click', () => {
+          void navigator.clipboard?.writeText(font.url).then(
+            () => { copy.textContent = '已复制'; setTimeout(() => { copy.textContent = '复制 fontUrl'; }, 1200); },
+            () => { $('font-status').textContent = font.url; },
+          );
+        });
+        el.append(label, copy);
       });
-      item.append(label, copy);
-      list.append(item);
+      const label = row.querySelector('[data-role="label"]');
+      if (label) label.textContent = `${font.family} · ${font.mime} · ${font.bytes} B`;
+      if (fresh) row.dataset.key = `font:${font.id}`;
     }
-    if (!list.children.length) $('font-status').textContent = '还没有登记字体。';
+    // 已被删除的字体行要收走（否则会留下点了报错的按钮）
+    const alive = new Set(fonts.map(font => `font:${font.id}`));
+    for (const row of [...list.children]) if (!alive.has(row.dataset.key)) row.remove();
+    if (!list.children.length) {
+      $('font-status').textContent = '还没有登记字体：填 URL + 族名后点「登记字体」。';
+    }
   } catch (error) {
-    $('font-status').textContent = `${error.code || 'FONT_LIST_FAILED'}：${error.message}`;
+    $('font-status').innerHTML = `<span class="err">${error.code || 'FONT_LIST_FAILED'}</span>：${error.message}`;
   }
 }
 
@@ -501,19 +624,66 @@ $('font-register')?.addEventListener('click', async () => {
 let batchTimer = null;
 let currentBatchId = null;
 
+// 批量列表按 index 增量更新：轮询只改变的那几行，不重建整表，
+// 也不会把用户正在点的「重试」按钮换掉。失败的项单独给一个重试按钮。
 function renderBatch(batch) {
   const list = $('batch-list');
   if (!list) return;
-  list.textContent = '';
-  for (const item of batch.items) {
-    const row = document.createElement('li');
-    const label = document.createElement('span');
-    label.textContent = `#${item.index + 1} ${item.prompt.slice(0, 28)}${item.prompt.length > 28 ? '…' : ''}`;
-    const pill = document.createElement('span');
-    pill.className = `pill ${item.status}`;
-    pill.textContent = item.assetRef ? `${item.status} · ${item.assetRef.slice(0, 12)}…` : item.status;
-    row.append(label, pill);
-    list.append(row);
+  toggleEmpty('batch-empty', 'batch-list', batch.items.length > 0);
+  batch.items.forEach((item, index) => {
+    const key = `${batch.batchId}:${item.index}`;
+    const { row, fresh } = keyedRow(list, key, el => {
+      const label = document.createElement('span');
+      label.dataset.role = 'label';
+      const actions = document.createElement('div');
+      actions.className = 'item-actions';
+      const pill = document.createElement('span');
+      pill.dataset.role = 'pill';
+      pill.className = `pill ${item.status}`;
+      actions.append(pill);
+      if (item.status === 'failed') {
+        const retry = document.createElement('button');
+        retry.className = 'ghost';
+        retry.textContent = '重试';
+        retry.dataset.role = 'retry';
+        retry.addEventListener('click', () => void retryBatchItem(batch.batchId, item.prompt, retry));
+        actions.append(retry);
+      }
+      el.append(label, actions);
+      el.style.order = String(index);
+    });
+    const label = row.querySelector('[data-role="label"]');
+    if (label) label.textContent = `#${item.index + 1} ${item.prompt.slice(0, 26)}${item.prompt.length > 26 ? '…' : ''}`;
+    const pill = row.querySelector('[data-role="pill"]');
+    if (pill) {
+      pill.className = `pill ${item.status}`;
+      pill.textContent = item.assetRef ? `${item.status} · ${item.assetRef.slice(6, 14)}…` : item.status;
+    }
+    // 状态由 failed 变成别的：把重试按钮拿掉（不能留一个点了没用的按钮）。
+    const retry = row.querySelector('[data-role="retry"]');
+    if (retry && item.status !== 'failed') retry.remove();
+    row.style.order = String(index);
+  });
+}
+
+// 单条重试 = 用同一条提示词重新提交一个**新作业**（不是重放旧作业），走已有批量路由（1 条）。
+async function retryBatchItem(batchId, prompt, button) {
+  const provider = $('gen-provider')?.value;
+  if (!provider) { $('batch-status').textContent = '重试需要先选后端。'; return; }
+  if (button) { button.disabled = true; button.textContent = '提交中…'; }
+  try {
+    const value = await api('/media-image/generate/batch', {
+      method: 'POST',
+      body: { provider, prompts: [prompt], width: Number($('gen-width')?.value) || undefined, height: Number($('gen-height')?.value) || undefined },
+    });
+    const batch = value.batch;
+    $('batch-status').textContent = `已为失败项重新提交 · 新批次 ${batch.batchId.slice(0, 8)}…（旧批次的失败记录保留）`;
+    renderBatch(batch);
+    if (batchTimer !== null) clearTimeout(batchTimer);
+    batchTimer = setTimeout(() => void pollBatch(batch.batchId), 1200);
+  } catch (error) {
+    if (button) { button.disabled = false; button.textContent = '重试'; }
+    $('batch-status').innerHTML = `<span class="err">${error.code || 'RETRY_FAILED'}</span>：${error.message}`;
   }
 }
 
@@ -524,16 +694,20 @@ async function pollBatch(batchId) {
     setPill('batch-pill', batch.status);
     renderBatch(batch);
     const { succeeded, failed, unknown, queued, running } = batch.counts;
+    const total = batch.items.length || 1;
+    batchMeter.set(Math.min(0.95, (succeeded + failed) / total));
     $('batch-status').textContent = `成功 ${succeeded} · 失败 ${failed} · 未知 ${unknown} · 进行中 ${running + queued}`;
     if (batch.status === 'running') {
       batchTimer = setTimeout(() => void pollBatch(batchId), 1500);
     } else {
       batchTimer = null;
-      if (failed > 0) $('batch-status').textContent += '（失败项需重新提交，不会自动重试）';
+      batchMeter.done(failed > 0);
+      if ($('batch-stop')) $('batch-stop').hidden = true;
+      if (failed > 0) $('batch-status').innerHTML += ' · <span class="err">失败项可单条重试</span>（重试=新作业）';
     }
   } catch (error) {
     setPill('batch-pill', 'unknown');
-    $('batch-status').textContent = `${error.code || 'BATCH_POLL_FAILED'}：${error.message}`;
+    $('batch-status').innerHTML = `<span class="err">${error.code || 'BATCH_POLL_FAILED'}</span>：${error.message} · 稍后自动重查`;
     batchTimer = setTimeout(() => void pollBatch(batchId), 2500);
   }
 }
@@ -544,6 +718,9 @@ $('batch-submit')?.addEventListener('click', async () => {
   if (!provider) { $('batch-status').textContent = '先在上方「生成」面板选一个后端。'; return; }
   if (!prompts.length) { $('batch-status').textContent = '至少写一条提示词。'; return; }
   if (batchTimer !== null) { clearTimeout(batchTimer); batchTimer = null; }
+  batchMeter.reset();
+  batchMeter.show(true);
+  if ($('batch-stop')) $('batch-stop').hidden = false;
   setPill('batch-pill', 'queued');
   try {
     const value = await api('/media-image/generate/batch', {
@@ -553,11 +730,13 @@ $('batch-submit')?.addEventListener('click', async () => {
     currentBatchId = value.batch.batchId;
     setPill('batch-pill', value.batch.status);
     renderBatch(value.batch);
-    $('batch-status').textContent = `已提交 ${value.batch.items.length} 条 · batchId=${value.batch.batchId}`;
+    $('batch-status').textContent = `已提交 ${value.batch.items.length} 条（并发 2）· batchId=${value.batch.batchId.slice(0, 8)}…`;
     batchTimer = setTimeout(() => void pollBatch(currentBatchId), 1200);
   } catch (error) {
     setPill('batch-pill', 'failed');
-    $('batch-status').textContent = `${error.code || 'BATCH_SUBMIT_FAILED'}：${error.message}`;
+    $('batch-status').innerHTML = `<span class="err">${error.code || 'BATCH_SUBMIT_FAILED'}</span>：${error.message}`;
+    batchMeter.done(true);
+    if ($('batch-stop')) $('batch-stop').hidden = true;
   }
 });
 
@@ -565,6 +744,13 @@ $('batch-refresh')?.addEventListener('click', () => {
   if (!currentBatchId) { $('batch-status').textContent = '还没有批次。'; return; }
   if (batchTimer !== null) { clearTimeout(batchTimer); batchTimer = null; }
   void pollBatch(currentBatchId);
+});
+
+// 「停止查询」同上：只停本页轮询，Host 侧批次与逐项记录都不受影响。
+$('batch-stop')?.addEventListener('click', () => {
+  if (batchTimer !== null) { clearTimeout(batchTimer); batchTimer = null; }
+  if ($('batch-stop')) $('batch-stop').hidden = true;
+  $('batch-status').textContent = '已停止查询（批次仍在 Host 侧推进，可点「刷新进度」继续看）';
 });
 
 // ── 悬浮助手：先说人话，再由它翻译成插件已有能力 ──
