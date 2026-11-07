@@ -1053,19 +1053,20 @@ test('locate 透传：合法原样保留，非法整体省略', async () => {
   assert.equal(track[0].locate.kind, 'track');
 });
 
-test('默认显示原生面板：侧栏入口/main 注册，工具回执卡也注册', async () => {
+test('默认隐藏原生 Conversation 面板：不注册侧栏/main，保留工具卡；宿主页助手不受此开关影响', async () => {
   const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
   const previousStorage = globalThis.localStorage;
   delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
   globalThis.localStorage = { getItem: () => null };
   try {
     const client = await loadClient();
-    const { ctx, registered, flush } = makeContext();
+    const { ctx, registered, injected, flush } = makeContext();
     client.apply(ctx);
     flush();
-    assert.ok(registered.some(row => row.definition.name === 'sidebar.panellist'), '默认应显示 DSH 侧栏入口');
-    assert.ok(registered.some(row => row.definition.name === 'main'), '默认应注册授权所在的 main 面板');
+    assert.equal(registered.some(row => row.definition.name === 'sidebar.panellist'), false, '红框 Conversation 面板对应的侧栏入口默认隐藏');
+    assert.equal(registered.some(row => row.definition.name === 'main'), false, '红框 Conversation 主面板默认隐藏');
     assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'), '原生工具回执卡仍注册');
+    assert.ok(injected.includes('shell.overlay'), '悬浮编辑器保留机制不随面板开关误删');
   } finally {
     if (previous === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
     else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = previous;
@@ -1074,7 +1075,7 @@ test('默认显示原生面板：侧栏入口/main 注册，工具回执卡也�
   }
 });
 
-test('显式隐藏面板：不注册侧栏/main，但保留工具回执卡', async () => {
+test('显式隐藏原生面板：不注册侧栏/main，但保留工具回执卡', async () => {
   const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
   delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
   const previousStorage = globalThis.localStorage;

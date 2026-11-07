@@ -2020,9 +2020,9 @@ window.__ModuleLoader__.load({
           if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 工具卡片注册失败：', toolName, String(error))
         }
       })
-      // 原生面板默认显示，确保用户能在 DSH 侧栏看到“图片编辑器”并完成本人授权。
-      // 可选隐藏：globalThis.__DSH_MEDIA_IMAGE_PANEL__ = false，或 localStorage
-      // dsh-media-image-panel=hidden；恢复：改为 true / 删除该 localStorage 项并刷新。
+      // 原生 Conversation 面板默认隐藏；宿主页右下角悬浮助手保留。
+      // 隐藏也会移除侧栏入口和“本人授权工程”入口；模型工具仍受会话绑定校验保护。
+      // 恢复原生面板：globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true 后刷新，或清除 localStorage 开关。
       function panelEnabled() {
         try {
           if (typeof globalThis !== 'undefined' && typeof globalThis.__DSH_MEDIA_IMAGE_PANEL__ === 'boolean') {
@@ -2030,9 +2030,13 @@ window.__ModuleLoader__.load({
           }
         } catch (_) { /* 使用持久设置 / 默认值 */ }
         try {
-          if (typeof localStorage !== 'undefined' && localStorage.getItem('dsh-media-image-panel') === 'hidden') return false
-        } catch (_) { /* 存储不可用时采用可见默认值 */ }
-        return true
+          if (typeof localStorage !== 'undefined') {
+            var saved = localStorage.getItem('dsh-media-image-panel')
+            if (saved === 'hidden') return false
+            if (saved === 'visible') return true
+          }
+        } catch (_) { /* 存储不可用时采用默认隐藏 */ }
+        return false
       }
 
       // forEach, not a `for (var i ...)`: `slots.inject` runs its factory later, so a
