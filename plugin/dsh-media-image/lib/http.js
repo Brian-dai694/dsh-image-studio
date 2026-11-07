@@ -5,6 +5,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, relative, resolve, sep } from 'node:path';
 import { fetchRemoteBytes } from './remote.js';
 import { MAX_FONT_BYTES } from './fonts.js';
+import { psdToTemplate } from './psd.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -24,8 +25,7 @@ const MIME = {
 
 const SAFE = /^[a-zA-Z0-9._/-]+$/;
 const RELAY_ACTIONS = new Set(['register', 'poll', 'respond', 'disconnect']);
-const MAX_ASSET_BYTES = 32 * 1024 * 1024;
-const ASSET_HEADER = 'x-dsh-media-asset';
+const MAX_ASSET_BYTES = 32 * 1024 * 1024;const ASSET_HEADER = 'x-dsh-media-asset';
 
 /**
  * boot 令牌的同源校验（与视频包同形）。
@@ -367,6 +367,27 @@ async function handleBackgroundRemoval(req, res, { backgroundRemoval, token, pre
   return true;
 }
 
+async function handlePsdSlots(req, res, { token, assets }) {
+  const rejection = authorizeSameOrigin(req, token, ['POST'], { requireJson: false });
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  try {
+    // 只解析结构、不落盘：PSD 不进素材库（素材库只收 PNG/JPEG/WebP）。
+    const body = await readBinaryBody(req, MAX_ASSET_BYTES);
+    if (!body.length) { send(res, 400, { code: 'PSD_EMPTY', message: '请求体是空的，请直接上传 .psd 文件字节。' }); return true; }
+    const template = psdToTemplate(body, { name: String(req.headers['x-psd-name'] || 'uploaded.psd').slice(0, 120) });
+    send(res, 200, { ok: true, template, assetCount: assets ? assets.list().length : 0 });
+  } catch (error) {
+    const code = error?.code || 'PSD_FAILED';
+    const status = code === 'PAYLOAD_TOO_LARGE' ? 413 : String(code).startsWith('PSD_') ? 400 : 500;
+    send(res, status, {
+      code,
+      message: error.message,
+      ...(code === 'PSD_BAD_SIGNATURE' ? { hint: '请上传 .psd（Photoshop）文件；PNG/JPG 请走素材上传。' } : {}),
+    });
+  }
+  return true;
+}
+
 async function handleAssist(req, res, { assist, ctx, token, prefix }) {
   const rejection = authorizeSameOrigin(req, token, req.method === 'GET' ? ['GET'] : ['POST']);
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
@@ -439,6 +460,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/fonts` || pathname.startsWith(`${prefix}/fonts/`)) {
       return handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch });
+    }
+    if (pathname === `${prefix}/psd/slots`) {
+      return handlePsdSlots(req, res, { token, assets });
     }
     if (pathname === `${prefix}/assist`) {
       return handleAssist(req, res, { assist, ctx, token, prefix });
