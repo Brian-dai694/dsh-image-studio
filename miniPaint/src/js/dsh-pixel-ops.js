@@ -183,3 +183,82 @@ export function applyMask(source, mask, { mode = 'luminance', invert = false, fe
   }
   return out;
 }
+
+/**
+ * 自动去背景（纯本地，不依赖任何模型）：从四条边界采样主背景色，再按连通域擦除。
+ * 适用于电商白底/纯色底商品图；背景复杂或有渐变时覆盖率会很低，调用方据此如实回报。
+ * 不猜、不补：只擦“与边界背景色接近且与边界连通”的像素，商品内部的同色高光不会被吃掉。
+ * @returns {{image: object, coverage: number, background: number[], bbox: object|null}}
+ */
+export function removeFlatBackground(image, { tolerance = 8, featherPx = 0 } = {}) {
+  const { width, height, data } = image || {};
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 ||
+      !(data instanceof Uint8ClampedArray) || data.length !== width * height * 4) {
+    throw new RangeError('Invalid image for background removal.');
+  }
+  if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 100) throw new RangeError('tolerance must be 0..100.');
+  if (!Number.isFinite(featherPx) || featherPx < 0 || featherPx > 64) throw new RangeError('featherPx must be 0..64.');
+
+  // 1) 边界采样：量化到 5 位/通道后取众数，再用该桶内像素求均值，避免抗锯齿边缘拉偏。
+  const border = [];
+  for (let x = 0; x < width; x += 1) { border.push(x); border.push((height - 1) * width + x); }
+  for (let y = 0; y < height; y += 1) { border.push(y * width); border.push(y * width + width - 1); }
+  const buckets = new Map();
+  for (const pixel of border) {
+    const p = pixel * 4;
+    if (data[p + 3] === 0) continue;
+    const key = ((data[p] >> 3) << 10) | ((data[p + 1] >> 3) << 5) | (data[p + 2] >> 3);
+    const entry = buckets.get(key) || { count: 0, r: 0, g: 0, b: 0 };
+    entry.count += 1; entry.r += data[p]; entry.g += data[p + 1]; entry.b += data[p + 2];
+    buckets.set(key, entry);
+  }
+  let dominant = null;
+  for (const entry of buckets.values()) if (!dominant || entry.count > dominant.count) dominant = entry;
+  const background = dominant
+    ? [Math.round(dominant.r / dominant.count), Math.round(dominant.g / dominant.count), Math.round(dominant.b / dominant.count)]
+    : [0, 0, 0];
+  const threshold = tolerance * 255 / 100;
+  const matches = pixel => {
+    const p = pixel * 4;
+    if (data[p + 3] === 0) return true;                       // 已透明，视为背景
+    return Math.abs(data[p] - background[0]) <= threshold &&
+      Math.abs(data[p + 1] - background[1]) <= threshold &&
+      Math.abs(data[p + 2] - background[2]) <= threshold;
+  };
+
+  // 2) 从所有边界像素做 4 连通洪水填充：只擦与边界相连的背景区域。
+  const erased = new Uint8Array(width * height);
+  const stack = [];
+  for (const pixel of border) if (!erased[pixel] && matches(pixel)) { erased[pixel] = 1; stack.push(pixel); }
+  while (stack.length) {
+    const pixel = stack.pop();
+    const px = pixel % width;
+    const neighbours = [];
+    if (px > 0) neighbours.push(pixel - 1);
+    if (px + 1 < width) neighbours.push(pixel + 1);
+    if (pixel >= width) neighbours.push(pixel - width);
+    if (pixel + width < width * height) neighbours.push(pixel + width);
+    for (const next of neighbours) {
+      if (erased[next] || !matches(next)) continue;
+      erased[next] = 1;
+      stack.push(next);
+    }
+  }
+
+  const out = { width, height, data: new Uint8ClampedArray(data) };
+  let erasedCount = 0;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let pixel = 0; pixel < erased.length; pixel += 1) {
+    const p = pixel * 4;
+    if (erased[pixel]) { out.data[p + 3] = 0; erasedCount += 1; continue; }
+    if (data[p + 3] === 0) continue;
+    const x = pixel % width, y = (pixel - x) / width;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  const soft = featherPx > 0 ? blurAlpha(out, featherPx) : out;
+  const bbox = maxX >= 0 ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } : null;
+  return { image: soft, coverage: erasedCount / (width * height), background, bbox };
+}

@@ -317,19 +317,25 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
-test('用户输入抠图时直达背景移除能力，不先让模型拒答；无后端时明确提示配置', () => {
+test('用户输入抠图时直达本地去背景，不先让模型拒答；纯色底失败时如实提示需要 AI 服务', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   const sendStart = code.indexOf('async function sendAssist');
   const send = code.slice(sendStart, sendStart + 1700);
   assert.ok(send.includes('^抠图'), '用户说抠图要走确定性分支');
   assert.match(send, /await routeAssist\(text\);[\s\S]{0,60}?return;/, '抠图分支不得先调用模型');
+  // 本地自动去背景：无坐标、无外部服务，失败要有可执行提示
+  const cutoutStart = code.indexOf('async function localCutout');
+  assert.ok(cutoutStart > 0, '必须存在本地去背景执行函数');
+  const cutout = code.slice(cutoutStart, cutoutStart + 3200);
+  assert.match(cutout, /layer\.remove_background/, '必须走编辑器的自动去背景命令');
+  assert.match(cutout, /BACKGROUND_NOT_DETECTED/, '纯色底失败要区分错误码');
+  assert.match(cutout, /AI 抠图服务/, '告诉用户下一步该配置什么');
+  assert.match(cutout, /画布已保持原样|已中止/, '失败时明确没有破坏画布');
+  assert.match(cutout, /askConfirm/, '写画布前必须人工确认');
   const routeStart = code.indexOf('const remove = /^抠图');
   assert.ok(routeStart > 0);
-  const route = code.slice(routeStart, routeStart + 1800);
-  assert.match(route, /BACKGROUND_REMOVAL_UNAVAILABLE/, '无真实后端要如实报不可用');
-  assert.match(route, /rembg 兼容服务/, '告诉用户下一步配置什么');
-  assert.match(route, /原图没有改动/, '失败时明确不会破坏原图');
+  assert.match(code.slice(routeStart, routeStart + 900), /localCutout\(\)/, '默认走本地去背景而不是先要外部服务');
 });
 
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {

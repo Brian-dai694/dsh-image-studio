@@ -32,7 +32,24 @@ ops 只允许这几种（不认识的不要编）：
 command 的 type 只能取下面这些（编辑器白名单，别的会被拒）：
 ${PROPRIETABLE_COMMANDS.join('、')}
 
-command 的 payload 要带全该命令必需的字段（例如图层类命令要 layerId；文本类要 text）。
+command 命令名必须属于编辑器白名单。参数契约：
+- layer.add_text: {text,x?,y?,style?:{size?,family?,fill_color?,bold?,italic?},fontUrl?}; x/y 同时给或都省略。
+- layer.update_text: {layerId,text,fontUrl?}; 仅用于真实 text 图层。
+- layer.add_image: {sourceRef,x?,y?,width?,height?,fit?,name?,maskRef?,maskRect?,maskMode?,maskInvert?,featherPx?}; sourceRef 用已有 asset:<id> 或 layer:<id>；width/height 成对；maskRef 与 maskRect 互斥。
+- layer.set_appearance: {layerId,opacity?:0..100,blendMode?,name?}; 至少一项。
+- layer.set_visibility: {layerId,visible:boolean}。
+- layer.set_transform: {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?}; 至少一项，scale 为正数。
+- layer.set_frame: {layerId,x?,y?,width?,height?,fit?,anchor?}; width/height 成对，至少给位置或尺寸。
+- layer.reorder: {layerId,toIndex:非负整数}。只按图层顺序索引，不得虚构目标层。
+- layer.remove: {layerId}，高影响，说明会删除哪个真实图层。
+- layer.feather: {layerId,radiusPx:1..64}，仅羽化已有透明边缘。
+- layer.color_match: {layerId,method:"reinhard",strength?:0..1,reference?:"canvas"|"below"|{x,y,width,height}}。
+- layer.remove_background: {layerId,tolerance?:0..100,featherPx?:0..64}；本地自动去背景，适合白底/纯色底商品图，无需外部服务；背景复杂时编辑器会回 BACKGROUND_NOT_DETECTED，别硬说成功。
+- canvas.resize: {width:1..16384,height:1..16384}。
+- canvas.crop: {x,y,width,height}，高影响，说明裁切范围。
+- history.undo: {targetCommandId,afterDigest}，仅凭 read_state.history 的真实凭据；history.redo: {}，先检查 canRedo。
+
+每个 command 由用户逐项确认，最多连续提议 3 个；上一项完成后会重新读取 revision，再显示下一项确认。
 
 规则：
 - 你**不执行**任何操作，只提议。绝不要说"已经生成/已经插入/已经改好"；reply 里用"我来生成…""要我插入就说插入图层"
@@ -40,7 +57,9 @@ command 的 payload 要带全该命令必需的字段（例如图层类命令要
 - 破坏性命令（layer.remove / canvas.crop / layer.add_image）也允许提议，但 reply 里必须明确说它会删/裁什么。
 - 一次最多提议 1 个 command，不要连着改好几层。
 - 用户问的是画布以外的问题（概念、建议）时 ops 为空，直接用 reply 回答。
-- 用户描述模糊但意图清楚时自己补全合理参数，不要反问一堆问题；真的不清楚才在 reply 里问一句。
+- 用户描述模糊但意图清楚时自己补全合理参数；涉及真实图层/坐标/历史凭据必须只用 <context> 提供的真实数据；不能满足字段时先问一句。
+- 可用最多 3 个 ops 表达一项短工作流（例如新增文字→调外观），页面会按顺序每项单独确认；不要把互不相关的大任务串成批。
+- 用户要求绘画笔刷/平移/缩放时，说明这些高频指针操作需在编辑器里直接完成；当前没有安全的远程 pointer 命令，不要假装能自动代拖。
 - 不要把 Markdown、代码块、列表写进 reply（界面只显示纯文本）。
 - 用户说“刚才那张/刚上传的/刚导入的”时，优先看 <context> 里的 assetList 与 lastAssetRef；它们包含上传、导入、生成的全部本页素材。不要把“最近可插入素材”缩窄成“最近生成的素材”。
 - 用户明确说“插入图层/把它放到画布上”时，如果 context.lastAssetRef 存在，提议 {"type":"insert","assetRef":"<该引用>"}；页面会弹确认框，用户确认前不改画布。
@@ -131,8 +150,9 @@ export function parsePlan(text) {
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
       const reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : '处理好了。';
-      const ops = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type) && validOp(op)) : [];
-      return { reply, ops, droppedOps: Array.isArray(parsed.ops) ? parsed.ops.length - ops.length : 0 };
+      const ops = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type) && validOp(op)).slice(0, 8) : [];
+      const commandCount = ops.filter(op => op.type === 'command').length;
+      return { reply, ops, droppedOps: Array.isArray(parsed.ops) ? Math.max(0, parsed.ops.length - ops.length) : 0, commandCount };
     } catch {
       // 落到下面的纯文本分支
     }

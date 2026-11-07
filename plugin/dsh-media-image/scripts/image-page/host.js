@@ -1082,6 +1082,70 @@ const HELP = [
 // 最近可插入素材的唯一指针在文件上方定义（生成/上传/导入都写它）。
 
 // 一句话 → 动作。返回给用户看的文本；失败要说清是哪个环节。
+// 本地自动去背景：不需要坐标、不依赖外部模型。白底/纯色底商品图可直接得到透明图；
+// 背景复杂时编辑器会回 BACKGROUND_NOT_DETECTED，此时如实告诉用户需要 AI 抠图服务。
+async function localCutout(assetHint) {
+  const line = bubble('bot', '正在自动去背景：先取边界背景色，再按连通区域擦除…');
+  try {
+    let connection = await connect();
+    const readState = () => transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+    let state = await readState();
+    const images = state.layers.filter(layer => layer.type === 'image');
+    let target = images.find(layer => String(layer.id) === String(state.selectedLayerId)) || images[images.length - 1] || null;
+
+    if (assetHint || !target) {
+      const id = assetHint || (/asset:([a-f0-9]{48})/.exec(lastAssetRef || '') || [])[1];
+      if (!id) {
+        line.textContent = '还没有可抠的图层或素材：先点「上传」选一张图片，再说「抠图」。';
+        return;
+      }
+      const known = knownAssets.find(item => item.id === id);
+      const inserted = await insertAssetAsLayer({ id, name: known?.name || '待抠图素材' });
+      if (!inserted?.applied) {
+        line.textContent = inserted?.cancelled ? '已取消，画布没有改动。' : '插入没有完成，先看上一条回执。';
+        return;
+      }
+      connection = await connect();
+      state = await readState();
+      const fresh = state.layers.filter(layer => layer.type === 'image');
+      target = fresh.find(layer => String(layer.id) === String(state.selectedLayerId)) || fresh[fresh.length - 1] || null;
+      if (!target) { line.textContent = '插入后没找到图片图层，请手动确认。'; return; }
+    }
+
+    const answer = await askConfirm({
+      title: '本地自动去背景',
+      details: [
+        `目标图层  ${target.name || target.id}`,
+        `图层尺寸  ${target.width}×${target.height}`,
+        `做法      取边界主色 + 连通区域擦除（容差 8、羽化 1px）`,
+        '这一步会改写该图层像素；可用「撤销」完整回退',
+      ].join('\n'),
+      maskAvailable: false,
+    });
+    if (!answer.ok) { line.textContent = '已取消，画布没有改动。'; return; }
+
+    const result = await transport.request({
+      type: 'editor.apply_command',
+      requestId: crypto.randomUUID(),
+      editorInstanceId: connection.editorInstanceId,
+      documentId: state.documentId,
+      expectedRevision: state.revision,
+      commandId: crypto.randomUUID(),
+      command: { type: 'layer.remove_background', payload: { layerId: String(target.id), tolerance: 8, featherPx: 1 } },
+    }, { timeoutMs: 20000 });
+    const after = await readState();
+    const op = after.lastPixelOp;
+    const pct = op && typeof op.coverage === 'number' ? ` · 去除 ${(op.coverage * 100).toFixed(1)}%` : '';
+    line.textContent = `去背景完成${pct} · 现在 R${result?.revision}。效果不好可先撤销，再配置 AI 抠图服务。`;
+  } catch (error) {
+    line.textContent = error.code === 'BACKGROUND_NOT_DETECTED'
+      ? '这张图的背景不是纯色（或与商品太接近），本地去背景没有擦掉任何像素，画布已保持原样。这种图需要配置 AI 抠图服务（backgroundRemoval.endpoint）。'
+      : error.code === 'BACKGROUND_REMOVAL_TOO_MUCH'
+        ? '自动识别会擦掉几乎整张图，已中止，画布保持原样。请降低 tolerance 或改用 AI 抠图服务。'
+        : `${error.code || 'CUTOUT_FAILED'}：${error.message}`;
+  }
+}
+
 async function routeAssist(raw) {
   const text = String(raw || '').trim();
   if (!text) return;
@@ -1122,28 +1186,30 @@ async function routeAssist(raw) {
 
   const remove = /^抠图(?:[:：]\s*(.+))?$/.exec(text);
   if (remove) {
-    const asset = remove[1]
-      ? knownAssets.find(item => item.name && item.name.toLowerCase().includes(remove[1].trim().toLowerCase()))
-      : knownAssets.find(item => item.id === lastAssetRef.replace(/^asset:/, ''));
-    if (!asset) {
-      say('还没有可抠的图片。请先点「上传」选择原图，再说「抠图」。');
+    // 优先走本地自动去背景（无外部服务也能用）；用户点名了某张已上传素材时才走 AI 服务路径。
+    const wanted = remove[1];
+    const asset = wanted
+      ? knownAssets.find(item => item.name && item.name.toLowerCase().includes(wanted.trim().toLowerCase()))
+      : null;
+    if (!wanted) { await localCutout(); return; }
+    if (asset) {
+      const pending = bubble('bot', `准备用 AI 抠图服务处理「${asset.name}」…原图会保留，结果另存为透明 PNG。`);
+      try {
+        const value = await api(`/media-image/background-removal/${encodeURIComponent(asset.id)}`, { method: 'POST', body: {} });
+        rememberAsset(value.asset);
+        pending.textContent = 'AI 抠图完成，原图保留；结果是新的透明 PNG。说「插入图层」后先确认再落画布。';
+        const ref = document.createElement('span');
+        ref.className = 'ref';
+        ref.textContent = value.sourceRef;
+        pending.append(ref);
+      } catch (error) {
+        pending.textContent = error.code === 'BACKGROUND_REMOVAL_UNAVAILABLE'
+          ? '没有配置 AI 抠图服务。可以直接说「抠图」，我用本地方式处理画布上的白底/纯色底图片。'
+          : `${error.code || 'BACKGROUND_REMOVAL_FAILED'}：${error.message}。原图没有改动。`;
+      }
       return;
     }
-    // 即使后端未配置也调用一次路由，让服务端返回明确的 BACKGROUND_REMOVAL_UNAVAILABLE。
-    const pending = bubble('bot', `准备抠图「${asset.name || '这张图片'}」…原图会保留，结果另存为透明 PNG。`);
-    try {
-      const value = await api(`/media-image/background-removal/${encodeURIComponent(asset.id)}`, { method: 'POST', body: {} });
-      rememberAsset(value.asset);
-      pending.textContent = '抠图完成，原图保留；结果是新的透明 PNG。说「插入图层」后先确认再落画布。';
-      const ref = document.createElement('span');
-      ref.className = 'ref';
-      ref.textContent = value.sourceRef;
-      pending.append(ref);
-    } catch (error) {
-      pending.textContent = error.code === 'BACKGROUND_REMOVAL_UNAVAILABLE'
-        ? '当前还没配置真正的抠图服务，所以暂时不能去背景。配置 rembg 兼容服务后就能用；原图没有改动。'
-        : `${error.code || 'BACKGROUND_REMOVAL_FAILED'}：${error.message}。原图没有改动，可以检查服务后重试。`;
-    }
+    await localCutout();
     return;
   }
 

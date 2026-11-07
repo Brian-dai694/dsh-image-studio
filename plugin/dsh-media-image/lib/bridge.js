@@ -25,7 +25,7 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
 
 // 与编辑器 modules/layer/composition.js 同源：Canvas globalCompositeOperation 全集。
 export const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
@@ -54,6 +54,7 @@ function validateImageCommand(command) {
     'layer.set_frame': ['layerId', 'x', 'y', 'width', 'height', 'fit', 'anchor'],
     'layer.feather': ['layerId', 'radiusPx'],
     'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
+    'layer.remove_background': ['layerId', 'tolerance', 'featherPx'],
   };
   fieldsOnly(p, fields[command.type]);
   if (command.type === 'history.undo' && (p.targetCommandId !== undefined || p.afterDigest !== undefined)) {
@@ -161,6 +162,16 @@ function validateImageCommand(command) {
     // 只改该图层的 alpha 边缘，不新建图层，也不改像素颜色；同样按首次快照幂等重算。
     opaqueId(p.layerId, 'layerId');
     if (!Number.isSafeInteger(p.radiusPx) || p.radiusPx < 1 || p.radiusPx > 64) throw new MediaBridgeError('INVALID_REQUEST', 'radiusPx must be an integer between 1 and 64 pixels.');
+  }
+  if (command.type === 'layer.remove_background') {
+    // 本地自动去背景：无坐标、无外部服务；容差与羽化都有确定取值域，超界在网关就拒绝。
+    opaqueId(p.layerId, 'layerId');
+    if (p.tolerance !== undefined) finite(p.tolerance, 'tolerance', { min: 0, max: 100 });
+    if (p.featherPx !== undefined) {
+      if (!Number.isSafeInteger(p.featherPx) || p.featherPx < 0 || p.featherPx > 64) {
+        throw new MediaBridgeError('INVALID_REQUEST', 'featherPx must be an integer between 0 and 64 pixels.');
+      }
+    }
   }
   if (command.type === 'layer.color_match') {
     // 幂等要求：编辑器内部保存首次应用前的像素快照（不暴露给模型），每次从快照重算再按

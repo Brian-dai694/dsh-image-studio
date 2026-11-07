@@ -5,7 +5,7 @@ import zoomView from './libs/zoomView.js';
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
 const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
-const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -74,6 +74,8 @@ export class DshEditorBridge {
     // 羽化/色彩匹配的首帧快照与已应用参数：只活在编辑器内，不进图层字段、不进 read_state。
     this.pixelBases = new Map();
     this.pixelApplied = new Map();
+    // 最近一次纯像素动作的事实（如自动去背景的覆盖率），只读回给调用方核对，不进图层字段。
+    this.lastPixelOp = null;
     // 图层像素摘要缓存：link + 尺寸 + 像素变更计数都没变就复用，避免重复全量扫描。
     this.pixelDigestCache = new Map();
     // 每次原生像素动作（含撤销/重做）自增，用于让全分辨率像素摘要失效。
@@ -484,8 +486,7 @@ export class DshEditorBridge {
         rotationDeg: layer.rotate || 0,
         // 只在真的应用过时出现；快照本身留在编辑器内部，模型看不到原始像素。
         ...(applied.feather ? { feather: applied.feather } : {}),
-        ...(applied.colorMatch ? { colorMatch: applied.colorMatch } : {}),
-        ...(layer.type === 'text' ? { text: textOf(layer) } : {}) };
+        ...(applied.colorMatch ? { colorMatch: applied.colorMatch } : {}),        ...(layer.type === 'text' ? { text: textOf(layer) } : {}) };
     });
     const selectedLayerId = config.layer ? String(config.layer.id) : null;
     const selectedLayer = layers.find(layer => layer.id === selectedLayerId) || null;
@@ -504,6 +505,8 @@ export class DshEditorBridge {
     return { editorKind: 'image', editorInstanceId: this.editorInstanceId, documentId: this.documentId, revision: this.revision,
       // 只读快照：模型据此判断该用 selection: 还是显式 maskRect，不用盲猜坐标。
       selection: selection ? { x: selection.x, y: selection.y, width: selection.width, height: selection.height } : null,
+      // 最近一次纯像素动作的事实（如自动去背景覆盖率），调用方据此核对效果，而不是听信回复。
+      ...(this.lastPixelOp ? { lastPixelOp: this.lastPixelOp } : {}),
       // 内容摘要与视图态分开：选中/缩放不再算内容变化。
       contentDigest,
       viewState: this.viewState(),
@@ -904,6 +907,32 @@ export class DshEditorBridge {
         if (Object.keys(previous).length) appliedState.set(key, previous);
         else appliedState.delete(key);
       };
+      return { action, ids: () => [key] };
+    }
+    if (command.type === 'layer.remove_background') {
+      // 自动去背景：不需要坐标，也不依赖外部模型。取边界主色后按连通域擦除；
+      // 覆盖率过小/过大都中止，避免"什么都没去掉"或"把整张图吃掉"。
+      if (!keysOnly(p, ['layerId', 'tolerance', 'featherPx'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      if (layer.type !== 'image' || layer.is_vector) throw this.error('LAYER_NOT_RASTERIZED', '自动去背景需要非矢量的图片图层');
+      const tolerance = p.tolerance === undefined ? 8 : p.tolerance;
+      const featherPx = p.featherPx === undefined ? 0 : p.featherPx;
+      if (typeof tolerance !== 'number' || !Number.isFinite(tolerance) || tolerance < 0 || tolerance > 100) throw this.error('INVALID_REQUEST');
+      if (!Number.isSafeInteger(featherPx) || featherPx < 0 || featherPx > 64) throw this.error('INVALID_REQUEST');
+      const ops = await this.pixelOps();
+      const current = this.rasterizeLayer(layer);
+      const result = ops.removeFlatBackground(current, { tolerance, featherPx });
+      if (result.coverage === 0) throw this.error('BACKGROUND_NOT_DETECTED', '边界背景与商品颜色接近或背景不纯，未擦除任何像素；请换一张白底/纯色底图，或配置 AI 抠图服务');
+      if (result.coverage >= 0.999) throw this.error('BACKGROUND_REMOVAL_TOO_MUCH', '自动识别会擦掉几乎整张图，已中止；请降低 tolerance 或改用 AI 抠图服务');
+      const key = String(layer.id);
+      const action = this.imageAction({ ...result.image, layerId: layer.id });
+      const nativeDo = action.do.bind(action);
+      const nativeUndo = action.undo.bind(action);
+      const owner = this;
+      const stats = { command: 'layer.remove_background', coverage: Number(result.coverage.toFixed(4)), background: result.background, bbox: result.bbox };
+      action.do = async () => { await nativeDo(); owner.pixelMutation += 1; owner.lastPixelOp = stats; };
+      action.undo = async () => { await nativeUndo(); owner.pixelMutation += 1; owner.lastPixelOp = null; };
       return { action, ids: () => [key] };
     }
     if (command.type === 'layer.remove') {
