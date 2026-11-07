@@ -342,6 +342,31 @@ async function handleBatch(req, res, { batchQueue, token, prefix, pathname }) {
   return true;
 }
 
+async function handleBackgroundRemoval(req, res, { backgroundRemoval, token, prefix, pathname }) {
+  const assetId = pathname.startsWith(`${prefix}/background-removal/`)
+    ? pathname.slice(`${prefix}/background-removal/`.length)
+    : '';
+  const rejection = authorizeSameOrigin(req, token, assetId ? ['POST'] : ['GET']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!assetId && req.method === 'GET') {
+    send(res, 200, { ok: true, available: !!backgroundRemoval, ...(backgroundRemoval ? backgroundRemoval.describe() : { code: 'BACKGROUND_REMOVAL_UNAVAILABLE', hint: 'Configure backgroundRemoval.endpoint to a trusted rembg-compatible service.' }) });
+    return true;
+  }
+  if (!backgroundRemoval) {
+    send(res, 501, { code: 'BACKGROUND_REMOVAL_UNAVAILABLE', message: 'No background-removal service is configured.', hint: 'Configure backgroundRemoval.endpoint to a trusted rembg-compatible service.' });
+    return true;
+  }
+  try {
+    const result = await backgroundRemoval.remove({ assetRef: `asset:${assetId}` });
+    send(res, 200, { ok: true, ...result });
+  } catch (error) {
+    const code = error?.code || 'BACKGROUND_REMOVAL_FAILED';
+    const status = code === 'ASSET_NOT_FOUND' ? 404 : code === 'INVALID_ASSET_REF' ? 400 : code === 'BACKGROUND_REMOVAL_CONFIG' ? 503 : 502;
+    send(res, status, { code, message: error.message, hint: '确认源图仍在临时素材库中，并检查配置的背景移除服务。' });
+  }
+  return true;
+}
+
 async function handleAssist(req, res, { assist, ctx, token, prefix }) {
   const rejection = authorizeSameOrigin(req, token, req.method === 'GET' ? ['GET'] : ['POST']);
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
@@ -387,7 +412,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, ctx = null, remoteFetch = undefined }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, ctx = null, remoteFetch = undefined }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const assetsPrefix = `${prefix}/assets/`;
@@ -417,6 +442,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/assist`) {
       return handleAssist(req, res, { assist, ctx, token, prefix });
+    }
+    if (pathname === `${prefix}/background-removal` || pathname.startsWith(`${prefix}/background-removal/`)) {
+      return handleBackgroundRemoval(req, res, { backgroundRemoval, token, prefix, pathname });
     }
     if (pathname === `${prefix}/generate` || pathname.startsWith(`${prefix}/generate/`)) {
       // 批量路由必须在单作业路由之前匹配，否则 /generate/batch 会被当成 jobId。

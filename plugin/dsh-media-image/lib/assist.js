@@ -8,7 +8,7 @@
 
 import { ALLOWED_COMMANDS } from './bridge.js';
 
-export const OP_TYPES = ['generate', 'batch', 'import', 'insert', 'status', 'fontList', 'command'];
+export const OP_TYPES = ['generate', 'batch', 'import', 'insert', 'status', 'fontList', 'removeBackground', 'command'];
 
 /** 模型可以提议的编辑命令 —— 直接取编辑器白名单，避免两处各写一份而漂移。 */
 export const PROPRIETABLE_COMMANDS = [...ALLOWED_COMMANDS.image].sort();
@@ -26,6 +26,7 @@ ops 只允许这几种（不认识的不要编）：
 - {"type":"insert","assetRef":"asset:<48位十六进制>"}                   指定某个已有素材插成图层
 - {"type":"status"}                                                     读一次编辑器状态（版本/图层数/选区）
 - {"type":"fontList"}                                                   列出已登记字体
+- {"type":"removeBackground","assetRef":"asset:<48位十六进制>"}      为指定已上传素材抠图，返回带透明通道的新素材
 - {"type":"command","command":{"type":"<命令名>","payload":{…}}}        提议一次画布编辑（用户确认后才执行）
 
 command 的 type 只能取下面这些（编辑器白名单，别的会被拒）：
@@ -44,6 +45,8 @@ command 的 payload 要带全该命令必需的字段（例如图层类命令要
 - 用户说“刚才那张/刚上传的/刚导入的”时，优先看 <context> 里的 assetList 与 lastAssetRef；它们包含上传、导入、生成的全部本页素材。不要把“最近可插入素材”缩窄成“最近生成的素材”。
 - 用户明确说“插入图层/把它放到画布上”时，如果 context.lastAssetRef 存在，提议 {"type":"insert","assetRef":"<该引用>"}；页面会弹确认框，用户确认前不改画布。
 - 用户问“生成”时，如果已有上传或导入素材，除非明确说要新图，不要把它说成不存在；可建议插入，或在用户明确要新图时生成。
+- 用户明确说“抠图/去背景”时，如果 context.assetList 有素材，用 removeBackground 并选择用户刚提到的素材；没有素材时先请用户上传（不要声称已抠图）。
+- 抠图结果是一个新的透明 PNG 素材，不会自动改画布；回复告诉用户可以再说“插入图层”，并等待确认。
 - 用户表达长期偏好（以后、标准、都要）时只在 reply 里建议记录，本插件不维护持久记忆。
 - 用户提到画布图层时，只能从 context.layerList 选择真实 id，不得编造。`;
 
@@ -112,6 +115,7 @@ function validOp(op) {
   if (op.type === 'batch') return Array.isArray(op.prompts) && op.prompts.length > 0;
   if (op.type === 'import') return typeof op.url === 'string' && /^https?:\/\//i.test(op.url);
   if (op.type === 'insert') return op.assetRef === undefined || (typeof op.assetRef === 'string' && /^asset:[a-f0-9]{48}$/.test(op.assetRef));
+  if (op.type === 'removeBackground') return typeof op.assetRef === 'string' && /^asset:[a-f0-9]{48}$/.test(op.assetRef);
   return true;
 }
 

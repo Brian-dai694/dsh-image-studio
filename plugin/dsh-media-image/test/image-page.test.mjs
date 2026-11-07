@@ -317,6 +317,21 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('用户输入抠图时直达背景移除能力，不先让模型拒答；无后端时明确提示配置', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const sendStart = code.indexOf('async function sendAssist');
+  const send = code.slice(sendStart, sendStart + 1700);
+  assert.ok(send.includes('^抠图'), '用户说抠图要走确定性分支');
+  assert.match(send, /await routeAssist\(text\);[\s\S]{0,60}?return;/, '抠图分支不得先调用模型');
+  const routeStart = code.indexOf('const remove = /^抠图');
+  assert.ok(routeStart > 0);
+  const route = code.slice(routeStart, routeStart + 1800);
+  assert.match(route, /BACKGROUND_REMOVAL_UNAVAILABLE/, '无真实后端要如实报不可用');
+  assert.match(route, /rembg 兼容服务/, '告诉用户下一步配置什么');
+  assert.match(route, /原图没有改动/, '失败时明确不会破坏原图');
+});
+
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {
   // 这个坑真踩过：源码改了 highlight 转发，包内 public/image/host.js 还是旧副本，
   // 部署后页面行为与仓库对不上。两边必须逐字节相同。

@@ -10,6 +10,12 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里的原生 Conversation 默认隐藏，页面右下角悬浮助手保留。隐藏的只是对话子组件，不会移除侧栏插件入口、画布或本人授权入口。若要恢复红框对话，可设置 `globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true` 或 `localStorage.setItem('dsh-media-image-conversation', 'visible')` 并刷新；设为 `false` / `'hidden'` 可再次隐藏。旧开关 `__DSH_MEDIA_IMAGE_PANEL__` 不再控制插件侧栏，避免把整个插件误藏。
 
 
+## 抠图服务（需配置真实引擎）
+
+助手支持“抠图 / 去背景”指令，但**本插件不自带分割模型**。必须在 Host plugin config 中配置一个受信任的 rembg 兼容 endpoint：`backgroundRemoval: { endpoint: "http://127.0.0.1:5000/api/remove", apiKey: "…" }`。服务需接受 multipart 字段 `image_file`，成功返回带 alpha 的 PNG。插件会校验返回 PNG 的透明通道并保存为新 `asset:<id>`；原图不修改，结果也不会自动落画布，用户说“插入图层”后仍要确认。未配置时助手明确提示缺少后端，`GET /media-image/background-removal` 返回 `available:false` 与配置提示。
+
+该 endpoint 由操作者配置，插件对其发送用户素材；不要配置不受信任的第三方服务。`apiKey` 仅 Host 内存使用，不回传浏览器。
+
 ## 随包技能
 
 `skills/dsh-media-image/SKILL.md` 是给 Agent 的操作规范（先读后写、白名单命令、蒙版三来源、

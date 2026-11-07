@@ -15,6 +15,7 @@ import { createGenerationService } from './generation.js';
 import { createBatchQueue } from './batch.js';
 import { createFontStore } from './fonts.js';
 import { chatTurn, modelInfo } from './assist.js';
+import { createBackgroundRemovalService } from './background-removal.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
 // 两者都没有就不注册任何 provider —— /generate 会如实返回 PROVIDER_UNAVAILABLE，而不是假装能生成。
@@ -88,6 +89,16 @@ export function apply(ctx, config = {}) {
     chat: turn => chatTurn(ctx, turn),
   };
 
+  const backgroundRemoval = config.backgroundRemoval?.endpoint
+    ? createBackgroundRemovalService({
+      ...config.backgroundRemoval,
+      assets,
+      fetchImpl: config.backgroundRemoval.fetchImpl || globalThis.fetch,
+      timeoutMs: config.backgroundRemoval.timeoutMs,
+    })
+    : null;
+  if (!backgroundRemoval) console.warn('[dsh-media-image] 未配置 backgroundRemoval.endpoint，抠图能力不可用（助手会说明并提供配置提示）');
+
   const router = createMediaRouter({
     relay,
     editorKind: 'image',
@@ -101,6 +112,7 @@ export function apply(ctx, config = {}) {
     fonts,
     batchQueue,
     assist: assistant,
+    backgroundRemoval,
     ctx,
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,

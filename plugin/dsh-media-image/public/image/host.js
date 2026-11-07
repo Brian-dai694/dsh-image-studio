@@ -870,6 +870,24 @@ async function execOps(ops) {
       }
       continue;
     }
+    if (op.type === 'removeBackground') {
+      const line = bubble('bot', '正在抠图：原图不会修改，结果会另存为透明 PNG…');
+      try {
+        const value = await api(`/media-image/background-removal/${encodeURIComponent(String(op.assetRef).slice(6))}`, { method: 'POST', body: {} });
+        rememberAsset(value.asset);
+        lastAssetRef = value.sourceRef;
+        line.textContent = '抠图完成，原图保留；这是一张新的透明 PNG。说「插入图层」后会先弹确认框。';
+        const ref = document.createElement('span');
+        ref.className = 'ref';
+        ref.textContent = value.sourceRef;
+        line.append(ref);
+      } catch (error) {
+        line.textContent = error.code === 'BACKGROUND_REMOVAL_UNAVAILABLE'
+          ? '当前没有配置背景移除服务，所以这次不能抠图。配置 backgroundRemoval.endpoint 后重启插件再试。'
+          : `${error.code || 'BACKGROUND_REMOVAL_FAILED'}：${error.message}。原图未修改；确认服务可用后可以重试。`;
+      }
+      continue;
+    }
     if (op.type === 'insert') {
       // 优先用模型点名的素材（上传/导入/生成都算），否则用最近一张。
       const wanted = typeof op.assetRef === 'string' ? op.assetRef : lastAssetRef;
@@ -973,6 +991,7 @@ const CHIPS = [
   ['生成', '生成：柔和晨光，浅灰色调'],
   ['批量', '批量：晨光|夜景|木桌'],
   ['上传', '@upload'],
+  ['抠图', '抠图'],
   ['导入', '导入：https://example.com/a.png'],
   ['字体', '字体列表'],
   ['状态', '状态'],
@@ -1101,6 +1120,33 @@ async function routeAssist(raw) {
     return;
   }
 
+  const remove = /^抠图(?:[:：]\s*(.+))?$/.exec(text);
+  if (remove) {
+    const asset = remove[1]
+      ? knownAssets.find(item => item.name && item.name.toLowerCase().includes(remove[1].trim().toLowerCase()))
+      : knownAssets.find(item => item.id === lastAssetRef.replace(/^asset:/, ''));
+    if (!asset) {
+      say('还没有可抠的图片。请先点「上传」选择原图，再说「抠图」。');
+      return;
+    }
+    // 即使后端未配置也调用一次路由，让服务端返回明确的 BACKGROUND_REMOVAL_UNAVAILABLE。
+    const pending = bubble('bot', `准备抠图「${asset.name || '这张图片'}」…原图会保留，结果另存为透明 PNG。`);
+    try {
+      const value = await api(`/media-image/background-removal/${encodeURIComponent(asset.id)}`, { method: 'POST', body: {} });
+      rememberAsset(value.asset);
+      pending.textContent = '抠图完成，原图保留；结果是新的透明 PNG。说「插入图层」后先确认再落画布。';
+      const ref = document.createElement('span');
+      ref.className = 'ref';
+      ref.textContent = value.sourceRef;
+      pending.append(ref);
+    } catch (error) {
+      pending.textContent = error.code === 'BACKGROUND_REMOVAL_UNAVAILABLE'
+        ? '当前还没配置真正的抠图服务，所以暂时不能去背景。配置 rembg 兼容服务后就能用；原图没有改动。'
+        : `${error.code || 'BACKGROUND_REMOVAL_FAILED'}：${error.message}。原图没有改动，可以检查服务后重试。`;
+    }
+    return;
+  }
+
   const gen = /^生成[:：]\s*(.+)$/s.exec(text);
   if (gen) {
     const provider = assistProvider();
@@ -1184,6 +1230,11 @@ async function sendAssist(raw) {
   assistBusy = true;
   if (assistSend) assistSend.disabled = true;
   try {
+    // 抠图是确定性工具意图，不交给模型拒答或猜测；后端不可用会明确提示配置要求。
+    if (/^抠图(?:[:：].*)?$/.test(text)) {
+      await routeAssist(text);
+      return;
+    }
     // 明确的“插入图层”不需要让模型再猜一次：用最近上传/导入/生成的 asset，
     // 仍经同一个显式确认框与 editor.apply_command，绝不绕过人机闸门。
     if (/^(插入图层|插入|放到画布|把它放到画布上|落层)$/.test(text) && lastAssetRef) {

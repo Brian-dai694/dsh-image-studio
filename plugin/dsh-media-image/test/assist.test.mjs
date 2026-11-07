@@ -189,6 +189,31 @@ test('上下文必须告诉模型"手里有哪些素材"，否则上传过的它
   assert.match(user, /最近可插入素材/, '最近可插入素材要进提示词（上传后也算）');
 });
 
+test('removeBackground op is allowlisted only for a real uploaded asset ref', () => {
+  const valid = parsePlan(JSON.stringify({ reply: '我来抠这张图', ops: [{ type: 'removeBackground', assetRef: `asset:${'d'.repeat(48)}` }] }));
+  assert.equal(valid.ops.length, 1);
+  assert.equal(valid.ops[0].type, 'removeBackground');
+  assert.equal(parsePlan(JSON.stringify({ reply: '好了', ops: [{ type: 'removeBackground', assetRef: 'asset:bad' }] })).ops.length, 0);
+});
+
+test('chatTurn：用户明确要求抠图且已有上传素材时，模型应提议 removeBackground，而非拒绝', async () => {
+  const { ctx } = fakeCtx({ chunks: [{ type: 'text-delta', text: JSON.stringify({ reply: '我用刚上传的图片去背景，原图会保留。', ops: [{ type: 'removeBackground', assetRef: `asset:${'e'.repeat(48)}` }] }) }] });
+  const result = await chatTurn(ctx, {
+    message: '抠图',
+    context: { width: 800, height: 600, layers: 1, hasSelection: false, lastAssetRef: `asset:${'e'.repeat(48)}`, assetList: [{ id: `asset:${'e'.repeat(48)}`, name: '0A9A7668.JPG', bytes: 5806 }] },
+  });
+  assert.match(result.reply, /原图会保留/);
+  assert.equal(result.ops[0].type, 'removeBackground');
+  assert.equal(result.ops[0].assetRef, `asset:${'e'.repeat(48)}`);
+});
+
+test('chatTurn：用户要求抠图但未上传素材时，模型先询问上传，不声称执行成功', async () => {
+  const { ctx } = fakeCtx({ chunks: [{ type: 'text-delta', text: JSON.stringify({ reply: '请先上传一张图片，我才能为它去背景。', ops: [] }) }] });
+  const result = await chatTurn(ctx, { message: '抠图', context: { width: 800, height: 600, layers: 0, hasSelection: false, assetList: [] } });
+  assert.match(result.reply, /先上传/);
+  assert.equal(result.ops.length, 0);
+});
+
 test('HTTP /assist：GET 报状态、POST 转成 reply、无模型 503、非法体 400、鉴权 403', async () => {
   const token = 'assist-token';
   const caller = router => async ({ method = 'GET', url, headers = {}, body }) => {
