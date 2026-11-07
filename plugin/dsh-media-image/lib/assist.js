@@ -47,7 +47,8 @@ command 命令名必须属于编辑器白名单。参数契约：
 - layer.remove_background: {layerId,tolerance?:0..100,featherPx?:0..64}；本地自动去背景，适合白底/纯色底商品图，无需外部服务；背景复杂时编辑器会回 BACKGROUND_NOT_DETECTED，别硬说成功。
 - canvas.resize: {width:1..16384,height:1..16384}。
 - canvas.crop: {x,y,width,height}，高影响，说明裁切范围。
-- history.undo: {targetCommandId,afterDigest}，仅凭 read_state.history 的真实凭据；history.redo: {}，先检查 canRedo。
+- history.undo: {targetCommandId,afterDigest}；只撤销最近一条 Agent 改动，凭据必须来自 read_state.history，不得猜。
+- history.redo: {}；先确认 read_state.history.canRedo 为真，否则会被 HISTORY_EMPTY 拒绝。
 
 每个 command 由用户逐项确认，最多连续提议 3 个；上一项完成后会重新读取 revision，再显示下一项确认。
 
@@ -150,9 +151,20 @@ export function parsePlan(text) {
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
       const reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : '处理好了。';
-      const ops = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type) && validOp(op)).slice(0, 8) : [];
-      const commandCount = ops.filter(op => op.type === 'command').length;
-      return { reply, ops, droppedOps: Array.isArray(parsed.ops) ? Math.max(0, parsed.ops.length - ops.length) : 0, commandCount };
+      const accepted = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type) && validOp(op)) : [];
+      // 每个画布写入都要人逐项确认，所以链路有上限：最多 3 个 command，其余连同不认识的都计入 droppedOps。
+      let commands = 0;
+      const ops = [];
+      for (const op of accepted) {
+        if (op.type === 'command') {
+          if (commands >= 3) continue;
+          commands += 1;
+        }
+        if (ops.length >= 8) break;
+        ops.push(op);
+      }
+      const droppedOps = (Array.isArray(parsed.ops) ? parsed.ops.length : 0) - ops.length;
+      return { reply, ops, droppedOps, commandCount: commands };
     } catch {
       // 落到下面的纯文本分支
     }

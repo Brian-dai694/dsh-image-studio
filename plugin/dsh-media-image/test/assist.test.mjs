@@ -1,8 +1,13 @@
 // 助手模型通路的单元测试：用假 ctx（llm + agentDefaultModel）驱动，不碰真实模型。
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chatTurn, callModel, modelInfo, parsePlan, AssistError, OP_TYPES, PROPRIETABLE_COMMANDS } from '../lib/assist.js';
 import { createMediaRouter } from '../lib/http.js';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // 假宿主：currentSelection + prepareCall().stream() 吐若干 text-delta。
 function fakeCtx({ chunks = [], failWith = null, selection = { provider: 'deepseek-account', model: 'deepseek-flash' }, llm = true } = {}) {
@@ -212,6 +217,23 @@ test('chatTurn：用户要求抠图但未上传素材时，模型先询问上传
   const result = await chatTurn(ctx, { message: '抠图', context: { width: 800, height: 600, layers: 0, hasSelection: false, assetList: [] } });
   assert.match(result.reply, /先上传/);
   assert.equal(result.ops.length, 0);
+});
+
+test('每个白名单命令都在助手提示里写明参数契约（防止能执行但模型不会写）', () => {
+  assert.ok(PROPRIETABLE_COMMANDS.length >= 15, `白名单命令数量异常：${PROPRIETABLE_COMMANDS.length}`);
+  const assistSource = readFileSync(resolve(root, 'lib/assist.js'), 'utf8');
+  const missing = PROPRIETABLE_COMMANDS.filter(command => !assistSource.includes(`- ${command}: `));
+  assert.deepEqual(missing, [], `以下命令缺少参数契约说明：${missing.join(', ')}`);
+});
+
+test('命令链路最多 3 个 command，超出部分计入 droppedOps', () => {
+  const command = index => ({ type: 'command', command: { type: 'layer.reorder', payload: { layerId: 'l1', toIndex: index } } });
+  const plan = parsePlan(JSON.stringify({ reply: '连做五步', ops: [command(1), command(2), command(3), command(4), command(5)] }));
+  assert.equal(plan.ops.length, 3);
+  assert.equal(plan.commandCount, 3);
+  assert.equal(plan.droppedOps, 2);
+  const mixed = parsePlan(JSON.stringify({ reply: '先读再改', ops: [{ type: 'status' }, command(1)] }));
+  assert.equal(mixed.ops.length, 2, '非 command 操作不受 3 条上限影响');
 });
 
 test('HTTP /assist：GET 报状态、POST 转成 reply、无模型 503、非法体 400、鉴权 403', async () => {

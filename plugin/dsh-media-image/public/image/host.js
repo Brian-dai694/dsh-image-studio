@@ -916,7 +916,7 @@ async function execOps(ops) {
           ].join('\n'),
           maskAvailable: false,
         });
-        if (!answer.ok) { bubble('bot', '已取消，没有发送任何命令。'); continue; }
+        if (!answer.ok) { bubble('bot', '已取消，没有发送任何命令；后面的步骤也一并停止。'); return; }
         const result = await transport.request({
           type: 'editor.apply_command',
           requestId: crypto.randomUUID(),
@@ -929,9 +929,11 @@ async function execOps(ops) {
         bubble('bot', `已执行 ${command.type} · 现在 R${result?.revision}`);
       } catch (error) {
         const code = error.code || 'COMMAND_FAILED';
-        if (code === 'REVISION_CONFLICT') bubble('bot', '工程已变化（REVISION_CONFLICT），这次没执行；再说一次我会用最新版本重新提议。');
-        else if (code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN') bubble('bot', '结果未知：不要重发，用该 commandId 查询。');
-        else bubble('bot', `${code}：${error.message}`);
+        if (code === 'REVISION_CONFLICT') bubble('bot', '工程已变化（REVISION_CONFLICT），这次没执行；后面的步骤已停止，再说一次我会用最新版本重新提议。');
+        else if (code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN') bubble('bot', '结果未知：不要重发，用该 commandId 查询；后面的步骤已停止。');
+        else bubble('bot', `${code}：${error.message}（后面的步骤已停止）`);
+        // 任一步失败后，后续命令引用的图层 id 与 revision 都可能过期，绝不接着跑。
+        return;
       }
       continue;
     }
