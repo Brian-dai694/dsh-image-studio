@@ -25,7 +25,7 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
 
 // 与编辑器 modules/layer/composition.js 同源：Canvas globalCompositeOperation 全集。
 export const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
@@ -55,6 +55,7 @@ function validateImageCommand(command) {
     'layer.feather': ['layerId', 'radiusPx'],
     'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
     'layer.remove_background': ['layerId', 'tolerance', 'featherPx'],
+    'layer.magic_erase': ['layerId', 'x', 'y', 'tolerance', 'contiguous'],
   };
   fieldsOnly(p, fields[command.type]);
   if (command.type === 'history.undo' && (p.targetCommandId !== undefined || p.afterDigest !== undefined)) {
@@ -171,6 +172,17 @@ function validateImageCommand(command) {
       if (!Number.isSafeInteger(p.featherPx) || p.featherPx < 0 || p.featherPx > 64) {
         throw new MediaBridgeError('INVALID_REQUEST', 'featherPx must be an integer between 0 and 64 pixels.');
       }
+    }
+  }
+  if (command.type === 'layer.magic_erase') {
+    // 魔棒式擦除：种子点必须是非负整数，容差 0..100；坐标由调用方按图层本地像素给出。
+    opaqueId(p.layerId, 'layerId');
+    if (!Number.isSafeInteger(p.x) || p.x < 0 || !Number.isSafeInteger(p.y) || p.y < 0) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'x and y must be non-negative integers in layer pixels.');
+    }
+    if (p.tolerance !== undefined) finite(p.tolerance, 'tolerance', { min: 0, max: 100 });
+    if (p.contiguous !== undefined && typeof p.contiguous !== 'boolean') {
+      throw new MediaBridgeError('INVALID_REQUEST', 'contiguous must be a boolean.');
     }
   }
   if (command.type === 'layer.color_match') {

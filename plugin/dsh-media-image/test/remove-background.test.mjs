@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { removeFlatBackground, applyMask, blurAlpha } from '../../../miniPaint/src/js/dsh-pixel-ops.js';
+import { removeFlatBackground, applyMask, blurAlpha, magicErase } from '../../../miniPaint/src/js/dsh-pixel-ops.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -91,6 +91,33 @@ test('自动去背景：非法图像与越界参数直接拒绝', () => {
   assert.throws(() => removeFlatBackground({ width: 0, height: 0, data: new Uint8ClampedArray(0) }), RangeError);
   assert.throws(() => removeFlatBackground(whiteBackdropProduct(), { tolerance: 101 }), RangeError);
   assert.throws(() => removeFlatBackground(whiteBackdropProduct(), { featherPx: 65 }), RangeError);
+});
+
+test('魔棒擦除：只擦种子点连通的同色区域，不会跨进商品', () => {
+  const width = 20, height = 20;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = (y * width + x) * 4;
+      const inProduct = x >= 7 && x <= 12 && y >= 7 && y <= 12;
+      // 商品是深灰(90)，背景是白(255)：颜色差异明确，魔棒在容差 2 下不应跨过去
+      const value = 255;
+      data[p] = value; data[p + 1] = value; data[p + 2] = value; data[p + 3] = 255;
+      if (inProduct) { data[p] = 90; data[p + 1] = 90; data[p + 2] = 90; }
+    }
+  }
+  const result = magicErase({ width, height, data }, { x: 0, y: 0, tolerance: 2, contiguous: true });
+  assert.ok(result.erased > 300, `应擦掉背景区域，实际 ${result.erased}`);
+  assert.equal(result.image.data[(9 * width + 9) * 4 + 3], 255, '商品像素必须保留');
+  assert.equal(result.image.data[(0 * width + 19) * 4 + 3], 0, '角上的背景必须透明');
+});
+
+test('魔棒擦除：越界种子、非法容差直接拒绝；点到已透明处返回 0', () => {
+  const image = { width: 4, height: 4, data: new Uint8ClampedArray(4 * 4 * 4).fill(255) };
+  assert.throws(() => magicErase(image, { x: 9, y: 0 }), RangeError);
+  assert.throws(() => magicErase(image, { x: 0, y: 0, tolerance: 200 }), RangeError);
+  const transparent = { width: 2, height: 2, data: new Uint8ClampedArray(16) };
+  assert.equal(magicErase(transparent, { x: 0, y: 0 }).erased, 0);
 });
 
 test('原有像素能力未被破坏：蒙版与羽化仍可用', () => {

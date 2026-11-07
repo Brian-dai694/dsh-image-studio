@@ -5,7 +5,7 @@ import zoomView from './libs/zoomView.js';
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
 const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
-const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -935,6 +935,33 @@ export class DshEditorBridge {
       const nativeUndo = action.undo.bind(action);
       const owner = this;
       const stats = { command: 'layer.remove_background', coverage: Number(result.coverage.toFixed(4)), background: result.background, bbox: result.bbox };
+      action.do = async () => { await nativeDo(); owner.pixelMutation += 1; owner.lastPixelOp = stats; };
+      action.undo = async () => { await nativeUndo(); owner.pixelMutation += 1; owner.lastPixelOp = null; };
+      return { action, ids: () => [key] };
+    }
+    if (command.type === 'layer.magic_erase') {
+      // 人类用魔棒的做法：在某点按下 → 只擦掉与它同色且相连的那一片。
+      // 坐标是图层本地像素；每次只影响一个连通区域，因此不会从边缘一路啃进商品。
+      if (!keysOnly(p, ['layerId', 'x', 'y', 'tolerance', 'contiguous'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      if (layer.type !== 'image' || layer.is_vector) throw this.error('LAYER_NOT_RASTERIZED', '魔棒擦除需要非矢量的图片图层');
+      const tolerance = p.tolerance === undefined ? 10 : p.tolerance;
+      const contiguous = p.contiguous === undefined ? true : p.contiguous;
+      if (typeof tolerance !== 'number' || !Number.isFinite(tolerance) || tolerance < 0 || tolerance > 100) throw this.error('INVALID_REQUEST');
+      if (typeof contiguous !== 'boolean') throw this.error('INVALID_REQUEST');
+      const ops = await this.pixelOps();
+      const current = this.rasterizeLayer(layer);
+      const x = p.x, y = p.y;
+      if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= current.width || y >= current.height) throw this.error('INVALID_REQUEST', 'x/y 必须落在图层像素范围内');
+      const result = ops.magicErase(current, { x, y, tolerance, contiguous });
+      if (!result.erased) throw this.error('MAGIC_ERASE_NO_MATCH', `该点颜色 ${JSON.stringify(result.seedColor)} 在容差 ${tolerance} 内没有可擦除的相连区域`);
+      const key = String(layer.id);
+      const action = this.imageAction(ops.ensureImageData(result.image));
+      const nativeDo = action.do.bind(action);
+      const nativeUndo = action.undo.bind(action);
+      const owner = this;
+      const stats = { command: 'layer.magic_erase', coverage: Number(result.coverage.toFixed(4)), erased: result.erased, seed: { x, y }, tolerance };
       action.do = async () => { await nativeDo(); owner.pixelMutation += 1; owner.lastPixelOp = stats; };
       action.undo = async () => { await nativeUndo(); owner.pixelMutation += 1; owner.lastPixelOp = null; };
       return { action, ids: () => [key] };

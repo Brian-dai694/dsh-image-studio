@@ -1125,63 +1125,75 @@ async function localCutout(assetHint) {
       if (!target) { line.textContent = '插入后没找到图片图层，请手动确认。'; return; }
     }
 
-    // 多遍执行：单次命令擦不干净纹理背景，所以按"逐遍加容差 + 逐遍测量 + 收敛即停"来做。
-    // 每一遍都是一条独立命令、单独弹确认、单独回读覆盖率；任一遍取消/失败立即停下。
-    const passes = [
-      { tolerance: 8, label: '第 1 遍（容差 8，收主体）' },
-      { tolerance: 16, label: '第 2 遍（容差 16，清纹理）' },
-      { tolerance: 26, label: '第 3 遍（容差 26，清残余）' },
-      { tolerance: 38, label: '第 4 遍（容差 38，收边）' },
-    ];
+    // 人类做法：用魔棒在背景上点一下、擦一片、再点下一片。
+    // 这里按图层尺寸自动挑边缘种子点，一个点一条命令、各自确认、各自回读擦除量；
+    // 连续几片都擦不动就停，说明背景已清或本地方法到头。
+    const W = target.width || 1, H = target.height || 1;
+    const insetX = Math.max(1, Math.round(W * 0.02)), insetY = Math.max(1, Math.round(H * 0.02));
+    const seeds = [
+      [insetX, insetY], [W - insetX - 1, insetY], [insetX, H - insetY - 1], [W - insetX - 1, H - insetY - 1],
+      [Math.round(W / 2), insetY], [Math.round(W / 2), H - insetY - 1], [insetX, Math.round(H / 2)], [W - insetX - 1, Math.round(H / 2)],
+    ].filter(([x, y]) => x >= 0 && y >= 0 && x < W && y < H);
+
     const log = [];
     let revision = state.revision;
-    let previousCoverage = -1;
-    let appliedCount = 0;
+    let applied = 0;
+    let totalErased = 0;
+    let idleStreak = 0;
 
-    for (const pass of passes) {
+    for (const [x, y] of seeds) {
       const answer = await askConfirm({
-        title: `本地去背景 · ${pass.label}`,
+        title: `魔棒擦除 · 点 (${x}, ${y})`,
         details: [
-          `目标图层  ${target.name || target.id}（${target.width}×${target.height}）`,
-          appliedCount ? `已执行    ${appliedCount} 遍，累计去背景 ${(previousCoverage * 100).toFixed(1)}%` : '已执行    0 遍（这是第 1 遍）',
-          '做法      边界多色簇 + 连通区域擦除 + 去噪点',
-          '确认后写入画布；每一步都可用「撤销」回退',
+          `目标图层  ${target.name || target.id}（${W}×${H}）`,
+          applied ? `已擦除    ${applied} 次，累计覆盖 ${(totalErased * 100).toFixed(1)}%` : '已擦除    0 次（第一下）',
+          '做法      与人类一致：只擦该点同色且相连的一片，不跨颜色边界',
+          '确认后写入画布；每次都能单独撤销',
         ].join('\n'),
         maskAvailable: false,
       });
       if (!answer.ok) {
-        line.textContent = appliedCount
-          ? `已停止。已执行 ${appliedCount} 遍（最后 ${(previousCoverage * 100).toFixed(1)}%），画布保留当前结果。`
+        line.textContent = applied
+          ? `已停止。共擦除 ${applied} 次（覆盖 ${(totalErased * 100).toFixed(1)}%），画布保留当前结果。`
           : '已取消，画布没有改动。';
         return;
       }
-      const result = await transport.request({
-        type: 'editor.apply_command',
-        requestId: crypto.randomUUID(),
-        editorInstanceId: connection.editorInstanceId,
-        documentId: state.documentId,
-        expectedRevision: revision,
-        commandId: crypto.randomUUID(),
-        command: { type: 'layer.remove_background', payload: { layerId: String(target.id), tolerance: pass.tolerance, featherPx: 0 } },
-      }, { timeoutMs: 20000 });
-      revision = result?.revision ?? revision + 1;
-      const after = await readState();
-      const op = after.lastPixelOp;
-      const coverage = op && typeof op.coverage === 'number' ? op.coverage : null;
-      appliedCount += 1;
-      if (coverage === null) { log.push(`${pass.label}：未回报覆盖率`); continue; }
-      log.push(`${pass.label}：${(coverage * 100).toFixed(1)}%${op.despeckled ? `（去噪 ${op.despeckled}px）` : ''}`);
-      bubble('bot', `第 ${appliedCount} 遍完成：去除 ${(coverage * 100).toFixed(1)}% · R${revision}`);
-      // 收敛判断：这一遍几乎没再多擦，说明背景已清干净或到了算法极限。
-      if (previousCoverage >= 0 && coverage - previousCoverage < 0.015) { line.textContent = '已完成'; break; }
-      previousCoverage = coverage;
-      if (coverage > 0.98) break;
+      try {
+        const result = await transport.request({
+          type: 'editor.apply_command',
+          requestId: crypto.randomUUID(),
+          editorInstanceId: connection.editorInstanceId,
+          documentId: state.documentId,
+          expectedRevision: revision,
+          commandId: crypto.randomUUID(),
+          command: { type: 'layer.magic_erase', payload: { layerId: String(target.id), x, y, tolerance: 10, contiguous: true } },
+        }, { timeoutMs: 20000 });
+        revision = result?.revision ?? revision + 1;
+        const after = await readState();
+        const op = after.lastPixelOp;
+        applied += 1;
+        const gained = op && typeof op.coverage === 'number' ? op.coverage : 0;
+        totalErased = gained;
+        log.push(`(${x},${y}) → ${(gained * 100).toFixed(1)}%`);
+        bubble('bot', `第 ${applied} 次擦除完成 · 累计覆盖 ${(gained * 100).toFixed(1)}% · R${revision}`);
+        if (op && op.erased && op.erased > 0) idleStreak = 0; else idleStreak += 1;
+        if (idleStreak >= 3) { log.push('连续三次没有可擦区域，停止'); break; }
+      } catch (error) {
+        if (error.code === 'MAGIC_ERASE_NO_MATCH') { idleStreak += 1; log.push(`(${x},${y}) 附近没有可擦区域`); continue; }
+        line.textContent = `${error.code || 'MAGIC_ERASE_FAILED'}：${error.message}（已停止，画布保留此前结果）`;
+        return;
+      }
     }
 
-    // 收尾：只对结果羽化 1px 抹平锯齿，避免硬边。仍是一条独立命令。
+    if (!applied) {
+      line.textContent = '这张图在边缘找不到可擦的背景区域，本地方法无效。需要配置 AI 抠图服务（backgroundRemoval.endpoint）。';
+      return;
+    }
+
+    // 收尾：羽化 1px 抹平锯齿（仍然是一条独立命令，可跳过）。
     const polish = await askConfirm({
       title: '去背景收尾 · 羽化 1px',
-      details: ['对透明边缘做 1px 羽化，减少锯齿', '不想改边就取消，前面的去背景结果照常保留'].join('\n'),
+      details: ['对透明边缘做 1px 羽化，减少锯齿', '不想改边就取消，前面的结果照常保留'].join('\n'),
       maskAvailable: false,
     });
     if (polish.ok) {
@@ -1195,15 +1207,15 @@ async function localCutout(assetHint) {
           commandId: crypto.randomUUID(),
           command: { type: 'layer.feather', payload: { layerId: String(target.id), radiusPx: 1 } },
         }, { timeoutMs: 20000 });
-        log.push(`收尾：羽化 1px（R${feathered?.revision}）`);
+        log.push(`羽化 1px（R${feathered?.revision}）`);
       } catch (error) {
-        log.push(`收尾羽化失败：${error.code || error.message}`);
+        log.push(`羽化失败：${error.code || error.message}`);
       }
     }
-    line.textContent = `去背景完成，共 ${appliedCount} 遍 · ${log.join('；')}。可逐条撤销；背景仍残留时可换用 AI 抠图服务。`;
+    line.textContent = `按点位擦除完成，共 ${applied} 次 · ${log.join('；')}。背景仍有残留时可换用 AI 抠图服务。`;
   } catch (error) {
     line.textContent = error.code === 'BACKGROUND_NOT_DETECTED'
-      ? '这张图的背景与商品太接近，本地去背景没有擦掉任何像素，画布已保持原样。这种图需要配置 AI 抠图服务（backgroundRemoval.endpoint）。'
+      ? '这张图的背景与商品太接近，本地方法没有擦掉任何像素，画布已保持原样。这种图需要配置 AI 抠图服务（backgroundRemoval.endpoint）。'
       : error.code === 'BACKGROUND_REMOVAL_TOO_MUCH'
         ? '自动识别会擦掉几乎整张图，已中止该遍，画布保留之前的结果。请降低 tolerance 或改用 AI 抠图服务。'
         : `${error.code || 'CUTOUT_FAILED'}：${error.message}`;

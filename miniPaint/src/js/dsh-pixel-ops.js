@@ -202,6 +202,55 @@ export function ensureImageData(image, ImageDataCtor = globalThis.ImageData) {
 }
 
 /**
+ * 种子擦除（等价于人类用魔棒点一下背景再删）：
+ * 只在种子点所在颜色相同的**连通区域**内擦除，不跨过颜色边界，因此不会像全局判定那样
+ * 从边缘一路啃进商品内部。tolerance 是 0..100 的相似度，越大吃掉的相近色越多。
+ */
+export function magicErase(image, { x, y, tolerance = 10, contiguous = true } = {}) {
+  const { width, height, data } = image || {};
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 ||
+      !(data instanceof Uint8ClampedArray) || data.length !== width * height * 4) throw new RangeError('Invalid image for magic erase.');
+  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= width || y >= height) throw new RangeError('Seed point is outside the image.');
+  if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 100) throw new RangeError('tolerance must be 0..100.');
+  const seed = (y * width + x) * 4;
+  if (data[seed + 3] === 0) return { image: { width, height, data: new Uint8ClampedArray(data) }, erased: 0, seedColor: null };
+  const target = [data[seed], data[seed + 1], data[seed + 2]];
+  const threshold = tolerance * 255 / 100;
+  // 单通道比较（比三通道求和更严格），避免把商品里的暗部当成背景
+  const matches = pixel => {
+    const p = pixel * 4;
+    if (data[p + 3] === 0) return true;
+    return Math.abs(data[p] - target[0]) <= threshold &&
+      Math.abs(data[p + 1] - target[1]) <= threshold &&
+      Math.abs(data[p + 2] - target[2]) <= threshold;
+  };
+  const erasedMask = new Uint8Array(width * height);
+  const stack = [y * width + x];
+  while (stack.length) {
+    const pixel = stack.pop();
+    if (pixel < 0 || pixel >= erasedMask.length || erasedMask[pixel] || !matches(pixel)) continue;
+    erasedMask[pixel] = 1;
+    const px = pixel % width;
+    if (px > 0) stack.push(pixel - 1);
+    if (px + 1 < width) stack.push(pixel + 1);
+    if (pixel >= width) stack.push(pixel - width);
+    if (pixel + width < erasedMask.length) stack.push(pixel + width);
+  }
+  if (!contiguous) {
+    // 非连通模式：整张图范围内按颜色擦（等价魔棒的"全局"选项），仍受单通道阈值约束
+    for (let pixel = 0; pixel < erasedMask.length; pixel += 1) if (!erasedMask[pixel] && matches(pixel)) erasedMask[pixel] = 1;
+  }
+  const out = { width, height, data: new Uint8ClampedArray(data) };
+  let erased = 0;
+  for (let pixel = 0; pixel < erasedMask.length; pixel += 1) {
+    if (!erasedMask[pixel]) continue;
+    out.data[pixel * 4 + 3] = 0;
+    erased += 1;
+  }
+  return { image: out, erased, coverage: erased / (width * height), seedColor: target };
+}
+
+/**
  * 自动去背景（纯本地，不依赖任何模型）：从四条边界采样主背景色，再按连通域擦除。
  * 适用于电商白底/纯色底商品图；背景复杂或有渐变时覆盖率会很低，调用方据此如实回报。
  * 不猜、不补：只擦“与边界背景色接近且与边界连通”的像素，商品内部的同色高光不会被吃掉。
