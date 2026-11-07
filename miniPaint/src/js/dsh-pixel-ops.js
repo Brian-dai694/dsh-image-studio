@@ -185,6 +185,23 @@ export function applyMask(source, mask, { mode = 'luminance', invert = false, fe
 }
 
 /**
+ * 把纯数据结果转成真正的 ImageData —— putImageData 只接受 ImageData，传普通对象会抛
+ * "parameter 1 is not of type 'ImageData'"。所有像素动作写回画布前都必须经过这里。
+ */
+export function ensureImageData(image, ImageDataCtor = globalThis.ImageData) {
+  const width = image?.width, height = image?.height;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+    throw new RangeError('像素尺寸无效');
+  }
+  if (typeof ImageDataCtor === 'function' && image instanceof ImageDataCtor) return image;
+  const source = image?.data;
+  const data = source instanceof Uint8ClampedArray ? source : new Uint8ClampedArray(source || []);
+  if (data.length !== width * height * 4) throw new RangeError(`像素数据长度 ${data.length} 与尺寸 ${width}×${height} 不匹配`);
+  if (typeof ImageDataCtor !== 'function') throw new Error('当前环境不支持 ImageData');
+  return new ImageDataCtor(data, width, height);
+}
+
+/**
  * 自动去背景（纯本地，不依赖任何模型）：从四条边界采样主背景色，再按连通域擦除。
  * 适用于电商白底/纯色底商品图；背景复杂或有渐变时覆盖率会很低，调用方据此如实回报。
  * 不猜、不补：只擦“与边界背景色接近且与边界连通”的像素，商品内部的同色高光不会被吃掉。

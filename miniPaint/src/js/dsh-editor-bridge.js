@@ -44,6 +44,10 @@ export class DshEditorBridge {
   }
   /** 把处理后的像素封装成原生动作：一步撤销、一个 revision。 */
   imageAction(image) {
+    // putImageData 只认 ImageData：像素算法返回的是纯 {width,height,data}，必须先转换。
+    if (typeof ImageData !== 'function' || !(image instanceof ImageData)) {
+      throw this.error('PIXEL_DATA_NOT_IMAGE_DATA', '像素结果必须先经 ensureImageData 转换再写回画布');
+    }
     const canvas = document.createElement('canvas');
     canvas.width = image.width; canvas.height = image.height;
     canvas.getContext('2d').putImageData(image, 0, 0);
@@ -765,7 +769,7 @@ export class DshEditorBridge {
     const masked = ops.applyMask(sourcePixels, maskPixels, { mode: spec.mode, invert: spec.invert, featherPx: spec.featherPx });
     const out = document.createElement('canvas');
     out.width = width; out.height = height;
-    out.getContext('2d').putImageData(masked, 0, 0);
+    out.getContext('2d').putImageData(ops.ensureImageData(masked), 0, 0);
     return out;
   }
 
@@ -891,7 +895,7 @@ export class DshEditorBridge {
       // 「已应用」必须跟着历史走：把参数挂到该动作的 do/undo 上，撤销时回退、重做时恢复，
       // 否则撤销后 read_state 还会说 feather/colorMatch 在生效，等于骗人。
       const previous = { ...(this.pixelApplied.get(key) || {}) };
-      const action = this.imageAction(output);
+      const action = this.imageAction(ops.ensureImageData(output));
       const nativeDo = action.do.bind(action);
       const nativeUndo = action.undo.bind(action);
       const appliedState = this.pixelApplied;
@@ -926,7 +930,7 @@ export class DshEditorBridge {
       if (result.coverage === 0) throw this.error('BACKGROUND_NOT_DETECTED', '边界背景与商品颜色接近或背景不纯，未擦除任何像素；请换一张白底/纯色底图，或配置 AI 抠图服务');
       if (result.coverage >= 0.999) throw this.error('BACKGROUND_REMOVAL_TOO_MUCH', '自动识别会擦掉几乎整张图，已中止；请降低 tolerance 或改用 AI 抠图服务');
       const key = String(layer.id);
-      const action = this.imageAction({ ...result.image, layerId: layer.id });
+      const action = this.imageAction(ops.ensureImageData(result.image));
       const nativeDo = action.do.bind(action);
       const nativeUndo = action.undo.bind(action);
       const owner = this;
