@@ -229,18 +229,34 @@ export function removeFlatBackground(image, { tolerance = 8, featherPx = 0 } = {
     entry.count += 1; entry.r += data[p]; entry.g += data[p + 1]; entry.b += data[p + 2];
     buckets.set(key, entry);
   }
-  let dominant = null;
-  for (const entry of buckets.values()) if (!dominant || entry.count > dominant.count) dominant = entry;
-  const background = dominant
-    ? [Math.round(dominant.r / dominant.count), Math.round(dominant.g / dominant.count), Math.round(dominant.b / dominant.count)]
-    : [0, 0, 0];
+  // 背景模型：取边界里最主要的若干个颜色簇（而不是单一主色）。
+  // 磨砂面/石材这类纹理背景会同时出现深色底与浅色噪点，只用一个颜色必然擦不干净。
+  const ranked = [...buckets.values()].sort((a, b) => b.count - a.count);
+  const clusters = [];
+  const totalBorder = ranked.reduce((sum, entry) => sum + entry.count, 0) || 1;
+  let covered = 0;
+  for (const entry of ranked) {
+    if (clusters.length >= 6) break;
+    if (covered / totalBorder >= 0.85) break;
+    const color = [Math.round(entry.r / entry.count), Math.round(entry.g / entry.count), Math.round(entry.b / entry.count)];
+    // 与已有簇太近就合并，避免同一颜色被重复计数。
+    const duplicate = clusters.find(item => Math.abs(item.color[0] - color[0]) + Math.abs(item.color[1] - color[1]) + Math.abs(item.color[2] - color[2]) < 24);
+    if (duplicate) { duplicate.weight += entry.count; continue; }
+    clusters.push({ color, weight: entry.count });
+    covered += entry.count;
+  }
+  if (!clusters.length) clusters.push({ color: [0, 0, 0], weight: 1 });
+  const background = clusters[0].color.slice();
   const threshold = tolerance * 255 / 100;
   const matches = pixel => {
     const p = pixel * 4;
     if (data[p + 3] === 0) return true;                       // 已透明，视为背景
-    return Math.abs(data[p] - background[0]) <= threshold &&
-      Math.abs(data[p + 1] - background[1]) <= threshold &&
-      Math.abs(data[p + 2] - background[2]) <= threshold;
+    let best = Infinity;
+    for (const cluster of clusters) {
+      const d = Math.abs(data[p] - cluster.color[0]) + Math.abs(data[p + 1] - cluster.color[1]) + Math.abs(data[p + 2] - cluster.color[2]);
+      if (d < best) best = d;
+    }
+    return best <= threshold / 2.2;                           // 三通道和 → 单通道阈值的近似换算
   };
 
   // 2) 从所有边界像素做 4 连通洪水填充：只擦与边界相连的背景区域。
@@ -262,6 +278,39 @@ export function removeFlatBackground(image, { tolerance = 8, featherPx = 0 } = {
     }
   }
 
+  // 3) 去噪点：贴在背景上、且面积很小的前景孤岛（纹理碎屑）也一并擦掉；
+  //    面积大的连通块一定是商品，绝不碰。这一步是"磨砂面擦不干净"的关键补丁。
+  const minIsland = Math.max(8, Math.round(width * height * 0.0004));
+  const visited = new Uint8Array(width * height);
+  let despeckled = 0;
+  for (let start = 0; start < erased.length; start += 1) {
+    if (visited[start] || erased[start] || data[start * 4 + 3] === 0) continue;
+    const component = [];
+    let touchesErased = false;
+    const queue = [start];
+    visited[start] = 1;
+    while (queue.length) {
+      const pixel = queue.pop();
+      component.push(pixel);
+      const px = pixel % width;
+      const neighbours = [];
+      if (px > 0) neighbours.push(pixel - 1);
+      if (px + 1 < width) neighbours.push(pixel + 1);
+      if (pixel >= width) neighbours.push(pixel - width);
+      if (pixel + width < width * height) neighbours.push(pixel + width);
+      for (const next of neighbours) {
+        if (erased[next]) { touchesErased = true; continue; }
+        if (visited[next] || data[next * 4 + 3] === 0) continue;
+        visited[next] = 1;
+        queue.push(next);
+      }
+      if (component.length > minIsland * 4) break;             // 大块直接放弃，不做无谓遍历
+    }
+    if (touchesErased && component.length <= minIsland) {
+      for (const pixel of component) { erased[pixel] = 1; despeckled += 1; }
+    }
+  }
+
   const out = { width, height, data: new Uint8ClampedArray(data) };
   let erasedCount = 0;
   let minX = width, minY = height, maxX = -1, maxY = -1;
@@ -277,5 +326,5 @@ export function removeFlatBackground(image, { tolerance = 8, featherPx = 0 } = {
   }
   const soft = featherPx > 0 ? blurAlpha(out, featherPx) : out;
   const bbox = maxX >= 0 ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } : null;
-  return { image: soft, coverage: erasedCount / (width * height), background, bbox };
+  return { image: soft, coverage: erasedCount / (width * height), background, bbox, clusters: clusters.length, despeckled };
 }

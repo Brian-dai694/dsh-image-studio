@@ -49,6 +49,37 @@ test('自动去背景：纯色整图会给出接近 1 的覆盖率，调用方�
   assert.equal(result.bbox, null);
 });
 
+test('纹理背景（深底 + 浅噪点）：多色簇模型应擦掉大部分背景并保留商品', () => {
+  const width = 60, height = 60;
+  const data = new Uint8ClampedArray(width * height * 4);
+  let seed = 7;
+  const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = (y * width + x) * 4;
+      const inProduct = x >= 18 && x <= 42 && y >= 18 && y <= 42;
+      if (inProduct) { data[p] = 196; data[p + 1] = 116; data[p + 2] = 84; }
+      else if (rand() > 0.82) { data[p] = 200; data[p + 1] = 200; data[p + 2] = 205; }
+      else { data[p] = 26; data[p + 1] = 28; data[p + 2] = 32; }
+      data[p + 3] = 255;
+    }
+  }
+  const result = removeFlatBackground({ width, height, data }, { tolerance: 14 });
+  assert.ok(result.clusters >= 2, `边界应识别出多个背景色簇，实际 ${result.clusters}`);
+  assert.equal(result.image.data[(30 * width + 30) * 4 + 3], 255, '商品中心必须保留');
+  assert.equal(result.image.data[(1 * width + 1) * 4 + 3], 0, '角落背景必须擦掉');
+  let cleared = 0, total = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (x >= 18 && x <= 42 && y >= 18 && y <= 42) continue;
+      total += 1;
+      if (result.image.data[(y * width + x) * 4 + 3] === 0) cleared += 1;
+    }
+  }
+  const ratio = cleared / total;
+  assert.ok(ratio > 0.9, `背景擦除率应高于 90%，实际 ${(ratio * 100).toFixed(1)}%`);
+});
+
 test('自动去背景：商品贴着背景色（低对比）时覆盖率为 0，不谎报成功', () => {
   const width = 8, height = 8;
   const data = new Uint8ClampedArray(width * height * 4).fill(255);

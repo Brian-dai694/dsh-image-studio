@@ -327,12 +327,18 @@ test('用户输入抠图时直达本地去背景，不先让模型拒答；纯�
   // 本地自动去背景：无坐标、无外部服务，失败要有可执行提示
   const cutoutStart = code.indexOf('async function localCutout');
   assert.ok(cutoutStart > 0, '必须存在本地去背景执行函数');
-  const cutout = code.slice(cutoutStart, cutoutStart + 3200);
+  const cutout = code.slice(cutoutStart, cutoutStart + 7000);
   assert.match(cutout, /layer\.remove_background/, '必须走编辑器的自动去背景命令');
   assert.match(cutout, /BACKGROUND_NOT_DETECTED/, '纯色底失败要区分错误码');
   assert.match(cutout, /AI 抠图服务/, '告诉用户下一步该配置什么');
-  assert.match(cutout, /画布已保持原样|已中止/, '失败时明确没有破坏画布');
+  assert.match(cutout, /画布已保持原样|画布保留/, '失败时明确没有破坏画布');
   assert.match(cutout, /askConfirm/, '写画布前必须人工确认');
+  // 多遍执行：不是一条命令定生死，而是逐遍加容差、逐遍测量、收敛即停
+  assert.match(cutout, /const passes = \[/, '必须是多遍参数表而非单次调用');
+  assert.match(cutout, /for \(const pass of passes\)/, '必须逐遍执行');
+  assert.match(cutout, /previousCoverage >= 0 && coverage - previousCoverage < 0\.015/, '要按覆盖率增量判断收敛');
+  assert.match(cutout, /layer\.feather/, '收尾要有羽化这一条独立命令');
+  assert.ok((cutout.match(/askConfirm\(/g) || []).length >= 2, '去背景与收尾各自都要确认');
   const routeStart = code.indexOf('const remove = /^抠图');
   assert.ok(routeStart > 0);
   assert.match(code.slice(routeStart, routeStart + 900), /localCutout\(\)/, '默认走本地去背景而不是先要外部服务');
