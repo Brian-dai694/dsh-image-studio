@@ -993,6 +993,7 @@ const CHIPS = [
   ['生成', '生成：柔和晨光，浅灰色调'],
   ['批量', '批量：晨光|夜景|木桌'],
   ['上传', '@upload'],
+  ['套版', '@psd'],
   ['抠图', '抠图'],
   ['导入', '导入：https://example.com/a.png'],
   ['字体', '字体列表'],
@@ -1043,11 +1044,21 @@ function renderChips() {
     button.textContent = label;
     button.addEventListener('click', () => {
       if (command === '@upload') { $('assist-file')?.click(); return; }
+      if (command === '@psd') { $('assist-psd')?.click(); return; }
       void sendAssist(command);
     });
     box.append(button);
   }
 }
+
+// 套版入口：选一个 .psd 模板，解析槽位后逐步确认执行。
+$('assist-psd')?.addEventListener('change', async event => {
+  const file = event.target?.files?.[0];
+  if (!file) return;
+  bubble('me', `套版模板：${file.name}（${Math.round(file.size / 1024)} KB）`);
+  await applyTemplateFlow(file);
+  if (event.target) event.target.value = '';
+});
 
 // 本地文件上传：面板列隐藏后，入口在这里（选完文件立刻上传并回执）。
 $('assist-file')?.addEventListener('change', async event => {
@@ -1145,6 +1156,78 @@ async function localCutout(assetHint) {
       : error.code === 'BACKGROUND_REMOVAL_TOO_MUCH'
         ? '自动识别会擦掉几乎整张图，已中止，画布保持原样。请降低 tolerance 或改用 AI 抠图服务。'
         : `${error.code || 'CUTOUT_FAILED'}：${error.message}`;
+  }
+}
+
+// 套版：PSD 模板 → 槽位 → 规划 → 逐条确认执行（重建式，丢弃装饰图层并如实告知）。
+let psdTemplate = null;
+async function apiRaw(pathname, bytes, name) {
+  const token = await boot();
+  const response = await fetch(pathname, {
+    method: 'POST', credentials: 'same-origin', body: bytes,
+    headers: { authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1', 'x-psd-name': encodeURIComponent(name || 'template.psd') },
+  });
+  const value = await response.json().catch(() => null);
+  if (!response.ok) throw Object.assign(new Error(value?.message || `HTTP ${response.status}`), { code: value?.code || 'REQUEST_FAILED' });
+  return value;
+}
+
+/** 执行一条已规划命令：每次重新读 revision、每次弹确认；失败即停。 */
+async function runPlannedCommand(command, label) {
+  const connection = await connect();
+  const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+  const risky = ['layer.remove', 'canvas.crop', 'layer.add_image'].includes(command.type);
+  const answer = await askConfirm({
+    title: risky ? `套版（高影响）：${command.type}` : `套版：${command.type}`,
+    details: [
+      label || '',
+      `命令      ${command.type}`,
+      `参数      ${JSON.stringify(command.payload).slice(0, 400)}`,
+      `目标工程  ${state.documentId} · R${state.revision}`,
+      '确认后才会写入画布；可用撤销回退',
+    ].filter(Boolean).join('\n'),
+    maskAvailable: false,
+  });
+  if (!answer.ok) return { ok: false, cancelled: true };
+  const result = await transport.request({
+    type: 'editor.apply_command',
+    requestId: crypto.randomUUID(),
+    editorInstanceId: connection.editorInstanceId,
+    documentId: state.documentId,
+    expectedRevision: state.revision,
+    commandId: crypto.randomUUID(),
+    command: { type: command.type, payload: command.payload },
+  }, { timeoutMs: 20000 });
+  return { ok: true, revision: result?.revision };
+}
+
+async function applyTemplateFlow(file) {
+  const line = bubble('bot', '正在解析 PSD 模板……');
+  try {
+    const parsed = await apiRaw('/media-image/psd/slots', await file.arrayBuffer(), file.name);
+    psdTemplate = parsed.template;
+    const { canvas, summary } = psdTemplate;
+    line.textContent = `模板 ${psdTemplate.name}：画布 ${canvas.width}×${canvas.height}，图片槽 ${summary.image}、文字槽 ${summary.text}。`;
+    if (!lastAssetRef) { bubble('bot', '还没有商品图：先点「上传」选一张（白底图更好），我再套版。'); return; }
+    const planned = await api('/media-image/template/plan', {
+      method: 'POST',
+      body: { template: psdTemplate, background: '#f4f5f7', product: { assetRef: lastAssetRef }, textStyle: { fill_color: '#15181f' } },
+    });
+    const plan = planned.plan;
+    bubble('bot', `规划出 ${plan.summary.commands} 步（图片 ${plan.summary.images}、文字 ${plan.summary.texts}）；${plan.skipped.length ? `有 ${plan.skipped.length} 处无法还原已登记。` : ''}逐步确认后生效。`);
+    for (const command of plan.commands) {
+      const result = await runPlannedCommand(command, command.note);
+      if (result.cancelled) { bubble('bot', '已取消，后续步骤停止；画布保留已确认的部分。'); return; }
+      bubble('bot', `已执行 ${command.type} · 现在 R${result.revision}`);
+    }
+    if (plan.skipped.length) {
+      bubble('bot', `未还原：${plan.skipped.slice(0, 4).map(item => `${item.name || item.slotId || item.kind}（${item.reason}）`).join('；')}`);
+    }
+    bubble('bot', '套版完成。要换文案或换商品图，再说一次即可（会另起一次规划）。');
+  } catch (error) {
+    line.textContent = error.code === 'PSD_BAD_SIGNATURE'
+      ? '这不是 PSD 文件。请选择 .psd 模板；PNG/JPG 请走「上传」。'
+      : `${error.code || 'TEMPLATE_FAILED'}：${error.message}`;
   }
 }
 

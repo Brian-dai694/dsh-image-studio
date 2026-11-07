@@ -6,6 +6,7 @@ import { extname, relative, resolve, sep } from 'node:path';
 import { fetchRemoteBytes } from './remote.js';
 import { MAX_FONT_BYTES } from './fonts.js';
 import { psdToTemplate } from './psd.js';
+import { planTemplateApply } from './template.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -367,6 +368,27 @@ async function handleBackgroundRemoval(req, res, { backgroundRemoval, token, pre
   return true;
 }
 
+async function handleTemplatePlan(req, res, { token }) {
+  const rejection = authorizeSameOrigin(req, token, ['POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  try {
+    const body = await readJsonBody(req, 4 * 1024 * 1024);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) { send(res, 400, { code: 'TEMPLATE_INVALID', message: '请求体必须是 JSON 对象' }); return true; }
+    const plan = planTemplateApply(body.template, {
+      background: body.background,
+      product: body.product,
+      texts: body.texts || {},
+      textStyle: body.textStyle || {},
+    });
+    send(res, 200, { ok: true, plan });
+  } catch (error) {
+    const code = error?.code || 'TEMPLATE_FAILED';
+    const status = code === 'PAYLOAD_TOO_LARGE' || code === 'REQUEST_TOO_LARGE' ? 413 : String(code).startsWith('TEMPLATE_') ? 400 : 500;
+    send(res, status, { code, message: error.message });
+  }
+  return true;
+}
+
 async function handlePsdSlots(req, res, { token, assets }) {
   const rejection = authorizeSameOrigin(req, token, ['POST'], { requireJson: false });
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
@@ -460,6 +482,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/fonts` || pathname.startsWith(`${prefix}/fonts/`)) {
       return handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch });
+    }
+    if (pathname === `${prefix}/template/plan`) {
+      return handleTemplatePlan(req, res, { token });
     }
     if (pathname === `${prefix}/psd/slots`) {
       return handlePsdSlots(req, res, { token, assets });
