@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { removeFlatBackground, applyMask, blurAlpha, magicErase } from '../../../miniPaint/src/js/dsh-pixel-ops.js';
+import { removeFlatBackground, applyMask, blurAlpha, magicErase, backgroundMask } from '../../../miniPaint/src/js/dsh-pixel-ops.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -118,6 +118,18 @@ test('魔棒擦除：越界种子、非法容差直接拒绝；点到已透明�
   assert.throws(() => magicErase(image, { x: 0, y: 0, tolerance: 200 }), RangeError);
   const transparent = { width: 2, height: 2, data: new Uint8ClampedArray(16) };
   assert.equal(magicErase(transparent, { x: 0, y: 0 }).erased, 0);
+});
+
+test('蒙版图层算法：subject 保留商品、background 反过来，都是白色+alpha', () => {
+  const image = whiteBackdropProduct();
+  const subject = backgroundMask(image, { tolerance: 8, featherPx: 0, mode: 'subject' });
+  const at = (img, x, y) => (y * 20 + x) * 4;
+  assert.equal(subject.image.data[at(subject.image, 0, 0) + 3], 0, '背景在蒙版里应透明（被挖掉）');
+  assert.equal(subject.image.data[at(subject.image, 9, 9) + 3], 255, '商品在蒙版里应不透明（保留）');
+  assert.equal(subject.image.data[at(subject.image, 9, 9)], 255, '蒙版是白色层');
+  const background = backgroundMask(image, { tolerance: 8, featherPx: 0, mode: 'background' });
+  assert.equal(background.image.data[at(background.image, 0, 0) + 3], 255, '反相蒙版保留背景');
+  assert.equal(background.image.data[at(background.image, 9, 9) + 3], 0, '反相蒙版挖掉商品');
 });
 
 test('原有像素能力未被破坏：蒙版与羽化仍可用', () => {

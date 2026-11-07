@@ -202,6 +202,25 @@ export function ensureImageData(image, ImageDataCtor = globalThis.ImageData) {
 }
 
 /**
+ * 背景蒙版：把"哪里是背景"变成一张可用于 maskRef 的图层（白色=保留，透明=挖掉）。
+ * 人拿到这张蒙版层后可以用画笔继续补/擦，所以它是非破坏式的中间产物。
+ * @param mode 'subject' 保留商品（背景透明）；'background' 反过来只留背景
+ */
+export function backgroundMask(image, { tolerance = 12, featherPx = 0, mode = 'subject' } = {}) {
+  const cut = removeFlatBackground(image, { tolerance, featherPx: 0 });
+  const { width, height } = cut.image;
+  const out = { width, height, data: new Uint8ClampedArray(width * height * 4) };
+  for (let i = 0; i < out.data.length; i += 4) {
+    const alpha = cut.image.data[i + 3];         // 0 = 背景，255 = 商品
+    const keep = mode === 'background' ? 255 - alpha : alpha;
+    out.data[i] = 255; out.data[i + 1] = 255; out.data[i + 2] = 255;
+    out.data[i + 3] = keep;
+  }
+  const soft = featherPx > 0 ? blurAlpha(out, featherPx) : out;
+  return { image: soft, coverage: cut.coverage, background: cut.background, bbox: cut.bbox, clusters: cut.clusters };
+}
+
+/**
  * 种子擦除（等价于人类用魔棒点一下背景再删）：
  * 只在种子点所在颜色相同的**连通区域**内擦除，不跨过颜色边界，因此不会像全局判定那样
  * 从边缘一路啃进商品内部。tolerance 是 0..100 的相似度，越大吃掉的相近色越多。

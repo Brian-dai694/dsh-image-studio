@@ -25,7 +25,7 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
 
 // 与编辑器 modules/layer/composition.js 同源：Canvas globalCompositeOperation 全集。
 export const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
@@ -56,6 +56,7 @@ function validateImageCommand(command) {
     'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
     'layer.remove_background': ['layerId', 'tolerance', 'featherPx'],
     'layer.magic_erase': ['layerId', 'x', 'y', 'tolerance', 'contiguous'],
+    'layer.add_mask_layer': ['sourceLayerId', 'mode', 'tolerance', 'featherPx', 'name'],
   };
   fieldsOnly(p, fields[command.type]);
   if (command.type === 'history.undo' && (p.targetCommandId !== undefined || p.afterDigest !== undefined)) {
@@ -183,6 +184,20 @@ function validateImageCommand(command) {
     if (p.tolerance !== undefined) finite(p.tolerance, 'tolerance', { min: 0, max: 100 });
     if (p.contiguous !== undefined && typeof p.contiguous !== 'boolean') {
       throw new MediaBridgeError('INVALID_REQUEST', 'contiguous must be a boolean.');
+    }
+  }
+  if (command.type === 'layer.add_mask_layer') {
+    // 生成蒙版图层：只新建一张普通图层，不改原图；后续用 layer.add_image + maskRef 组合。
+    opaqueId(p.sourceLayerId, 'sourceLayerId');
+    if (p.mode !== undefined && !['subject', 'background'].includes(p.mode)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'mode must be "subject" or "background".');
+    }
+    if (p.tolerance !== undefined) finite(p.tolerance, 'tolerance', { min: 0, max: 100 });
+    if (p.featherPx !== undefined && (!Number.isSafeInteger(p.featherPx) || p.featherPx < 0 || p.featherPx > 64)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'featherPx must be an integer between 0 and 64.');
+    }
+    if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 120)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'name must be a string up to 120 characters.');
     }
   }
   if (command.type === 'layer.color_match') {

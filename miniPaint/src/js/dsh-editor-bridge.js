@@ -5,7 +5,7 @@ import zoomView from './libs/zoomView.js';
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
 const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
-const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -965,6 +965,38 @@ export class DshEditorBridge {
       action.do = async () => { await nativeDo(); owner.pixelMutation += 1; owner.lastPixelOp = stats; };
       action.undo = async () => { await nativeUndo(); owner.pixelMutation += 1; owner.lastPixelOp = null; };
       return { action, ids: () => [key] };
+    }
+    if (command.type === 'layer.add_mask_layer') {
+      // 生成一张"蒙版图层"：白色=保留、透明=挖掉。它是普通图层，人可以继续用画笔修，
+      // 原图完全不动，后续用 layer.add_image + maskRef=layer:<蒙版层> 得到抠图结果。
+      if (!keysOnly(p, ['sourceLayerId', 'mode', 'tolerance', 'featherPx', 'name'])) throw this.error('INVALID_REQUEST');
+      const source = config.layers.find(item => String(item.id) === p.sourceLayerId);
+      if (!source) throw this.error('LAYER_NOT_FOUND');
+      if (source.type !== 'image' || source.is_vector) throw this.error('LAYER_NOT_RASTERIZED', '生成蒙版需要非矢量的图片图层');
+      const mode = p.mode === undefined ? 'subject' : p.mode;
+      if (mode !== 'subject' && mode !== 'background') throw this.error('INVALID_REQUEST');
+      const tolerance = p.tolerance === undefined ? 12 : p.tolerance;
+      const featherPx = p.featherPx === undefined ? 1 : p.featherPx;
+      if (typeof tolerance !== 'number' || !Number.isFinite(tolerance) || tolerance < 0 || tolerance > 100) throw this.error('INVALID_REQUEST');
+      if (!Number.isSafeInteger(featherPx) || featherPx < 0 || featherPx > 64) throw this.error('INVALID_REQUEST');
+      const ops = await this.pixelOps();
+      const current = this.rasterizeLayer(source);
+      const mask = ops.backgroundMask(current, { tolerance, featherPx, mode });
+      const canvas = document.createElement('canvas');
+      canvas.width = mask.image.width; canvas.height = mask.image.height;
+      canvas.getContext('2d').putImageData(ops.ensureImageData(mask.image), 0, 0);
+      const width = source.width || mask.image.width;
+      const height = source.height || mask.image.height;
+      const layer = {
+        name: (p.name || `蒙版·${source.name || source.id}`).slice(0, 120),
+        type: 'image', data: canvas.toDataURL('image/png'),
+        x: source.x || 0, y: source.y || 0,
+        width, height, width_original: mask.image.width, height_original: mask.image.height,
+        visible: true, opacity: 100, rotate: 0,
+      };
+      const action = new app.Actions.Insert_layer_action(layer, false);
+      // changedObjectIds 里带上新蒙版层 id，调用方据此拼 layer.add_image 的 maskRef。
+      return { action, ids: () => [String(action.inserted_layer_id)] };
     }
     if (command.type === 'layer.remove') {
       if (!keysOnly(p, ['layerId']) || typeof p.layerId !== 'string' || !config.layers.some(layer => String(layer.id) === p.layerId)) throw this.error('LAYER_NOT_FOUND');

@@ -46,6 +46,7 @@ command 命令名必须属于编辑器白名单。参数契约：
 - layer.color_match: {layerId,method:"reinhard",strength?:0..1,reference?:"canvas"|"below"|{x,y,width,height}}。
 - layer.remove_background: {layerId,tolerance?:0..100,featherPx?:0..64}；本地自动去背景，适合白底/纯色底商品图，无需外部服务；背景复杂时编辑器会回 BACKGROUND_NOT_DETECTED，别硬说成功。
 - layer.magic_erase: {layerId,x,y,tolerance?:0..100,contiguous?:boolean}；等同于人类用魔棒点一下再删：只擦该点(x,y 为图层本地像素)同色且相连的一片。适合按区域逐块清背景，可反复调用；该点无可擦区域会回 MAGIC_ERASE_NO_MATCH。
+- layer.add_mask_layer: {sourceLayerId,mode?:"subject"|"background",tolerance?:0..100,featherPx?:0..64,name?}；新建一张蒙版图层（白=保留、透明=挖掉），原图不动，返回的 changedObjectIds[0] 就是蒙版层 id。抠图标准路径：先它，再 layer.add_image {sourceRef:"layer:<源层>",maskRef:"layer:<蒙版层>",maskMode:"alpha"}。
 - canvas.resize: {width:1..16384,height:1..16384}。
 - canvas.crop: {x,y,width,height}，高影响，说明裁切范围。
 - history.undo: {targetCommandId,afterDigest}；只撤销最近一条 Agent 改动，凭据必须来自 read_state.history，不得猜。

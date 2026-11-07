@@ -328,17 +328,12 @@ test('用户输入抠图时直达本地去背景，不先让模型拒答；纯�
   const cutoutStart = code.indexOf('async function localCutout');
   assert.ok(cutoutStart > 0, '必须存在本地去背景执行函数');
   const cutout = code.slice(cutoutStart, cutoutStart + 8000);
-  assert.match(cutout, /layer\.magic_erase/, '必须用编辑器里真正的"魔棒擦除"命令');
+  assert.match(cutout, /layer\.add_mask_layer/, '必须走"先加蒙版图层"的人类式流程');
+  assert.match(cutout, /maskRef: `layer:\$\{maskLayerId\}`/, '必须用蒙版层作为 maskRef 合成抠图');
+  assert.match(cutout, /原图(未改动|一个像素都不改|保留)/, '要明确原图不动');
+  assert.match(cutout, /画笔/, '告诉用户蒙版层还能继续用手修');
   assert.match(cutout, /AI 抠图服务/, '告诉用户下一步该配置什么');
-  assert.match(cutout, /画布已保持原样|画布保留/, '失败时明确没有破坏画布');
-  assert.match(cutout, /askConfirm/, '写画布前必须人工确认');
-  // 人类式操作：逐点、多次命令，而不是一条命令定生死
-  assert.match(cutout, /const seeds = \[/, '必须按边缘挑多个种子点');
-  assert.match(cutout, /for \(const \[x, y\] of seeds\)/, '必须逐点执行');
-  assert.match(cutout, /MAGIC_ERASE_NO_MATCH/, '某点无可擦区域要单独处理');
-  assert.match(cutout, /idleStreak >= 3/, '连续擦不动要停');
-  assert.match(cutout, /layer\.feather/, '收尾要有羽化这一条独立命令');
-  assert.ok((cutout.match(/askConfirm\(/g) || []).length >= 2, '每次擦除与收尾各自都要确认');
+  assert.ok((cutout.match(/askConfirm\(/g) || []).length >= 2, '建蒙版与合成各自都要确认');
   const routeStart = code.indexOf('const remove = /^抠图');
   assert.ok(routeStart > 0);
   assert.match(code.slice(routeStart, routeStart + 900), /localCutout\(\)/, '默认走本地去背景而不是先要外部服务');

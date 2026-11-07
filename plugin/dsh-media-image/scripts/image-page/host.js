@@ -1125,100 +1125,74 @@ async function localCutout(assetHint) {
       if (!target) { line.textContent = '插入后没找到图片图层，请手动确认。'; return; }
     }
 
-    // 人类做法：用魔棒在背景上点一下、擦一片、再点下一片。
-    // 这里按图层尺寸自动挑边缘种子点，一个点一条命令、各自确认、各自回读擦除量；
-    // 连续几片都擦不动就停，说明背景已清或本地方法到头。
+    // 人类做法（Photoshop/miniPaint 同构）：先加一个蒙版图层，再用它把商品"抠"出来。
+    // 好处：原图完全不动；蒙版是普通图层，之后人还能用画笔补/擦，属于可继续修的非破坏式流程。
     const W = target.width || 1, H = target.height || 1;
-    const insetX = Math.max(1, Math.round(W * 0.02)), insetY = Math.max(1, Math.round(H * 0.02));
-    const seeds = [
-      [insetX, insetY], [W - insetX - 1, insetY], [insetX, H - insetY - 1], [W - insetX - 1, H - insetY - 1],
-      [Math.round(W / 2), insetY], [Math.round(W / 2), H - insetY - 1], [insetX, Math.round(H / 2)], [W - insetX - 1, Math.round(H / 2)],
-    ].filter(([x, y]) => x >= 0 && y >= 0 && x < W && y < H);
 
-    const log = [];
-    let revision = state.revision;
-    let applied = 0;
-    let totalErased = 0;
-    let idleStreak = 0;
-
-    for (const [x, y] of seeds) {
-      const answer = await askConfirm({
-        title: `魔棒擦除 · 点 (${x}, ${y})`,
-        details: [
-          `目标图层  ${target.name || target.id}（${W}×${H}）`,
-          applied ? `已擦除    ${applied} 次，累计覆盖 ${(totalErased * 100).toFixed(1)}%` : '已擦除    0 次（第一下）',
-          '做法      与人类一致：只擦该点同色且相连的一片，不跨颜色边界',
-          '确认后写入画布；每次都能单独撤销',
-        ].join('\n'),
-        maskAvailable: false,
-      });
-      if (!answer.ok) {
-        line.textContent = applied
-          ? `已停止。共擦除 ${applied} 次（覆盖 ${(totalErased * 100).toFixed(1)}%），画布保留当前结果。`
-          : '已取消，画布没有改动。';
-        return;
-      }
-      try {
-        const result = await transport.request({
-          type: 'editor.apply_command',
-          requestId: crypto.randomUUID(),
-          editorInstanceId: connection.editorInstanceId,
-          documentId: state.documentId,
-          expectedRevision: revision,
-          commandId: crypto.randomUUID(),
-          command: { type: 'layer.magic_erase', payload: { layerId: String(target.id), x, y, tolerance: 10, contiguous: true } },
-        }, { timeoutMs: 20000 });
-        revision = result?.revision ?? revision + 1;
-        const after = await readState();
-        const op = after.lastPixelOp;
-        applied += 1;
-        const gained = op && typeof op.coverage === 'number' ? op.coverage : 0;
-        totalErased = gained;
-        log.push(`(${x},${y}) → ${(gained * 100).toFixed(1)}%`);
-        bubble('bot', `第 ${applied} 次擦除完成 · 累计覆盖 ${(gained * 100).toFixed(1)}% · R${revision}`);
-        if (op && op.erased && op.erased > 0) idleStreak = 0; else idleStreak += 1;
-        if (idleStreak >= 3) { log.push('连续三次没有可擦区域，停止'); break; }
-      } catch (error) {
-        if (error.code === 'MAGIC_ERASE_NO_MATCH') { idleStreak += 1; log.push(`(${x},${y}) 附近没有可擦区域`); continue; }
-        line.textContent = `${error.code || 'MAGIC_ERASE_FAILED'}：${error.message}（已停止，画布保留此前结果）`;
-        return;
-      }
-    }
-
-    if (!applied) {
-      line.textContent = '这张图在边缘找不到可擦的背景区域，本地方法无效。需要配置 AI 抠图服务（backgroundRemoval.endpoint）。';
-      return;
-    }
-
-    // 收尾：羽化 1px 抹平锯齿（仍然是一条独立命令，可跳过）。
-    const polish = await askConfirm({
-      title: '去背景收尾 · 羽化 1px',
-      details: ['对透明边缘做 1px 羽化，减少锯齿', '不想改边就取消，前面的结果照常保留'].join('\n'),
+    const maskAnswer = await askConfirm({
+      title: '添加蒙版图层',
+      details: [
+        `源图层    ${target.name || target.id}（${W}×${H}）`,
+        '做法      按边界背景色生成蒙版：白色=保留、透明=挖掉',
+        '影响      只新建一张「蒙版」图层，原图一个像素都不改',
+        '后续      你可以在这张蒙版上用画笔继续补/擦',
+      ].join('\n'),
       maskAvailable: false,
     });
-    if (polish.ok) {
-      try {
-        const feathered = await transport.request({
-          type: 'editor.apply_command',
-          requestId: crypto.randomUUID(),
-          editorInstanceId: connection.editorInstanceId,
-          documentId: state.documentId,
-          expectedRevision: revision,
-          commandId: crypto.randomUUID(),
-          command: { type: 'layer.feather', payload: { layerId: String(target.id), radiusPx: 1 } },
-        }, { timeoutMs: 20000 });
-        log.push(`羽化 1px（R${feathered?.revision}）`);
-      } catch (error) {
-        log.push(`羽化失败：${error.code || error.message}`);
-      }
-    }
-    line.textContent = `按点位擦除完成，共 ${applied} 次 · ${log.join('；')}。背景仍有残留时可换用 AI 抠图服务。`;
+    if (!maskAnswer.ok) { line.textContent = '已取消，画布没有改动。'; return; }
+
+    let revision = state.revision;
+    const maskResult = await transport.request({
+      type: 'editor.apply_command',
+      requestId: crypto.randomUUID(),
+      editorInstanceId: connection.editorInstanceId,
+      documentId: state.documentId,
+      expectedRevision: revision,
+      commandId: crypto.randomUUID(),
+      command: { type: 'layer.add_mask_layer', payload: { sourceLayerId: String(target.id), mode: 'subject', tolerance: 12, featherPx: 1 } },
+    }, { timeoutMs: 20000 });
+    revision = maskResult?.revision ?? revision + 1;
+    const maskLayerId = (maskResult?.changedObjectIds || [])[0];
+    if (!maskLayerId) { line.textContent = '蒙版图层没有返回 id，已停止（画布只多了这张蒙版，可撤销）。'; return; }
+    bubble('bot', `蒙版图层已建立（${maskLayerId}）· R${revision}。可以随时用画笔修它。`);
+
+    const composeAnswer = await askConfirm({
+      title: '用蒙版抠出商品',
+      details: [
+        `源图层    ${target.name || target.id}`,
+        `蒙版图层  ${maskLayerId}`,
+        '做法      复制源图层并按蒙版 alpha 挖空，得到一张独立的抠图图层',
+        '影响      原图保留；结果是新图层，可单独移动/导出',
+      ].join('\n'),
+      maskAvailable: false,
+    });
+    if (!composeAnswer.ok) { line.textContent = '已取消合成。蒙版图层保留在画布上，之后可以再用它。'; return; }
+
+    const compose = await transport.request({
+      type: 'editor.apply_command',
+      requestId: crypto.randomUUID(),
+      editorInstanceId: connection.editorInstanceId,
+      documentId: state.documentId,
+      expectedRevision: revision,
+      commandId: crypto.randomUUID(),
+      command: {
+        type: 'layer.add_image',
+        payload: {
+          sourceRef: `layer:${target.id}`,
+          maskRef: `layer:${maskLayerId}`,
+          maskMode: 'alpha',
+          x: target.x || 0, y: target.y || 0,
+          width: W, height: H, fit: 'stretch',
+          name: `抠图·${target.name || target.id}`,
+        },
+      },
+    }, { timeoutMs: 20000 });
+
+    line.textContent = `抠图完成 · 现在 R${compose?.revision}。原图未改动；蒙版图层 ${maskLayerId} 仍在，可在上面用画笔继续修，修完再说「合成」即可重抠。`;
   } catch (error) {
     line.textContent = error.code === 'BACKGROUND_NOT_DETECTED'
-      ? '这张图的背景与商品太接近，本地方法没有擦掉任何像素，画布已保持原样。这种图需要配置 AI 抠图服务（backgroundRemoval.endpoint）。'
-      : error.code === 'BACKGROUND_REMOVAL_TOO_MUCH'
-        ? '自动识别会擦掉几乎整张图，已中止该遍，画布保留之前的结果。请降低 tolerance 或改用 AI 抠图服务。'
-        : `${error.code || 'CUTOUT_FAILED'}：${error.message}`;
+      ? '这张图的背景与商品太接近，蒙版没有可用边界。画布已保持原样；这类图需要配置 AI 抠图服务（backgroundRemoval.endpoint）。'
+      : `${error.code || 'MASK_CUTOUT_FAILED'}：${error.message}`;
   }
 }
 
