@@ -10,6 +10,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // 注册契约用例默认测可见面板；单独用例会验证显式隐藏开关。
 globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
+globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true;
 
 const fakeReact = {
   useRef(value) { return { current: value }; },
@@ -1053,65 +1054,73 @@ test('locate 透传：合法原样保留，非法整体省略', async () => {
   assert.equal(track[0].locate.kind, 'track');
 });
 
-test('默认隐藏原生 Conversation 面板：不注册侧栏/main，保留工具卡；宿主页助手不受此开关影响', async () => {
-  const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-  const previousStorage = globalThis.localStorage;
-  delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-  globalThis.localStorage = { getItem: () => null };
-  try {
-    const client = await loadClient();
-    const { ctx, registered, injected, flush } = makeContext();
-    client.apply(ctx);
-    flush();
-    assert.equal(registered.some(row => row.definition.name === 'sidebar.panellist'), false, '红框 Conversation 面板对应的侧栏入口默认隐藏');
-    assert.equal(registered.some(row => row.definition.name === 'main'), false, '红框 Conversation 主面板默认隐藏');
-    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'), '原生工具回执卡仍注册');
-    assert.ok(injected.includes('shell.overlay'), '悬浮编辑器保留机制不随面板开关误删');
-  } finally {
-    if (previous === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = previous;
-    if (previousStorage === undefined) delete globalThis.localStorage;
-    else globalThis.localStorage = previousStorage;
-  }
-});
-
-test('显式隐藏原生面板：不注册侧栏/main，但保留工具回执卡', async () => {
-  const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-  delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-  const previousStorage = globalThis.localStorage;
-  globalThis.localStorage = { getItem: key => key === 'dsh-media-image-panel' ? 'hidden' : null };
-  try {
-    const client = await loadClient();
-    const { ctx, registered, injected, flush } = makeContext();
-    client.apply(ctx);
-    flush();
-    assert.equal(registered.some(row => row.definition.name === 'sidebar.panellist'), false);
-    assert.equal(registered.some(row => row.definition.name === 'main'), false);
-    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'));
-    assert.ok(injected.includes('shell.overlay'));
-  } finally {
-    if (previous === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = previous;
-    if (previousStorage === undefined) delete globalThis.localStorage;
-    else globalThis.localStorage = previousStorage;
-  }
-});
-
-test('布尔全局开关优先于 localStorage 隐藏状态（支持控制台恢复）', async () => {
+test('legacy panel hide flag cannot hide the plugin entry or editor; Conversation visibility is independent', async () => {
   const prevPanel = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  const prevConversation = globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__;
   const prevStorage = globalThis.localStorage;
-  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
+  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = false;
+  globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = false;
   globalThis.localStorage = { getItem: () => 'hidden' };
   try {
     const client = await loadClient();
     const { ctx, registered, flush } = makeContext();
     client.apply(ctx); flush();
-    assert.ok(registered.some(row => row.definition.name === 'sidebar.panellist'));
+    const main = registered.find(row => row.definition.name === 'main');
+    assert.ok(registered.some(row => row.definition.name === 'sidebar.panellist'), '旧开关不能隐藏插件入口');
+    assert.ok(main, '旧开关不能隐藏画布 main pane');
+    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'));
+    const page = client.chat.makePage(client.entries[0])();
+    assert.equal(page.props.children[0].type, 'iframe');
+    assert.equal(page.props.children.some(child => child?.type?.name === 'Conversation'), false, '只隐藏红框组件');
   } finally {
     if (prevPanel === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
     else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = prevPanel;
+    if (prevConversation === undefined) delete globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__;
+    else globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = prevConversation;
     if (prevStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = prevStorage;
+  }
+});
+
+test('显式隐藏红框 Conversation 时编辑器 iframe 仍保留', async () => {
+  const prevConversation = globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__;
+  const prevPanel = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = false;
+  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
+  try {
+    const client = await loadClient();
+    const page = client.chat.makePage(client.entries[0])();
+    const children = page.props.children;
+    assert.equal(children[0].type, 'iframe');
+    assert.equal(children.some(child => child?.type?.name === 'Conversation'), false);
+  } finally {
+    if (prevConversation === undefined) delete globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__;
+    else globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = prevConversation;
+    if (prevPanel === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = prevPanel;
+  }
+});
+
+test('显式恢复红框 Conversation 不影响 sidebar/main 注册', async () => {
+  const prevConversation = globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__;
+  const prevPanel = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true;
+  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
+  try {
+    const client = await loadClient();
+    const page = client.chat.makePage(client.entries[0])();
+    const children = page.props.children;
+    assert.equal(children[0].type, 'iframe');
+    assert.equal(children.some(child => child?.type?.name === 'Conversation'), true);
+    const { ctx, registered, flush } = makeContext();
+    client.apply(ctx); flush();
+    assert.ok(registered.some(row => row.definition.name === 'sidebar.panellist'));
+    assert.ok(registered.some(row => row.definition.name === 'main'));
+  } finally {
+    if (prevConversation === undefined) delete globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__;
+    else globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = prevConversation;
+    if (prevPanel === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = prevPanel;
   }
 });
 

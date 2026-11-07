@@ -7,7 +7,7 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 
 ## 原生面板
 
-DSH 原生「图片编辑器」Conversation 面板默认隐藏，页面右下角悬浮助手保留。隐藏同时移除侧栏入口与本人授权入口；未授权会话的图片编辑工具会返回 `SESSION_BINDING_REQUIRED`，不会绕过授权直接改画布。恢复原生面板可在控制台设置 `globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true` 并刷新，或设置 `localStorage.setItem('dsh-media-image-panel', 'visible')`；隐藏可设为 `false` / `'hidden'`。
+DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里的原生 Conversation 默认隐藏，页面右下角悬浮助手保留。隐藏的只是对话子组件，不会移除侧栏插件入口、画布或本人授权入口。若要恢复红框对话，可设置 `globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true` 或 `localStorage.setItem('dsh-media-image-conversation', 'visible')` 并刷新；设为 `false` / `'hidden'` 可再次隐藏。旧开关 `__DSH_MEDIA_IMAGE_PANEL__` 不再控制插件侧栏，避免把整个插件误藏。
 
 
 ## 随包技能

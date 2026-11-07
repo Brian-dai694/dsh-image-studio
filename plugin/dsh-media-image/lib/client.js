@@ -1813,17 +1813,31 @@ window.__ModuleLoader__.load({
             ref: frameRef, src: entry.src, title: entry.label,
             style: { flex: 1, border: 0, display: 'block', minWidth: 0, minHeight: 0, background: '#f5f5f7' },
           }),
-          narrow ? null : React.createElement('div', {
+          nativeConversationEnabled() ? (narrow ? null : React.createElement('div', {
             role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '拖动调整对话宽度', title: '拖动调整对话宽度',
             onMouseDown: startDrag,
             style: { flex: '0 0 6px', cursor: 'col-resize', background: 'transparent', boxShadow: 'inset 1px 0 0 rgba(0,0,0,.08)' },
-          }),
-          React.createElement(Conversation, {
+          })) : null,
+          nativeConversationEnabled() ? React.createElement(Conversation, {
             label: entry.label, kind: 'image', frameRef: frameRef, getRemote: getRemote, getWorkspace: getWorkspace,
             active: props?.active !== false, width: width, narrow: narrow,
-          })
+          }) : null
         )
       }
+    }
+
+    // The editor sidebar/main pane stays registered. Only the red-box native
+    // Conversation component is hidden by default; the host-page floating assistant remains.
+    function nativeConversationEnabled() {
+      try {
+        if (typeof globalThis !== 'undefined' && typeof globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ === 'boolean') {
+          return globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__
+        }
+      } catch (_) { /* use persistent setting/default */ }
+      try {
+        if (typeof localStorage !== 'undefined') return localStorage.getItem('dsh-media-image-conversation') === 'visible'
+      } catch (_) { /* storage unavailable means hidden */ }
+      return false
     }
 
     // ---------- native tool cards (tool.call.toolview) ----------
@@ -2020,45 +2034,22 @@ window.__ModuleLoader__.load({
           if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 工具卡片注册失败：', toolName, String(error))
         }
       })
-      // 原生 Conversation 面板默认隐藏；宿主页右下角悬浮助手保留。
-      // 隐藏也会移除侧栏入口和“本人授权工程”入口；模型工具仍受会话绑定校验保护。
-      // 恢复原生面板：globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true 后刷新，或清除 localStorage 开关。
-      function panelEnabled() {
+      // 红框 Conversation 的显示由 nativeConversationEnabled() 单独控制。
+      // 左侧 DSH 插件入口和编辑器 main pane 始终注册，避免“隐藏对话框”把插件一起藏掉。
+      ENTRIES.forEach(function (entry, index) {
         try {
-          if (typeof globalThis !== 'undefined' && typeof globalThis.__DSH_MEDIA_IMAGE_PANEL__ === 'boolean') {
-            return globalThis.__DSH_MEDIA_IMAGE_PANEL__
-          }
-        } catch (_) { /* 使用持久设置 / 默认值 */ }
-        try {
-          if (typeof localStorage !== 'undefined') {
-            var saved = localStorage.getItem('dsh-media-image-panel')
-            if (saved === 'hidden') return false
-            if (saved === 'visible') return true
-          }
-        } catch (_) { /* 存储不可用时采用默认隐藏 */ }
-        return false
-      }
-
-      // forEach, not a `for (var i ...)`: `slots.inject` runs its factory later, so a
-      // function-scoped `entry` would leave both registrations pointing at the last entry.
-      if (panelEnabled()) {
-        ENTRIES.forEach(function (entry, index) {
-          try {
-            var offList = slots.inject(PANEL_LIST, function () {
-              return slots.register({ name: PANEL_LIST, id: entry.id, order: ORDER + index, label: entry.label }, makeEntry(entry, getLayout, navigation.enterEditor))
-            })
-            if (typeof offList === 'function') disposers.push(offList)
-            var offMain = slots.inject(MAIN, function () {
-              return slots.register({ name: MAIN, id: entry.id, key: entry.id, order: ORDER + index, inject: function () { return { remote: pick(ctx, 'remote'), remoteSession: pick(ctx, 'remote.session') } } }, anchorPage(entry))
-            })
-            if (typeof offMain === 'function') disposers.push(offMain)
-          } catch (error) {
-            if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 侧栏入口注册失败：', entry.id, String(error))
-          }
-        })
-      } else if (typeof console !== 'undefined' && console.info) {
-        console.info('[media-studio] 面板已按配置隐藏（侧栏与主区不注册）；工程授权入口随之关闭，工具卡片仍可用')
-      }
+          var offList = slots.inject(PANEL_LIST, function () {
+            return slots.register({ name: PANEL_LIST, id: entry.id, order: ORDER + index, label: entry.label }, makeEntry(entry, getLayout, navigation.enterEditor))
+          })
+          if (typeof offList === 'function') disposers.push(offList)
+          var offMain = slots.inject(MAIN, function () {
+            return slots.register({ name: MAIN, id: entry.id, key: entry.id, order: ORDER + index, inject: function () { return { remote: pick(ctx, 'remote'), remoteSession: pick(ctx, 'remote.session') } } }, anchorPage(entry))
+          })
+          if (typeof offMain === 'function') disposers.push(offMain)
+        } catch (error) {
+          if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 侧栏入口注册失败：', entry.id, String(error))
+        }
+      })
       return disposers.length > 0
     }
 
