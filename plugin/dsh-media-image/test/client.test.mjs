@@ -8,6 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+// 面板自 0.8.1 起默认隐藏（用户要求）。这些用例测的是面板代码本身，
+// 所以显式打开开关；"默认是关的"由文件末尾那条用例单独断言。
+globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
+
 const fakeReact = {
   useRef(value) { return { current: value }; },
   useState(value) {
@@ -1048,6 +1052,25 @@ test('locate 透传：合法原样保留，非法整体省略', async () => {
   // 视频侧的 clip/track 也在白名单里
   const track = client.chat.buildDialogPlan([{ id: 't3', role: 'tool', card: { name: '改轨道', status: 'applied', revision: 2, line: 'track.update' }, locate: { objectIds: ['video-track-1'], kind: 'track' } }]);
   assert.equal(track[0].locate.kind, 'track');
+});
+
+test('默认隐藏面板：不注册侧栏/主页面，但保留原生工具回执卡', async () => {
+  const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = false;
+  try {
+    const client = await loadClient();
+    const { ctx, registered, injected, flush } = makeContext();
+    client.apply(ctx);
+    flush();
+
+    assert.equal(registered.some(row => row.definition.name === 'sidebar.panellist'), false, '默认不注册侧栏入口');
+    assert.equal(registered.some(row => row.definition.name === 'main'), false, '默认不注册主页面');
+    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'), '工具回执卡必须仍注册');
+    assert.ok(injected.includes('shell.overlay'), '常驻编辑器保留机制不随面板开关误删');
+  } finally {
+    if (previous === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = previous;
+  }
 });
 
 test('错误行与工具回执用严格判定：短 JSON 也不会当正文渲染', async () => {

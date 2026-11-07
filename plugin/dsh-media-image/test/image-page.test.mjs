@@ -301,6 +301,24 @@ test('性能与状态契约：rAF 到终态停帧、列表增量更新、逐项�
   assert.match(css, /:focus-visible/, '必须有可见焦点环');
 });
 
+test('上传的图也能插入：最近可插入素材由生成/上传/导入共同更新（真 bug 回归）', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  // rememberAsset 必须同时写 knownAssets 与 lastAssetRef
+  const rememberIdx = code.indexOf('function rememberAsset');
+  assert.ok(rememberIdx > 0, '缺少 rememberAsset');
+  const rememberBody = code.slice(rememberIdx, rememberIdx + 420);
+  assert.match(rememberBody, /lastAssetRef = `asset:\$\{asset\.id\}`/, 'rememberAsset 必须更新最近可插入素材');
+  assert.match(rememberBody, /knownAssets\.unshift/, '同时要进列表');
+  // 上传与导入都必须经过 rememberAsset
+  assert.match(code, /uploadImageAsset\(file\)[\s\S]{0,200}?rememberAsset\(asset\)/, '上传后要登记为可插入素材');
+  assert.match(code, /assets\/import[\s\S]{0,200}?rememberAsset\(/, '导入后要登记为可插入素材');
+  // insert op 支持点名 assetRef
+  assert.match(code, /op\.assetRef/, 'insert op 要支持指定素材');
+  // 插入时用真实文件名，而不是写死一句"助手插入的图片"
+  assert.match(code, /nearestAssetName/, '插入名应取素材名');
+});
+
 test('packaged wrapper stays byte-identical to its source (no stale copy)', () => {
   // 这个坑真踩过：源码改了 highlight 转发，包内 public/image/host.js 还是旧副本，
   // 部署后页面行为与仓库对不上。两边必须逐字节相同。

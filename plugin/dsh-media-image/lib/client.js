@@ -2020,22 +2020,41 @@ window.__ModuleLoader__.load({
           if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 工具卡片注册失败：', toolName, String(error))
         }
       })
+      // 面板开关（2026-11-06 用户要求隐藏本面板）：
+      // 关掉后不再注册「侧栏入口 + 主区页面」，页面里改用悬浮助手；
+      // 但工具卡片（tool.call.toolview）照旧注册，原生会话里的工具回执不受影响。
+      // 代价必须写明：工程授权的入口就在这个面板上，关掉后模型侧工具会停在
+      // SESSION_BINDING_REQUIRED，直到重新打开面板并由本人点一次授权。
+      // 恢复方式：改下面的默认值，或在控制台 `__DSH_MEDIA_IMAGE_PANEL__ = true` 后刷新。
+      function panelEnabled() {
+        try {
+          if (typeof globalThis !== 'undefined' && typeof globalThis.__DSH_MEDIA_IMAGE_PANEL__ === 'boolean') {
+            return globalThis.__DSH_MEDIA_IMAGE_PANEL__
+          }
+        } catch (_) { /* 取不到就用默认值 */ }
+        return false
+      }
+
       // forEach, not a `for (var i ...)`: `slots.inject` runs its factory later, so a
       // function-scoped `entry` would leave both registrations pointing at the last entry.
-      ENTRIES.forEach(function (entry, index) {
-        try {
-          var offList = slots.inject(PANEL_LIST, function () {
-            return slots.register({ name: PANEL_LIST, id: entry.id, order: ORDER + index, label: entry.label }, makeEntry(entry, getLayout, navigation.enterEditor))
-          })
-          if (typeof offList === 'function') disposers.push(offList)
-          var offMain = slots.inject(MAIN, function () {
-            return slots.register({ name: MAIN, id: entry.id, key: entry.id, order: ORDER + index, inject: function () { return { remote: pick(ctx, 'remote'), remoteSession: pick(ctx, 'remote.session') } } }, anchorPage(entry))
-          })
-          if (typeof offMain === 'function') disposers.push(offMain)
-        } catch (error) {
-          if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 侧栏入口注册失败：', entry.id, String(error))
-        }
-      })
+      if (panelEnabled()) {
+        ENTRIES.forEach(function (entry, index) {
+          try {
+            var offList = slots.inject(PANEL_LIST, function () {
+              return slots.register({ name: PANEL_LIST, id: entry.id, order: ORDER + index, label: entry.label }, makeEntry(entry, getLayout, navigation.enterEditor))
+            })
+            if (typeof offList === 'function') disposers.push(offList)
+            var offMain = slots.inject(MAIN, function () {
+              return slots.register({ name: MAIN, id: entry.id, key: entry.id, order: ORDER + index, inject: function () { return { remote: pick(ctx, 'remote'), remoteSession: pick(ctx, 'remote.session') } } }, anchorPage(entry))
+            })
+            if (typeof offMain === 'function') disposers.push(offMain)
+          } catch (error) {
+            if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 侧栏入口注册失败：', entry.id, String(error))
+          }
+        })
+      } else if (typeof console !== 'undefined' && console.info) {
+        console.info('[media-studio] 面板已按配置隐藏（侧栏与主区不注册）；工程授权入口随之关闭，工具卡片仍可用')
+      }
       return disposers.length > 0
     }
 

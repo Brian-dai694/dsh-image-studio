@@ -318,10 +318,21 @@ function renderAssets() {
   }
 }
 
+// 最近一次「可插入」的素材 —— 生成 / 上传 / 导入 三者都写它。
+// 早先只有生成写，导致"上传完说插入图层"被判成没有素材（真 bug）。
+let lastAssetRef = '';
+
 function rememberAsset(asset) {
-  if (!asset?.id || knownAssets.some(item => item.id === asset.id)) return;
-  knownAssets.unshift(asset);
+  if (!asset?.id) return;
+  if (!knownAssets.some(item => item.id === asset.id)) knownAssets.unshift(asset);
+  lastAssetRef = `asset:${asset.id}`;
   renderAssets();
+}
+
+/** 最近可插入素材的显示名（上传的文件名 / 生成来源）。 */
+function nearestAssetName() {
+  const id = lastAssetRef.replace(/^asset:/, '');
+  return knownAssets.find(item => item.id === id)?.name || '助手插入的图片';
 }
 
 // ── 面板内直接插入图层 ──
@@ -771,6 +782,8 @@ async function assistContext() {
       layerList: state.layers.slice(0, 12).map(layer => ({ id: layer.id, name: layer.name, type: layer.type, visible: layer.visible })),
       hasSelection: !!(state.selection && state.selection.width > 0),
       lastAssetRef: lastAssetRef || null,
+      // 素材清单：模型要知道"手里有哪些图"，否则上传过的它也看不见。
+      assetList: knownAssets.slice(0, 5).map(item => ({ id: `asset:${item.id}`, name: item.name || 'image', bytes: item.bytes })),
     };
   } catch {
     return null;
@@ -853,9 +866,12 @@ async function execOps(ops) {
       continue;
     }
     if (op.type === 'insert') {
-      const match = /asset:([a-f0-9]{48})/.exec(lastAssetRef || '');
-      if (!match) { bubble('bot', '还没有可插入的结果：先让我生成或导入一张。'); continue; }
-      await insertAssetAsLayer({ id: match[1], name: '助手插入的图片' });
+      // 优先用模型点名的素材（上传/导入/生成都算），否则用最近一张。
+      const wanted = typeof op.assetRef === 'string' ? op.assetRef : lastAssetRef;
+      const match = /asset:([a-f0-9]{48})/.exec(wanted || '');
+      if (!match) { bubble('bot', '还没有可插入的素材：先「上传」一张，或让我生成一张。'); continue; }
+      const known = knownAssets.find(item => item.id === match[1]);
+      await insertAssetAsLayer({ id: match[1], name: known?.name || '助手插入的图片' });
       continue;
     }
     if (op.type === 'status') { await routeAssist('状态'); continue; }
@@ -1039,8 +1055,7 @@ const HELP = [
   '· 状态                      → 读一次编辑器：文档、版本、图层数',
 ].join('\n');
 
-// 最近一次生成的 assetRef —— 面板不再可见，状态由助手自己持有。
-let lastAssetRef = '';
+// 最近可插入素材的唯一指针在文件上方定义（生成/上传/导入都写它）。
 
 // 一句话 → 动作。返回给用户看的文本；失败要说清是哪个环节。
 async function routeAssist(raw) {
@@ -1074,9 +1089,9 @@ async function routeAssist(raw) {
   }
 
   if (/^(插入|落层|插入图层|放进去)/.test(text)) {
-    const match = /asset:([a-f0-9]{48})/.exec(lastAssetRef || $('gen-result')?.textContent || '');
-    if (!match) { say('还没有可插入的结果。先用「生成：…」出一张，或点「上传」。'); return; }
-    await insertAssetAsLayer({ id: match[1], name: '助手插入的图片' });
+    const match = /asset:([a-f0-9]{48})/.exec(lastAssetRef || '');
+    if (!match) { say('还没有可插入的素材。先「上传」一张，或说「生成：…」出一张。'); return; }
+    await insertAssetAsLayer({ id: match[1], name: nearestAssetName() });
     say('已发出插入请求，确认框里点「确认插入」才真正落层。');
     return;
   }

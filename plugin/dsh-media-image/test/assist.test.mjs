@@ -164,6 +164,31 @@ test('系统提示必须把白名单交给模型，并写死"只提议不执行"
   assert.ok(!PROPRIETABLE_COMMANDS.some(name => /shell|exec|eval/.test(name)), '白名单里不该出现任意执行类命令');
 });
 
+test('insert op 可指定 assetRef；格式不对就丢弃（上传的图也能被点名插入）', () => {
+  const named = parsePlan(JSON.stringify({ reply: '好', ops: [{ type: 'insert', assetRef: `asset:${'b'.repeat(48)}` }] }));
+  assert.equal(named.ops.length, 1);
+  assert.equal(named.ops[0].assetRef.length, 48 + 'asset:'.length);
+  assert.equal(parsePlan(JSON.stringify({ reply: '好', ops: [{ type: 'insert', assetRef: 'asset:zzz' }] })).ops.length, 0);
+  // 不带 assetRef 也合法（用最近的）
+  assert.equal(parsePlan(JSON.stringify({ reply: '好', ops: [{ type: 'insert' }] })).ops.length, 1);
+});
+
+test('上下文必须告诉模型"手里有哪些素材"，否则上传过的它也看不见', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [{ type: 'text-delta', text: '{"reply":"好","ops":[]}' }] });
+  await chatTurn(ctx, {
+    message: '把刚上传那张插入画布',
+    context: {
+      width: 640, height: 480, layers: 1, hasSelection: false,
+      lastAssetRef: `asset:${'c'.repeat(48)}`,
+      assetList: [{ id: `asset:${'c'.repeat(48)}`, name: '0A9A7668.JPG', bytes: 5945344 }],
+    },
+  });
+  const user = seen.streamArgs.messages[0].content[0].text;
+  assert.match(user, /已有素材/, '必须给出素材清单');
+  assert.match(user, /0A9A7668\.JPG/, '要带文件名，方便模型对应用户说的"刚上传那张"');
+  assert.match(user, /最近可插入素材/, '最近可插入素材要进提示词（上传后也算）');
+});
+
 test('HTTP /assist：GET 报状态、POST 转成 reply、无模型 503、非法体 400、鉴权 403', async () => {
   const token = 'assist-token';
   const caller = router => async ({ method = 'GET', url, headers = {}, body }) => {

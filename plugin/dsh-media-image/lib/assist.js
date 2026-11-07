@@ -22,7 +22,8 @@ ops 只允许这几种（不认识的不要编）：
 - {"type":"generate","prompt":"英文画面描述","width":1024,"height":1024}  生成一张图（会进素材库，不自动落到画布）
 - {"type":"batch","prompts":["英文画面描述","…"]}                        批量生成（并发 2）
 - {"type":"import","url":"https://…/a.png"}                            导入远程素材（禁用内网地址）
-- {"type":"insert"}                                                     把最近一次生成的图插成图层
+- {"type":"insert"}                                                     把最近可插入素材插成图层
+- {"type":"insert","assetRef":"asset:<48位十六进制>"}                   指定某个已有素材插成图层
 - {"type":"status"}                                                     读一次编辑器状态（版本/图层数/选区）
 - {"type":"fontList"}                                                   列出已登记字体
 - {"type":"command","command":{"type":"<命令名>","payload":{…}}}        提议一次画布编辑（用户确认后才执行）
@@ -106,6 +107,7 @@ function validOp(op) {
   if (op.type === 'generate') return typeof op.prompt === 'string' && op.prompt.trim().length > 0;
   if (op.type === 'batch') return Array.isArray(op.prompts) && op.prompts.length > 0;
   if (op.type === 'import') return typeof op.url === 'string' && /^https?:\/\//i.test(op.url);
+  if (op.type === 'insert') return op.assetRef === undefined || (typeof op.assetRef === 'string' && /^asset:[a-f0-9]{48}$/.test(op.assetRef));
   return true;
 }
 
@@ -144,8 +146,11 @@ export async function chatTurn(ctx, { message, history = [], context = null, tim
   const layerLine = Array.isArray(context?.layerList) && context.layerList.length
     ? `图层清单：${context.layerList.map(layer => `${layer.id}=${layer.name || layer.type}${layer.visible === false ? '(隐藏)' : ''}`).join(' / ')}。`
     : '';
+  const assetLine = Array.isArray(context?.assetList) && context.assetList.length
+    ? `已有素材：${context.assetList.map(item => `${item.id}(${item.name})`).join(' / ')}。`
+    : '';
   const contextLine = context
-    ? `画布：${context.width}×${context.height}；图层 ${context.layers} 个；有选区 ${context.hasSelection ? '是' : '否'}；最近结果 ${context.lastAssetRef || '无'}。${layerLine}`
+    ? `画布：${context.width}×${context.height}；图层 ${context.layers} 个；有选区 ${context.hasSelection ? '是' : '否'}；最近可插入素材 ${context.lastAssetRef || '无'}。${layerLine}${assetLine}`
     : '画布信息未知（页面还没连上编辑器）。';
   const historyLine = history.length
     ? `最近对话：${history.slice(-6).map(row => `${row.role === 'user' ? '用户' : '助手'}：${row.text}`).join(' / ')}`
