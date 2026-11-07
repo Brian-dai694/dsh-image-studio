@@ -5,16 +5,10 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 独立包：只注册图片入口（`dsh-media-image`），路由前缀 `/media-image`，
 工具表只含 `media_image_*`。与另一个编辑器包互不依赖，可单独安装。
 
-## 原生面板开关与授权
+## 原生面板
 
-原生「图片编辑器」面板默认隐藏（桌面浮层助手仍保留）。隐藏会同时移除面板里的“本人授权工程”入口：
+DSH 侧栏「图片编辑器」默认显示，用户可在原生会话中本人授权当前工程，之后图片编辑工具才能操作画布。若要隐藏，可在页面控制台执行 `globalThis.__DSH_MEDIA_IMAGE_PANEL__ = false` 并刷新，或设置 `localStorage.setItem('dsh-media-image-panel', 'hidden')`；恢复时删除该项或设为 `globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true` 后刷新。隐藏面板会一并隐藏本人授权入口，未授权会话的编辑工具会返回 `SESSION_BINDING_REQUIRED`；悬浮助手不受影响。
 
-- 尚未授权工程的会话，图片编辑工具会返回 `SESSION_BINDING_REQUIRED`。浮层助手仍可对话、生成、导入，但模型工具不会修改画布。
-- 恢复入口：在浏览器控制台执行 `globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true` 并重新加载页面；回到 DSH 侧栏「图片编辑器」，由本人绑定并授权工程。重新启动应用后恢复默认隐藏。
-- 已有授权是否有效取决于 Host 侧会话与授权票据；如需重新授权，必须由本人操作，Agent 不代点。
-- 原生工具卡片仍注册，宿主会话里的工具回执不受面板隐藏影响。
-
-此开关只控制客户端侧栏入口与 main 面板，不隐藏悬浮宿主页。
 
 ## 随包技能
 

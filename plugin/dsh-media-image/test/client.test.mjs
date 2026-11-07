@@ -8,8 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// 面板自 0.8.1 起默认隐藏（用户要求）。这些用例测的是面板代码本身，
-// 所以显式打开开关；"默认是关的"由文件末尾那条用例单独断言。
+// 注册契约用例默认测可见面板；单独用例会验证显式隐藏开关。
 globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
 
 const fakeReact = {
@@ -1054,22 +1053,64 @@ test('locate 透传：合法原样保留，非法整体省略', async () => {
   assert.equal(track[0].locate.kind, 'track');
 });
 
-test('默认隐藏面板：不注册侧栏/主页面，但保留原生工具回执卡', async () => {
+test('默认显示原生面板：侧栏入口/main 注册，工具回执卡也注册', async () => {
   const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
-  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = false;
+  const previousStorage = globalThis.localStorage;
+  delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  globalThis.localStorage = { getItem: () => null };
+  try {
+    const client = await loadClient();
+    const { ctx, registered, flush } = makeContext();
+    client.apply(ctx);
+    flush();
+    assert.ok(registered.some(row => row.definition.name === 'sidebar.panellist'), '默认应显示 DSH 侧栏入口');
+    assert.ok(registered.some(row => row.definition.name === 'main'), '默认应注册授权所在的 main 面板');
+    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'), '原生工具回执卡仍注册');
+  } finally {
+    if (previous === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = previous;
+    if (previousStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousStorage;
+  }
+});
+
+test('显式隐藏面板：不注册侧栏/main，但保留工具回执卡', async () => {
+  const previous = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  const previousStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: key => key === 'dsh-media-image-panel' ? 'hidden' : null };
   try {
     const client = await loadClient();
     const { ctx, registered, injected, flush } = makeContext();
     client.apply(ctx);
     flush();
-
-    assert.equal(registered.some(row => row.definition.name === 'sidebar.panellist'), false, '默认不注册侧栏入口');
-    assert.equal(registered.some(row => row.definition.name === 'main'), false, '默认不注册主页面');
-    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'), '工具回执卡必须仍注册');
-    assert.ok(injected.includes('shell.overlay'), '常驻编辑器保留机制不随面板开关误删');
+    assert.equal(registered.some(row => row.definition.name === 'sidebar.panellist'), false);
+    assert.equal(registered.some(row => row.definition.name === 'main'), false);
+    assert.ok(registered.some(row => row.definition.name === 'tool.call.toolview'));
+    assert.ok(injected.includes('shell.overlay'));
   } finally {
     if (previous === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
     else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = previous;
+    if (previousStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousStorage;
+  }
+});
+
+test('布尔全局开关优先于 localStorage 隐藏状态（支持控制台恢复）', async () => {
+  const prevPanel = globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+  const prevStorage = globalThis.localStorage;
+  globalThis.__DSH_MEDIA_IMAGE_PANEL__ = true;
+  globalThis.localStorage = { getItem: () => 'hidden' };
+  try {
+    const client = await loadClient();
+    const { ctx, registered, flush } = makeContext();
+    client.apply(ctx); flush();
+    assert.ok(registered.some(row => row.definition.name === 'sidebar.panellist'));
+  } finally {
+    if (prevPanel === undefined) delete globalThis.__DSH_MEDIA_IMAGE_PANEL__;
+    else globalThis.__DSH_MEDIA_IMAGE_PANEL__ = prevPanel;
+    if (prevStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = prevStorage;
   }
 });
 

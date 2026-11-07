@@ -2020,19 +2020,19 @@ window.__ModuleLoader__.load({
           if (typeof console !== 'undefined' && console.warn) console.warn('[media-studio] 工具卡片注册失败：', toolName, String(error))
         }
       })
-      // 面板开关（2026-11-06 用户要求隐藏本面板）：
-      // 关掉后不再注册「侧栏入口 + 主区页面」，页面里改用悬浮助手；
-      // 但工具卡片（tool.call.toolview）照旧注册，原生会话里的工具回执不受影响。
-      // 代价必须写明：工程授权的入口就在这个面板上，关掉后模型侧工具会停在
-      // SESSION_BINDING_REQUIRED，直到重新打开面板并由本人点一次授权。
-      // 恢复方式：改下面的默认值，或在控制台 `__DSH_MEDIA_IMAGE_PANEL__ = true` 后刷新。
+      // 原生面板默认显示，确保用户能在 DSH 侧栏看到“图片编辑器”并完成本人授权。
+      // 可选隐藏：globalThis.__DSH_MEDIA_IMAGE_PANEL__ = false，或 localStorage
+      // dsh-media-image-panel=hidden；恢复：改为 true / 删除该 localStorage 项并刷新。
       function panelEnabled() {
         try {
           if (typeof globalThis !== 'undefined' && typeof globalThis.__DSH_MEDIA_IMAGE_PANEL__ === 'boolean') {
             return globalThis.__DSH_MEDIA_IMAGE_PANEL__
           }
-        } catch (_) { /* 取不到就用默认值 */ }
-        return false
+        } catch (_) { /* 使用持久设置 / 默认值 */ }
+        try {
+          if (typeof localStorage !== 'undefined' && localStorage.getItem('dsh-media-image-panel') === 'hidden') return false
+        } catch (_) { /* 存储不可用时采用可见默认值 */ }
+        return true
       }
 
       // forEach, not a `for (var i ...)`: `slots.inject` runs its factory later, so a
