@@ -304,15 +304,13 @@ test('性能与状态契约：rAF 到终态停帧、列表增量更新、逐项�
 test('上传的图也能插入：最近可插入素材由生成/上传/导入共同更新（真 bug 回归）', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  // rememberAsset 必须同时写 knownAssets 与 lastAssetRef
-  const rememberIdx = code.indexOf('function rememberAsset');
-  assert.ok(rememberIdx > 0, '缺少 rememberAsset');
-  const rememberBody = code.slice(rememberIdx, rememberIdx + 420);
-  assert.match(rememberBody, /lastAssetRef = `asset:\$\{asset\.id\}`/, 'rememberAsset 必须更新最近可插入素材');
-  assert.match(rememberBody, /knownAssets\.unshift/, '同时要进列表');
-  // 上传与导入都必须经过 rememberAsset
-  assert.match(code, /uploadImageAsset\(file\)[\s\S]{0,200}?rememberAsset\(asset\)/, '上传后要登记为可插入素材');
-  assert.match(code, /assets\/import[\s\S]{0,200}?rememberAsset\(/, '导入后要登记为可插入素材');
+  assert.match(code, /function rememberAsset\(asset\)[\s\S]{0,180}?lastAssetRef = `asset:\$\{asset\.id\}`/, 'rememberAsset 必须更新最近可插入素材');
+  // aside 默认隐藏时 asset-list 不存在，renderAssets 只能跳过 UI，不能抛错/吞状态。
+  assert.match(code, /function renderAssets\(\)[\s\S]{0,160}?if \(!list\) return/, '无列表 DOM 时只跳过渲染');
+  assert.match(code, /uploadImageAsset\(file\)[\s\S]{0,220}?rememberAsset\(asset\)/, '助手上传后必须登记为最近可插入素材');
+  assert.match(code, /const value = await api\('\/media-image\/assets\/import'[\s\S]{0,240}?rememberAsset\(value\.asset\)/, '助手远程导入后必须登记素材');
+  assert.match(code, /const result = await insertAssetAsLayer\([\s\S]{0,180}?if \(result\?\.applied\)/, '必须等 apply_command 成功再报告已插入');
+  assert.match(code, /result\?\.cancelled \? '已取消，没有发送任何命令。'/, '取消不能误报已插入');
   // insert op 支持点名 assetRef
   assert.match(code, /op\.assetRef/, 'insert op 要支持指定素材');
   // 插入时用真实文件名，而不是写死一句"助手插入的图片"

@@ -285,6 +285,7 @@ function keyedRow(list, key, build) {
 
 function renderAssets() {
   const list = $('asset-list');
+  // 面板隐藏时没有列表 DOM，但素材状态仍必须记录，供助手“插入图层”使用。
   if (!list) return;
   toggleEmpty('asset-empty', 'asset-result', knownAssets.length > 0);
   for (const asset of knownAssets) {
@@ -362,7 +363,7 @@ function askConfirm({ title, details, maskAvailable }) {
 let lastInsert = null;
 
 async function insertAssetAsLayer(asset) {
-  if (!asset?.id) return;
+  if (!asset?.id) return { applied: false, error: 'NO_ASSET' };
   const statusEl = $('asset-status');
   try {
     const connection = await connect();
@@ -379,7 +380,7 @@ async function insertAssetAsLayer(asset) {
       ].join('\n'),
       maskAvailable,
     });
-    if (!answer.ok) { statusEl.textContent = '已取消，没有发送任何命令。'; return; }
+    if (!answer.ok) { statusEl.textContent = '已取消，没有发送任何命令。'; return { applied: false, cancelled: true }; }
 
     const params = { sourceRef, name: asset.name || '插入的素材' };
     if (answer.useMask) { params.maskRef = 'selection:'; }
@@ -397,14 +398,18 @@ async function insertAssetAsLayer(asset) {
     lastInsert = { commandId, revision: result?.revision, changed: result?.changedObjectIds || [] };
     statusEl.textContent = `已插入图层 · R${result?.revision}${answer.useMask ? '（带选区蒙版）' : ''}`;
     show(await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId }));
+    return { applied: true, revision: result?.revision, commandId };
   } catch (error) {
     const code = error.code || 'INSERT_FAILED';
     if (code === 'REVISION_CONFLICT') {
       statusEl.textContent = '工程已变化（REVISION_CONFLICT）：请重新点一次插入，会用最新 revision。';
+      return { applied: false, error: code };
     } else if (code === 'EDITOR_TIMEOUT_OUTCOME_UNKNOWN' || error.outcomeUnknown) {
       statusEl.textContent = `结果未知（${lastInsert?.commandId || '命令已发出'}）：不要重发，用该 commandId 查询结果。`;
+      return { applied: false, unknown: true, commandId: lastInsert?.commandId };
     } else {
       statusEl.textContent = `${code}：${error.message}`;
+      return { applied: false, error: code, message: error.message };
     }
   }
 }
@@ -1179,7 +1184,18 @@ async function sendAssist(raw) {
   assistBusy = true;
   if (assistSend) assistSend.disabled = true;
   try {
-    // 先走真实模型；只有"模型不可用"才退回本地指令（并明确告诉用户）。
+    // 明确的“插入图层”不需要让模型再猜一次：用最近上传/导入/生成的 asset，
+    // 仍经同一个显式确认框与 editor.apply_command，绝不绕过人机闸门。
+    if (/^(插入图层|插入|放到画布|把它放到画布上|落层)$/.test(text) && lastAssetRef) {
+      const assetId = lastAssetRef.slice('asset:'.length);
+      const asset = knownAssets.find(item => item.id === assetId);
+      const result = await insertAssetAsLayer({ id: assetId, name: asset?.name || '最近的图片' });
+      if (result?.applied) bubble('bot', `已插入「${asset?.name || '最近的图片'}」${result.revision ? ` · R${result.revision}` : ''}。`);
+      else bubble('bot', result?.cancelled ? '已取消，没有发送任何命令。' : '插入请求结束；看上一条状态说明处理结果。');
+      return;
+    }
+
+    // 先走真实模型；只有“模型不可用”才退回本地指令（并明确告诉用户）。
     const handled = await modelTurn(text);
     if (!handled) {
       const who = $('assist-who');
