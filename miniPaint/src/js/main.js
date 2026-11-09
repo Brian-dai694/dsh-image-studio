@@ -13,6 +13,10 @@ import './../css/print.css';
 import './../../node_modules/alertifyjs/build/css/alertify.min.css';
 // Loaded last: the Apple theme layer only overrides tokens and chrome, never markup.
 import './../css/apple-theme.css';
+// DSH 宿主主题映射（只改令牌，未收到宿主主题时不生效）
+import './../css/dsh-theme.css';
+import { installDshTheme } from './dsh-theme.js';
+installDshTheme();
 //js
 import app from './app.js';
 import config from './config.js';

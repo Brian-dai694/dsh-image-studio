@@ -9,6 +9,41 @@ const $ = id => document.getElementById(id);
 const show = value => { $('output').textContent = JSON.stringify(value, null, 2); };
 const fail = error => show({ code: error.code || 'UI_ERROR', message: error.message, ...(error.outcomeUnknown ? { outcomeUnknown: true } : {}) });
 
+// ── 宿主主题跟随 ────────────────────────────────────────────────────
+// DSH 面板把令牌值发到本页；本页自己上色，并转发给内嵌的编辑器 iframe。
+// 编辑器可能晚于消息加载，所以缓存最后一份，在 iframe load 时补发。
+let dshTheme = null;
+const THEME_FIELDS = { bg: '--dsh-bg', surface: '--dsh-surface', sunken: '--dsh-surface-sunken', text: '--dsh-text',
+  textMuted: '--dsh-text-muted', border: '--dsh-border', hover: '--dsh-hover', accent: '--dsh-accent', accentContrast: '--dsh-accent-contrast' };
+const COLOR_SHAPE = /^(#[0-9a-f]{3,8}|rgba?\([0-9.,%\s/]+\)|hsla?\([0-9.,%\s/deg]+\))$/i;
+
+function applyHostTheme(tokens) {
+  if (!tokens || typeof tokens !== 'object') return;
+  let applied = 0;
+  for (const [field, cssName] of Object.entries(THEME_FIELDS)) {
+    const value = tokens[field];
+    if (typeof value !== 'string' || value.length > 64 || !COLOR_SHAPE.test(value.trim())) continue;
+    document.documentElement.style.setProperty(cssName, value.trim());
+    applied += 1;
+  }
+  if (applied) document.documentElement.setAttribute('data-dsh-theme', String(tokens.mode || 'dsh'));
+}
+
+function forwardThemeToEditor() {
+  const frame = $('editor');
+  if (!dshTheme || !frame?.contentWindow) return;
+  frame.contentWindow.postMessage({ type: 'dsh.theme', tokens: dshTheme }, location.origin);
+}
+
+window.addEventListener('message', event => {
+  if (event.source !== window.parent || event.origin !== location.origin || event.data?.type !== 'dsh.theme') return;
+  dshTheme = event.data.tokens;
+  applyHostTheme(dshTheme);
+  forwardThemeToEditor();
+});
+
+window.addEventListener('load', () => { $('editor')?.addEventListener('load', forwardThemeToEditor); });
+
 window.addEventListener('message', async event => {
   if (event.source !== $('editor')?.contentWindow || event.origin !== location.origin || event.data?.type !== 'dsh.asset.token.request' || typeof event.data.requestId !== 'string') return;
   // 编辑器可能先于本页 boot() 就绪：先确保拿到令牌再应答，否则请求会被静默丢弃、编辑器 5 秒后超时。

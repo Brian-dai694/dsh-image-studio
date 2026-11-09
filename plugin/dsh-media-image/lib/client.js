@@ -1447,7 +1447,7 @@ window.__ModuleLoader__.load({
       // ---------- 对话框 v1 渲染 ----------
       // 统一 class + 一份 style，按钮三态与 focus ring 只在一处定义；色值全部来自 visual-spec。
       var DIALOG_CSS = [
-        '.dsh-media-btn{font:inherit;font-size:12.5px;border:0;border-radius:999px;padding:8px 14px;background:#f5f5f7;color:#0071e3;cursor:pointer;transition:transform 180ms ' + EASE + ',background-color 180ms ' + EASE + '}',
+        '.dsh-media-btn{font:inherit;font-size:12.5px;border:0;border-radius:999px;padding:8px 14px;background:var(--dsw-alias-bg-layer-2, #f5f5f7);color:var(--dsw-alias-state-business-primary, #0071e3);cursor:pointer;transition:transform 180ms ' + EASE + ',background-color 180ms ' + EASE + '}',
         '.dsh-media-btn:hover:not(:disabled){background:#ececf0}',
         '.dsh-media-btn:active:not(:disabled){transform:scale(.98)}',
         '.dsh-media-btn:focus-visible{outline:2px solid #0071e3;outline-offset:2px}',
@@ -1455,7 +1455,7 @@ window.__ModuleLoader__.load({
         '.dsh-media-btn-primary{background:#0071e3;color:#ffffff;font-weight:500}',
         '.dsh-media-btn-primary:hover:not(:disabled){background:#0066cc}',
         '.dsh-media-btn-primary:active:not(:disabled){transform:scale(.96)}',
-        '.dsh-media-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 10px;border-radius:999px;background:#f5f5f7;color:#1d1d1f;font-size:11px}',
+        '.dsh-media-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 10px;border-radius:999px;background:var(--dsw-alias-bg-layer-2, #f5f5f7);color:var(--dsw-alias-label-primary, #1d1d1f);font-size:11px}',
         '.dsh-media-chip-x{border:0;background:transparent;color:#6e6e73;cursor:pointer;border-radius:999px;width:18px;height:18px;line-height:1;padding:0}',
         '.dsh-media-chip-x:focus-visible{outline:2px solid #0071e3;outline-offset:1px}',
         '.dsh-media-skeleton{height:12px;border-radius:6px;background:linear-gradient(90deg,#f0f0f2,#f7f7f8,#f0f0f2);background-size:200% 100%;animation:dsh-media-shimmer 1.2s infinite linear}',
@@ -1528,7 +1528,7 @@ window.__ModuleLoader__.load({
       function blocks(items) {
         var React = require('react')
         return items.map(function (block, index) {
-          if (block.kind === 'code') return React.createElement('pre', { key: index, style: { margin: '6px 0 0', padding: 10, borderRadius: 10, background: '#f5f5f7', overflowX: 'auto', fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: 12, lineHeight: 1.5 } }, React.createElement('code', null, block.text))
+          if (block.kind === 'code') return React.createElement('pre', { key: index, style: { margin: '6px 0 0', padding: 10, borderRadius: 10, background: 'var(--dsw-alias-bg-layer-2, #f5f5f7)', overflowX: 'auto', fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace', fontSize: 12, lineHeight: 1.5 } }, React.createElement('code', null, block.text))
           if (block.kind === 'heading') return React.createElement('div', { key: index, style: { margin: '6px 0 0', fontWeight: 600, fontSize: block.level === 1 ? 15 : block.level === 2 ? 14 : 13 } }, inline(parseInlineTokens(block.text)))
           if (block.kind === 'list') return React.createElement(block.ordered ? 'ol' : 'ul', { key: index, style: { margin: '6px 0 0', paddingLeft: 18, display: 'grid', gap: 3 } },
             block.items.map(function (item, itemIndex) { return React.createElement('li', { key: itemIndex }, inline(parseInlineTokens(item))) }))
@@ -1586,7 +1586,7 @@ window.__ModuleLoader__.load({
         var React = require('react')
         if (item.kind === 'approval') {
           var approvalBadge = item.badge || 'pending'
-          return React.createElement('div', { key: item.key, style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f' } },
+          return React.createElement('div', { key: item.key, style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: 'var(--dsw-alias-bg-layer-1, #ffffff)', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f' } },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
               React.createElement('strong', { style: { fontWeight: 600 } }, item.title), badge(approvalBadge)),
             blocks(item.blocks), renderActions(item))
@@ -1605,7 +1605,7 @@ window.__ModuleLoader__.load({
           }
           return React.createElement('div', {
             key: item.key, ...locateProps,
-            style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: '#ffffff', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f', cursor: locate ? 'pointer' : 'default' },
+            style: { alignSelf: 'stretch', padding: '10px 12px', borderRadius: 14, background: 'var(--dsw-alias-bg-layer-1, #ffffff)', boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', fontSize: 12.5, lineHeight: 1.5, color: '#1d1d1f', cursor: locate ? 'pointer' : 'default' },
           },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
               React.createElement('strong', { style: { fontWeight: 600 } }, item.card.name), badge(item.badge),
@@ -1625,7 +1625,7 @@ window.__ModuleLoader__.load({
           style: {
             alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '86%',
             padding: '9px 12px', borderRadius: 14, fontSize: 13, lineHeight: 1.5,
-            background: mine ? '#0071e3' : '#f5f5f7', color: mine ? '#ffffff' : '#1d1d1f', wordBreak: 'break-word',
+            background: mine ? 'var(--dsw-alias-state-business-primary, #0071e3)' : 'var(--dsw-alias-bg-layer-2, #f5f5f7)', color: mine ? 'var(--dsw-alias-label-primary-inverted, #ffffff)' : 'var(--dsw-alias-label-primary, #1d1d1f)', wordBreak: 'break-word',
           },
         }, blocks(item.blocks),
         item.diagnostic ? btn({ label: '复制诊断信息', style: { marginTop: 8, background: 'rgba(255,255,255,.16)', color: mine ? '#ffffff' : '#0071e3' },
@@ -1643,7 +1643,7 @@ window.__ModuleLoader__.load({
       function emptyState() {
         var React = require('react')
         if (!bindingRef.current) {
-          return React.createElement('div', { style: { display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 14, background: '#f5f5f7' } },
+          return React.createElement('div', { style: { display: 'grid', gap: 8, padding: '10px 12px', borderRadius: 14, background: 'var(--dsw-alias-bg-layer-2, #f5f5f7)' } },
             React.createElement('strong', { style: { fontSize: 13 } }, '还没有绑定专属对话'),
             React.createElement('span', { style: { fontSize: 12, color: '#6e6e73' } }, '点顶部「绑定专属对话」把当前工程连接到会话；工程首次授权要本人到原生会话确认。'))
         }
@@ -1658,7 +1658,7 @@ window.__ModuleLoader__.load({
       function composer() {
         var React = require('react')
         var suggestions = suggestionsFor(selection?.selectedObjectIds, selection?.objectKind)
-        return React.createElement('div', { style: { padding: 12, boxShadow: 'inset 0 1px 0 rgba(0,0,0,.08)', background: '#ffffff' } },
+        return React.createElement('div', { style: { padding: 12, boxShadow: 'inset 0 1px 0 rgba(0,0,0,.08)', background: 'var(--dsw-alias-bg-layer-1, #ffffff)' } },
           suggestions.length ? React.createElement('div', { role: 'group', 'aria-label': '基于当前选中对象的建议', style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 } },
             suggestions.map(function (suggestion) {
               return btn({ key: suggestion.label, label: suggestion.label, style: { background: '#eef4ff' }, title: suggestion.prompt,
@@ -1678,7 +1678,7 @@ window.__ModuleLoader__.load({
             value: draft, disabled: !ready || busy, 'aria-label': '编辑指令', rows: 3,
             placeholder: ready ? '输入指令，Enter 发送，Shift+Enter 换行' : '先绑定专属对话',
             onChange: function (event) { setDraft(event.target.value) }, onKeyDown: onKeyDown,
-            style: { width: '100%', boxSizing: 'border-box', resize: 'none', padding: '10px 12px', border: '1px solid transparent', borderRadius: 10, background: '#f5f5f7', font: 'inherit', fontSize: 13, color: '#1d1d1f' },
+            style: { width: '100%', boxSizing: 'border-box', resize: 'none', padding: '10px 12px', border: '1px solid transparent', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-2, #f5f5f7)', font: 'inherit', fontSize: 13, color: '#1d1d1f' },
           }),
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
             React.createElement('input', { ref: fileRef, type: 'file', accept: 'image/png,image/jpeg,image/webp', multiple: true, style: { display: 'none' }, onChange: pickFiles }),
@@ -1694,24 +1694,24 @@ window.__ModuleLoader__.load({
         style: {
           width: props.narrow ? '100%' : (props.width || 340), flex: props.narrow ? '0 0 auto' : '0 0 ' + (props.width || 340) + 'px',
           height: props.narrow ? '42vh' : 'auto', display: 'flex', flexDirection: 'column', minHeight: 0,
-          background: '#ffffff', boxShadow: props.narrow ? 'inset 0 1px 0 rgba(0,0,0,.08)' : 'inset 1px 0 0 rgba(0,0,0,.08)',
+          background: 'var(--dsw-alias-bg-layer-1, #ffffff)', boxShadow: props.narrow ? 'inset 0 1px 0 rgba(0,0,0,.08)' : 'inset 1px 0 0 rgba(0,0,0,.08)',
         },
       },
       React.createElement('div', {
         style: { padding: '14px 16px 10px', fontSize: 12, letterSpacing: '.02em', color: '#6e6e73', boxShadow: 'inset 0 -1px 0 rgba(0,0,0,.08)' },
       }, '对话 · ' + props.label, React.createElement('button', { type: 'button', className: 'dsh-media-btn', disabled: busy, onClick: function () { void bind() }, style: { marginLeft: 12 } }, '绑定专属对话'), React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: status.indexOf('未') === 0 ? '#ff3b30' : '#6e6e73' } }, status),
-      choices ? React.createElement('div', { role: 'listbox', 'aria-label': '可挂接的会话', style: { marginTop: 8, display: 'grid', gap: 6, padding: 8, borderRadius: 12, background: '#f5f5f7' } },
+      choices ? React.createElement('div', { role: 'listbox', 'aria-label': '可挂接的会话', style: { marginTop: 8, display: 'grid', gap: 6, padding: 8, borderRadius: 12, background: 'var(--dsw-alias-bg-layer-2, #f5f5f7)' } },
         choices.error ? React.createElement('div', { role: 'status', style: { fontSize: 11.5, color: '#ff3b30' } }, choices.error) : null,
         choices.matched.map(function (item) {
           var notes = sessionAnnotations(item)
-          return btn({ key: item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
+          return btn({ key: item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: 'var(--dsw-alias-bg-layer-1, #ffffff)' }, onClick: function () { void bindSession(item.sessionId) } })
         }),
         !choices.error && !choices.matched.length ? React.createElement('div', { style: { fontSize: 11.5, color: '#6e6e73' } }, '没有与本工程匹配的历史会话。') : null,
         choices.others.length ? btn({ label: showAll ? '隐藏其他会话' : '显示全部会话（仅供诊断）', onClick: function () { setShowAll(!showAll) } }) : null,
         showAll && choices.others.length ? React.createElement('div', { role: 'note', style: { fontSize: 11, color: '#ff3b30', lineHeight: 1.5 } }, '下面是与本工程无关的会话，仅供诊断；默认不展示，以免暴露本实例其他会话的标题。') : null,
         showAll ? choices.others.map(function (item) {
           var notes = sessionAnnotations(item)
-          return btn({ key: 'other-' + item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: '#ffffff' }, onClick: function () { void bindSession(item.sessionId) } })
+          return btn({ key: 'other-' + item.sessionId, label: (item.title || '未命名会话') + (notes.length ? ' · ' + notes.join(' · ') : ''), style: { textAlign: 'left', background: 'var(--dsw-alias-bg-layer-1, #ffffff)' }, onClick: function () { void bindSession(item.sessionId) } })
         }) : null,
         btn({ label: '＋ 新建专属会话', variant: 'primary', onClick: function () { void bindSession(null) } })) : null),
       React.createElement('div', {
@@ -1731,7 +1731,7 @@ window.__ModuleLoader__.load({
       React.createElement('div', {
         role: 'region', 'aria-label': '工程授权',
         'data-authorization': authView.code,
-        style: { margin: '0 16px 10px', padding: '10px 12px', borderRadius: 14, background: '#f5f5f7' },
+        style: { margin: '0 16px 10px', padding: '10px 12px', borderRadius: 14, background: 'var(--dsw-alias-bg-layer-2, #f5f5f7)' },
       },
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
           React.createElement('strong', { style: { fontSize: 12.5, fontWeight: 600, color: '#1d1d1f' } }, '工程授权'),
@@ -1807,11 +1807,12 @@ window.__ModuleLoader__.load({
           window.addEventListener('mouseup', end)
         }
         return React.createElement('div', {
-          style: { display: 'flex', flexDirection: narrow ? 'column' : 'row', height: '100%', minHeight: 0, background: '#f5f5f7' },
+          style: { display: 'flex', flexDirection: narrow ? 'column' : 'row', height: '100%', minHeight: 0, background: 'var(--dsw-alias-bg-l1, #f5f5f7)' },
         },
           React.createElement('iframe', {
             ref: frameRef, src: entry.src, title: entry.label,
-            style: { flex: 1, border: 0, display: 'block', minWidth: 0, minHeight: 0, background: '#f5f5f7' },
+            onLoad: event => watchDshTheme(event.currentTarget),
+            style: { flex: 1, border: 0, display: 'block', minWidth: 0, minHeight: 0, background: 'var(--dsw-alias-bg-l1, #f5f5f7)' },
           }),
           nativeConversationEnabled() ? (narrow ? null : React.createElement('div', {
             role: 'separator', 'aria-orientation': 'vertical', 'aria-label': '拖动调整对话宽度', title: '拖动调整对话宽度',
@@ -1823,6 +1824,54 @@ window.__ModuleLoader__.load({
             active: props?.active !== false, width: width, narrow: narrow,
           }) : null
         )
+      }
+    }
+
+
+    // 直接读宿主挂在 :root 上的 --dsw-alias-* 令牌（浅色/深色都由宿主算好），
+    // 再推给内嵌页面；不猜色值，也不破坏没有这些令牌的宿主（回退为空串，页面用自己的兜底）。
+    function readDshTheme() {
+      const style = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null
+      const value = name => (style ? String(style.getPropertyValue(name) || '').trim() : '')
+      const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches
+      return {
+        mode: document.documentElement.getAttribute('data-theme') || (prefersDark ? 'dark' : 'light'),
+        bg: value('--dsw-alias-bg-base') || value('--dsw-alias-bg-l1'),
+        surface: value('--dsw-alias-bg-layer-1') || value('--dsw-alias-bg-l2'),
+        sunken: value('--dsw-alias-bg-layer-2') || value('--dsw-alias-bg-base'),
+        text: value('--dsw-alias-label-primary'),
+        textMuted: value('--dsw-alias-label-caption') || value('--dsw-alias-label-secondary'),
+        border: value('--dsw-alias-border-l1'),
+        hover: value('--dsw-alias-interactive-bg-hover'),
+        accent: value('--dsw-alias-state-business-primary'),
+        accentContrast: value('--dsw-alias-label-primary-inverted'),
+      }
+    }
+
+    function pushThemeToFrame(frame) {
+      const tokens = readDshTheme()
+      const any = Object.keys(tokens).some(key => key !== 'mode' && tokens[key])
+      if (!any || !frame?.contentWindow) return
+      try { frame.contentWindow.postMessage({ type: 'dsh.theme', tokens }, location.origin) } catch (_) { /* 跨源或未就绪 */ }
+    }
+
+    // 主题变化时重推：宿主切浅/深色会改 :root 的属性或类名，媒体查询也要跟着。
+    const themeWatchers = []
+    function watchDshTheme(frame) {
+      const push = () => pushThemeToFrame(frame)
+      push()
+      if (typeof MutationObserver === 'function') {
+        const observer = new MutationObserver(push)
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'class', 'style'] })
+        themeWatchers.push(() => observer.disconnect())
+      }
+      if (typeof matchMedia === 'function') {
+        const media = matchMedia('(prefers-color-scheme: dark)')
+        const onChange = () => push()
+        if (typeof media.addEventListener === 'function') {
+          media.addEventListener('change', onChange)
+          themeWatchers.push(() => media.removeEventListener('change', onChange))
+        }
       }
     }
 
@@ -1919,7 +1968,7 @@ window.__ModuleLoader__.load({
         var card = toolViewCard(toolName, props)
         var tone = card.failed ? '#ff3b30' : card.status === 'applied' ? '#1d7a3c' : '#6e6e73'
         return React.createElement('div', {
-          style: { padding: '10px 12px', borderRadius: 14, background: '#ffffff', fontSize: 12.5, lineHeight: 1.5,
+          style: { padding: '10px 12px', borderRadius: 14, background: 'var(--dsw-alias-bg-layer-1, #ffffff)', fontSize: 12.5, lineHeight: 1.5,
             boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.08)', color: '#1d1d1f', maxWidth: 520 },
         },
           React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },

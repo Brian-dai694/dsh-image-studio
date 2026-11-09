@@ -82,6 +82,27 @@ test('同一调用失败两次后熔断：第三次直接拒绝，换参数才�
   assert.equal(attempts, 3);
 });
 
+test('插件背景跟随 DSH 主题：面板读宿主令牌、页面转发并校验颜色形状', async () => {
+  const client = readFileSync(resolve(pluginRoot, 'lib/client.js'), 'utf8');
+  const host = readFileSync(resolve(pluginRoot, 'public/image/host.js'), 'utf8');
+  // 面板：读宿主 --dsw-alias-* 令牌，不再写死灰底
+  assert.match(client, /--dsw-alias-bg-base/, '面板必须读宿主背景令牌');
+  assert.match(client, /--dsw-alias-label-primary/, '面板必须读宿主文字令牌');
+  assert.match(client, /dsw-alias-bg-l1, #f5f5f7/, '容器背景要用宿主变量并保留兜底');
+  assert.equal(/background: '#f5f5f7'/.test(client), false, '不能再写死 #f5f5f7');
+  assert.match(client, /pushThemeToFrame/, '必须把主题推给内嵌页面');
+  assert.match(client, /MutationObserver/, '主题切换要跟着宿主变化重推');
+  // 页面：接收后校验并转发
+  assert.match(host, /dsh\.theme/, '宿主页面必须接收主题消息');
+  assert.match(host, /COLOR_SHAPE/, '主题值必须做形状校验，不能直接塞进 style');
+  assert.match(host, /forwardThemeToEditor/, '必须转发给内嵌编辑器');
+  assert.match(host, /addEventListener\('load', forwardThemeToEditor\)/, '编辑器晚加载时要补发主题');
+  // 编辑器侧：CSS 映射层存在且以 data 属性为开关
+  const css = readFileSync(resolve(pluginRoot, '../../miniPaint/src/css/dsh-theme.css'), 'utf8');
+  assert.match(css, /html\[data-dsh-theme\]/, '未收到宿主主题时整层不生效');
+  assert.match(css, /--background: var\(--dsh-bg\)/, '编辑器自己的令牌要被映射');
+});
+
 test('套版文字命令带槽宽 meta，且 meta 不进入 payload（否则会被白名单拒）', async () => {
   const template = { canvas: { width: 400, height: 200 }, slots: [
     { id: 'slot-1', name: '标题', type: 'text', rect: { x: 10, y: 10, width: 120, height: 30 }, visible: true, text: '一个很长的标题文案', fontSize: 40 },

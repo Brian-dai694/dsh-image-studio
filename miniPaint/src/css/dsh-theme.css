@@ -1,0 +1,77 @@
+/*
+ * DSH 主题桥接层：让编辑器外观跟随宿主（浅色/深色/品牌色）。
+ *
+ * 原则：
+ * 1) 这里只做「宿主令牌 → 编辑器变量」的映射，不改任何 DOM 结构与交互；
+ * 2) 值由宿主页面通过 postMessage 传进来（见 dsh.theme），没收到时回退到本文件的浅色兜底；
+ * 3) 未加 data-dsh-theme 属性时整层不生效，保持原有外观，避免影响别的宿主。
+ */
+
+:root {
+	/* 兜底值取 DSH 浅色档（--dsw-alias-bg-base / bg-l1 / label-primary 等） */
+	--dsh-bg: #ffffff;
+	--dsh-surface: #ffffff;
+	--dsh-surface-sunken: #f9fafb;
+	--dsh-text: #1d1d1f;
+	--dsh-text-muted: #6e6e73;
+	--dsh-border: rgba(0, 0, 0, 0.08);
+	--dsh-hover: rgba(0, 0, 0, 0.04);
+	--dsh-accent: #4176e6;
+	--dsh-accent-contrast: #ffffff;
+}
+
+html[data-dsh-theme] {
+	--background: var(--dsh-bg);
+	--area-background-color: var(--dsh-bg);
+	--section-background-color: var(--dsh-surface);
+	--block-background-color: var(--dsh-surface);
+	--header-background-color: var(--dsh-surface);
+	--menu-background-color: var(--dsh-surface);
+	--menu-dropdown-background-color: var(--dsh-surface);
+	--button-background-color: var(--dsh-surface-sunken);
+	--button-background-color-hover: var(--dsh-hover);
+	--input-background-color: var(--dsh-surface-sunken);
+	--input-background-color-hover: var(--dsh-hover);
+	--scrollbar-track-color: var(--dsh-bg);
+	--text-color: var(--dsh-text);
+	--text-color-muted: var(--dsh-text-muted);
+	--menu-text-color: var(--dsh-text);
+	--menu-dropdown-text-color: var(--dsh-text);
+	--menu-dropdown-text-muted-color: var(--dsh-text-muted);
+	--input-text-color: var(--dsh-text);
+	--border-color: var(--dsh-border);
+	--menu-dropdown-border-color: var(--dsh-border);
+	--menu-dropdown-divider-color: var(--dsh-border);
+	--apple-hairline: var(--dsh-border);
+	--link-color: var(--dsh-accent);
+	--text-color-blue: var(--dsh-accent);
+	--input-border-color-active: var(--dsh-accent);
+	--apple-accent: var(--dsh-accent);
+	--background-color-active: var(--dsh-accent);
+}
+
+/* 画布外的空白（左右工具栏与画布之间的地带）也跟着走，避免深色模式下露白底 */
+html[data-dsh-theme],
+html[data-dsh-theme] body {
+	background: var(--dsh-bg);
+	color: var(--dsh-text);
+}
+
+html[data-dsh-theme] #main_container,
+html[data-dsh-theme] .wrapper,
+html[data-dsh-theme] #canvas_minipaint {
+	background: var(--dsh-bg);
+}
+
+html[data-dsh-theme] .sidebar_left,
+html[data-dsh-theme] .sidebar_right,
+html[data-dsh-theme] .menu,
+html[data-dsh-theme] .block {
+	background: var(--dsh-surface);
+	color: var(--dsh-text);
+}
+
+html[data-dsh-theme] .block h2 {
+	color: var(--dsh-text);
+	border-color: var(--dsh-border);
+}
