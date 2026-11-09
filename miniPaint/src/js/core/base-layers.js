@@ -370,6 +370,59 @@ class Base_layers_class {
 	render_object(ctx, object, is_preview) {
 		if (object.visible == false || object.type == null) return;
 
+		// 被别的图层当作蒙版的图层，本身不参与显示（它只是数据，不是画面内容）。
+		if (!this._dshRenderingMaskContent && this._dshMaskSourceIds && this._dshMaskSourceIds.has(String(object.id))) {
+			return;
+		}
+
+		// dshMask：图层的活蒙版。先把这一层画到临时画布，再用蒙版层的 alpha 逐像素相乘，
+		// 最后合成到主画布——"改蒙版层 → 结果跟着变"，而不是把蒙版烤死在像素里。
+		if (object.params && object.params.dshMask && !object._dshMaskRendering) {
+			const mask_layer = this.get_layer(object.params.dshMask.sourceLayerId);
+			// 蒙版层被隐藏 = 不做遮罩（而不是把整层抹掉）。
+			if (mask_layer && mask_layer.visible !== false) {
+				const ox = Math.round(object.x || 0);
+				const oy = Math.round(object.y || 0);
+				const box_w = Math.max(1, Math.round(object.width || config.WIDTH));
+				const box_h = Math.max(1, Math.round(object.height || config.HEIGHT));
+				const paint = (target, item, asMask) => {
+					const tctx = target.getContext("2d");
+					tctx.save();
+					tctx.translate(-ox, -oy);
+					if (asMask) this._dshRenderingMaskContent = true;
+					else object._dshMaskRendering = true;
+					try { this.render_object(tctx, item, is_preview); }
+					finally {
+						if (asMask) this._dshRenderingMaskContent = false;
+						else object._dshMaskRendering = false;
+					}
+					tctx.restore();
+				};
+				const layer_canvas = document.createElement("canvas");
+				layer_canvas.width = box_w; layer_canvas.height = box_h;
+				paint(layer_canvas, object, false);
+				const mask_canvas = document.createElement("canvas");
+				mask_canvas.width = box_w; mask_canvas.height = box_h;
+				paint(mask_canvas, mask_layer, true);
+				const layer_ctx = layer_canvas.getContext("2d");
+				const mask_pixels = mask_canvas.getContext("2d").getImageData(0, 0, box_w, box_h).data;
+				const layer_image = layer_ctx.getImageData(0, 0, box_w, box_h);
+				const pixels = layer_image.data;
+				const invert = object.params.dshMask.invert === true;
+				for (let i = 3; i < pixels.length; i += 4) {
+					const alpha = mask_pixels[i] / 255;
+					pixels[i] = Math.round(pixels[i] * (invert ? 1 - alpha : alpha));
+				}
+				layer_ctx.putImageData(layer_image, 0, 0);
+				ctx.save();
+				ctx.globalCompositeOperation = object.composition || "source-over";
+				ctx.globalAlpha = (object.opacity ?? 100) / 100;
+				ctx.drawImage(layer_canvas, ox, oy);
+				ctx.restore();
+				return;
+			}
+		}
+
 		this.pre_render_object(ctx, object);
 
 		//example with canvas object - other types should overwrite this method
@@ -740,6 +793,10 @@ class Base_layers_class {
 	convert_layers_to_canvas(ctx, layer_id = null, is_preview = true) {
 		const newCanvas = this.create_new_canvas(ctx);
 		const layers_sorted = this.get_sorted_layers();
+		// 记住哪些图层被当作蒙版使用：它们只是数据，不该自己画出来。
+		this._dshMaskSourceIds = new Set(
+			layers_sorted.filter(item => item.params && item.params.dshMask).map(item => String(item.params.dshMask.sourceLayerId))
+		);
 		this.render_objects(ctx, newCanvas, layers_sorted, ()=>{
 			ctx.save();
 		}, (value) => {

@@ -284,6 +284,45 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     }
   });
 
+  await test('layer.add_image with maskRef layer:<id> binds a LIVE mask, not baked pixels', async () => {
+    // 自造一张带 alpha 的蒙版层：alpha 通道白/黑各半
+    const maskSource = { width: 2, height: 2, data: new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255]) };
+    const maskLayer = { id: 'live-mask', name: 'live-mask', type: 'image', x: 0, y: 0, width: 2, height: 2, visible: true,
+      link: maskSource, params: {}, data: null, order: config.layers.length };
+    config.layers.push(maskLayer);
+    // 前面的用例直接动过 app.State，先读一次让桥接的 revision 与实际状态对齐。
+    await bridge.handleRequest({ type: 'editor.read_state', requestId: `request-${++id}`, editorInstanceId: bridge.editorInstanceId }, { postMessage() {} });
+    const previousImage = context.Image;
+    context.Image = class {
+      constructor() { this.naturalWidth = 2; this.naturalHeight = 2; }
+      set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); }
+    };
+    let maskBakes = 0;
+    const originalApply = bridge.applyMaskToCanvas.bind(bridge);
+    bridge.applyMaskToCanvas = async (...args) => { maskBakes += 1; return originalApply(...args); };
+    try {
+      const result = await send({ type: 'layer.add_image', payload: { sourceRef: 'data:image/png;base64,iVBORw0KGgo=', x: 0, y: 0, width: 2, height: 2, fit: 'stretch', name: 'live-masked', maskRef: 'layer:live-mask' } });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      const created = config.layers.find(l => l.name === 'live-masked');
+      assert.ok(created, '图层应被插入');
+      assert.equal(created.params?.dshMask?.sourceLayerId, 'live-mask', '必须绑定活蒙版');
+      assert.equal(maskBakes, 0, '活蒙版不该烤进像素');
+      const state = bridge.readState();
+      const view = state.layers.find(l => l.name === 'live-masked');
+      assert.equal(view.mask?.sourceLayerId, 'live-mask', 'read_state 要报出绑定的蒙版');
+      assert.equal(view.mask?.editable, true);
+    } finally {
+      bridge.applyMaskToCanvas = originalApply;
+      context.Image = previousImage;
+      // 用完移除临时图层，免得影响后面依赖图层顺序的用例。
+      for (const name of ['live-masked', 'live-mask']) {
+        const index = config.layers.findIndex(item => item.name === name);
+        if (index >= 0) config.layers.splice(index, 1);
+      }
+      if (typeof bridge.refreshRevision === 'function') bridge.refreshRevision();
+    }
+  });
+
   await test('mask binding survives native undo/redo and composition reads the edited mask', async () => {
     const previousImage = context.Image;
     const previousOps = context.globalThis.__dshPixelOps;

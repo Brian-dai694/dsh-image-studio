@@ -1132,10 +1132,17 @@ export class DshEditorBridge {
           height = Math.max(height, Math.round(decoded.height * scale));
         }
       }
-      const canvas = maskSpec ? await this.applyMaskToCanvas(decoded, maskSpec) : null;
+      // layer:<id> 绑定成**活蒙版**（params.dshMask）：合成时读蒙版层，之后你改蒙版层结果就跟着变。
+      // 其它来源（selection:/asset:/data:/maskRect）没有可编辑对象，只能烤进像素。
+      const liveMaskSource = (maskSpec && typeof maskSpec.ref === 'string' && maskSpec.ref.startsWith('layer:'))
+        ? maskSpec.ref.slice('layer:'.length).trim() : null;
+      const canvas = (maskSpec && !liveMaskSource) ? await this.applyMaskToCanvas(decoded, maskSpec) : null;
       // 无蒙版时透传原始 dataUrl，避免对大图做无谓的二次编解码；只有真改了像素才重编码。
       const data = canvas ? canvas.toDataURL('image/png') : (decoded.dataUrl || decoded.canvas.toDataURL('image/png'));
       const layer = { name, type: 'image', data, x, y, width, height, width_original: width, height_original: height, visible: true, opacity: 100, rotate: 0 };
+      if (liveMaskSource) {
+        layer.params = { dshMask: { sourceLayerId: liveMaskSource, mode: maskSpec.mode, invert: maskSpec.invert, featherPx: maskSpec.featherPx } };
+      }
       const action = new app.Actions.Insert_layer_action(layer, false);
       return { action, ids: () => [String(action.inserted_layer_id)] };
     }
