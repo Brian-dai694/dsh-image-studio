@@ -52,7 +52,8 @@ export function apply(ctx, config = {}) {
     allowedTypes: EDITOR_REQUEST_TYPES,
   });
   const bridge = createMediaBridge({ relay, editorKind: 'image' });
-  const assets = createAssetStore();
+  // 配置了 dataDir 就把素材落盘：重启后素材还在；没配置则保持纯内存（临时语义）。
+  const assets = createAssetStore({ dir: config.dataDir ? join(resolve(config.dataDir), 'assets') : null });
   const fonts = createFontStore();
   // 配置错误不能让整个插件起不来：坏 provider 被跳过并记一行警告，其余功能照常。
   let generation = null;
