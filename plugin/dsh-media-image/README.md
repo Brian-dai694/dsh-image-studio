@@ -39,6 +39,20 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 已知边界：批量固定使用同一商品槽与同一套文案（每份可用 `texts` 覆盖）；不同槽位的批量尚未支持。
 
+## 命令目录（给调用方的前置知识）
+
+`media_image_list_commands` 只读、不写画布，返回每条白名单命令的：
+
+| 字段 | 含义 |
+|---|---|
+| `id` / `params` | 命令名与参数契约（与 `bridge.js` 白名单同源，测试逐条核对不漂移） |
+| `needs` | 前提：`none` / `layer` / `text` / `image` / `history` |
+| `highRisk` | 是否需要人工审批（`layer.remove` / `canvas.crop` / `layer.add_image`） |
+| `enabled` / `disabledReason` | 现在能不能用；不能时的原因如 `no-document`、`no-selected-layer`、`selected-layer-is-text-not-image` |
+
+编辑器读不到时 `enabled` 一律是 `null` 并附 `stateUnavailable`——如实说"不知道"，不假装可用。
+配合它还有一处改进：把命令名写错时（`UNSUPPORTED_COMMAND`），错误里会带最多 3 个近似名与 `media_image_list_commands` 的指引，不再只回一句"不在白名单里"。
+
 ## 文字先量再画
 
 套版放置文字前会先用 `editor.measure_text` 量一次（不绘制、不推进 revision），把字号二分收缩到槽宽内；缩到 8px 仍放不下时如实报告，不静默溢出。回执会写「文字按槽宽收缩：40→22px」，排版失败也会列出来。

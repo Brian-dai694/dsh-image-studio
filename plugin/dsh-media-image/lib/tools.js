@@ -2,6 +2,7 @@
 // Parameters are the 0.2.x schema DSL (property table), not raw JSON Schema.
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { MediaBridgeError } from './bridge.js';
+import { describeCommands, summarize, suggestOperation } from './commands.js';
 import {
   HIGH_RISK_OPERATIONS, digestOf, requestHumanApproval, createSessionBindings, trustedSessionId, APPROVAL_WAIT_MS,
 } from './gate.js';
@@ -50,6 +51,15 @@ const RESULT_SCHEMA = {
     },
     // 未授权时给模型的一句下一步（去面板点授权 / 去原生会话批准）。
     hint: { type: 'string' },
+    // 命令目录（media_image_list_commands）：每条命令的契约与当前就绪度。
+    commands: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    context: { type: 'object', additionalProperties: true },
+    counts: { type: 'object', additionalProperties: true },
+    stateUnavailable: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { code: { type: 'string' }, message: { type: 'string' } },
+    },
     state: { type: 'json' },
     error: {
       type: 'object',
@@ -203,10 +213,14 @@ const presentationMeta = (args, value) => ({
 
 const envelope = (kind, extra) => ({ status: 'rejected', commandId: 'unknown', editorKind: kind, ...extra });
 
-function failure(kind, commandId, error) {
+function failure(kind, commandId, error, context = {}) {
   const code = error?.code || 'EDITOR_ERROR';
+  // 命令名写错是最常见的失败（名字长、点号多）：给出近似名，别让调用方反复试。
+  const suggestions = code === 'UNSUPPORTED_COMMAND' && context.operation ? suggestOperation(context.operation) : [];
   // 未授权必须说清楚怎么授权，且不能和「编辑器未就绪」混在一起。
-  const hint = code === 'SESSION_BINDING_REQUIRED'
+  const hint = code === 'UNSUPPORTED_COMMAND' && suggestions.length
+    ? `未知命令 ${String(context.operation ?? '')}。相近的有：${suggestions.join('、')}；完整目录见 media_image_list_commands。`
+    : code === 'SESSION_BINDING_REQUIRED'
     ? '请本人在编辑器面板点“授权此会话读写本工程”（不依赖宿主审批；票据 5 分钟一次性）。'
     : code === 'SESSION_APPROVAL_UNAVAILABLE'
       ? '宿主审批不可用（策略可能是 never，这不是你拒绝了）。请改用编辑器面板的“授权此会话读写本工程”。'
@@ -463,7 +477,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     } catch (error) {
       // 只有真的失败才计数；成功一次就把该参数组合的计数清零。
       repeatedFailures.set(failKey, (repeatedFailures.get(failKey) || 0) + 1);
-      return failure(kind, commandId, error instanceof MediaBridgeError ? error : error);
+      return failure(kind, commandId, error instanceof MediaBridgeError ? error : error, { operation, params: args.params });
     }
   };
 
@@ -513,6 +527,48 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       return failure(kind, commandId, error);
     }
   };
+
+  // 命令目录：让调用方在写入前知道「有哪些命令、现在能不能用、为什么不能」。
+  // 绑定可用时顺手读一次状态算出就绪度；状态读不到就如实回 enabled:null，不假装可用。
+  const listCommands = (kind, bridge) => async (args, exec) => {
+    // 身份/绑定缺失必须 fail closed：目录工具也是工具，不能因为"只是列个目录"就跳过门禁。
+    try { bindings.assert(exec, kind, args); }
+    catch (error) { return failure(kind, 'list_commands', error); }
+    let state = null;
+    let stateError = null;
+    try { state = await verify(kind, bridge, args, exec); }
+    catch (error) {
+      if (String(error?.code || '').startsWith('SESSION_')) return failure(kind, 'list_commands', error);
+      stateError = { code: error?.code || 'STATE_UNAVAILABLE', message: error?.message || '状态不可用' };
+    }
+    const commands = describeCommands(state);
+    const summary = state ? summarize(state) : null;
+    return {
+      status: 'applied',
+      commandId: 'list_commands',
+      editorKind: kind,
+      ...(state?.documentId ? { projectId: state.documentId } : {}),
+      ...(Number.isSafeInteger(state?.revision) ? { revision: state.revision } : {}),
+      commands,
+      ...(summary ? { context: summary } : {}),
+      ...(stateError ? { stateUnavailable: stateError, hint: '先确认编辑器已连接并完成授权，再调用本工具可获得 enabled/disabledReason。' } : {}),
+      counts: {
+        total: commands.length,
+        enabled: commands.filter(item => item.enabled === true).length,
+        disabled: commands.filter(item => item.enabled === false).length,
+        unknown: commands.filter(item => item.enabled === null).length,
+      },
+    };
+  };
+
+  register(defineTool({
+    name: 'media_image_list_commands',
+    description: 'List the allowlisted image commands with their parameter contract and, when the editor is reachable, whether each one can run now (enabled) and why not (disabledReason: no-document / no-selected-layer / selected-layer-is-text-not-image / ...). Read-only: it never writes. Call it before composing a sequence so you do not discover preconditions by failing a write.',
+    parameters: READ_PARAMS,
+    output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+    execute: listCommands('image', bridge),
+    timeoutMs: 10_000,
+  }));
 
   register(defineTool({
     name: 'media_image_read_state',
