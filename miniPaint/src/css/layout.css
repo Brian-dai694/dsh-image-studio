@@ -1,4 +1,4 @@
-.wrapper{
+﻿.wrapper{
 	display: -ms-grid;
 	display: grid;
 	margin: 0;
@@ -783,4 +783,94 @@ canvas{
 		margin-left: 0;
 		margin-top: 1rem;
 	}
+}
+
+/* =========================================================================
+   右侧栏视觉对齐（只统一尺寸与留白，不改原有浮动布局）
+   ========================================================================= */
+.sidebar_right{
+	width: 216px;
+	margin: 0 8px 0 4px;
+	overflow-y: auto;
+	scrollbar-width: thin;
+	padding-right: 2px;
+}
+.sidebar_right::-webkit-scrollbar{ width: 8px; }
+.sidebar_right::-webkit-scrollbar-thumb{
+	background: rgba(0,0,0,0.18);
+	border-radius: 8px;
+	border: 2px solid transparent;
+	background-clip: content-box;
+}
+.sidebar_right .block{
+	border-radius: 10px;
+	margin-bottom: 8px;
+	box-shadow: none;
+	border: 1px solid var(--border-color);
+	overflow: hidden;
+}
+.sidebar_right .block h2{
+	padding: 7px 10px;
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+.sidebar_right .block h2.toggle:before{ top: 12px; }
+.sidebar_right .block .content{ padding: 10px; }
+
+/* 预览与其它块共用同一版心 */
+.canvas_preview_wrapper{ margin: 0 0 8px 0; }
+.canvas_preview_details{ padding: 0; }
+
+/* 详情行：控件统一高度，数值列同宽 → 右侧边缘齐平 */
+.block.details .row{ min-height: 26px; }
+.block.details .row > .label,
+.block.details .row > label,
+.sidebar_right .label{ line-height: 26px; font-size: 12px; }
+.block.details input[type="number"],
+.block.details .ui_color_input,
+.block.details select,
+.block.details button{
+	height: 26px;
+	box-sizing: border-box;
+	border-radius: 6px;
+	font-size: 12px;
+}
+.block.details input[type="number"]{
+	width: 78px;
+	padding: 3px 7px;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+.block.details .ui_color_input{ width: 78px; }
+.block.details .ui_color_input input{ height: 26px; width: 100%; }
+.block.details button.reset{ width: 26px; height: 26px; }
+
+/* 图层列表：行高一致、图标与文字同基线 */
+.layers_list .item{ margin-bottom: 3px; }
+.layers_list .arrow_down,
+.layers_list .visibility{ height: 24px; }
+.layers_list .layer_name{
+	height: 24px;
+	line-height: 22px;
+	border-radius: 6px;
+	font-size: 12px;
+}
+
+/* 详情行：重置按钮贴右端，数值列因此统一右对齐（不再插在标签与数值之间） */
+.block.details .row{ position: relative; padding-right: 32px; }
+.block.details button.reset{
+	position: absolute;
+	right: 0;
+	top: 50%;
+	float: none;
+	margin: 0;
+	transform: translateY(-50%);
+}
+.block.details input[type="number"],
+.block.details .ui_color_input{ margin-right: 0; float: right; }
+.block.details select,
+.block.details button:not(.reset){
+	float: right;
+	width: calc(100% - 78px - 32px);
 }
