@@ -356,11 +356,17 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     }
   };
 
-  // 写入工具主体：绑定门禁 → 指纹去重 → revision 前置检查 → 高风险审批 → 提交。
+  // 写入工具主体：绑定门禁 → 指纹去重 → revision 前置检查 → 重复失败熔断 → 高风险审批 → 提交。
   // 回执带 commandId/revision/afterDigest，供模型做后续定向撤销与冲突判断。
+  //
+  // 熔断（借鉴 LayerShop 的「同一调用失败两次就拒」）：同一个 operation+params 连续失败两次，
+  // 第三次直接拒绝并要求改参数——否则模型会在同一个错误上反复重试。
+  const repeatedFailures = new Map();
+  const failureKeyOf = (kind, operation, params) => `${kind}\0${operation}\0${digestOf(params ?? null)}`;
   const applyCommand = (kind, bridge, toolName) => async (args, exec) => {
     const commandId = args.commandId;
     const operation = args.operation;
+    const failKey = failureKeyOf(kind, operation, args.params);
     try {
       const binding = bindings.assert(exec, kind, args);
       const key = `${binding.sessionId}\0${kind}\0${args.instanceId}\0${commandId}`;
@@ -370,6 +376,20 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       if (cached) {
         if (cached.fingerprint !== fingerprint) throw new MediaBridgeError('COMMAND_ID_REUSED', 'This commandId is already bound to different arguments.');
         return cached.value;
+      }
+      const failedTimes = repeatedFailures.get(failKey) || 0;
+      if (failedTimes >= 2) {
+        return envelope(kind, {
+          commandId,
+          revision: state.revision,
+          stateDigest: state.stateDigest,
+          error: {
+            code: 'REPEATED_FAILURE',
+            message: `This exact ${operation} call already failed ${failedTimes} times; change the parameters or ask the user instead of retrying it.`,
+            retryable: false,
+          },
+          hint: '读一次 read_state 确认前提（图层/选区/蒙版是否还在），再换参数或换做法。',
+        });
       }
       if (state.revision !== args.expectedRevision) {
         return envelope(kind, { commandId, revision: state.revision, stateDigest: state.stateDigest, error: { code: 'REVISION_CONFLICT', message: `Project is at revision ${state.revision}; read_state again before writing.`, retryable: true } });
@@ -438,8 +458,11 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         auditRef: `audit-${commandId}`,
       };
       appliedCommands.set(key, { fingerprint, value });
+      repeatedFailures.delete(failKey);
       return value;
     } catch (error) {
+      // 只有真的失败才计数；成功一次就把该参数组合的计数清零。
+      repeatedFailures.set(failKey, (repeatedFailures.get(failKey) || 0) + 1);
       return failure(kind, commandId, error instanceof MediaBridgeError ? error : error);
     }
   };

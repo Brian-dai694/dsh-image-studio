@@ -40,9 +40,10 @@ function makeCanvas(w = 8, h = 8, content = 1) {
   const canvas = {
     width: w, height: h, _content: content, _drawn: null,
     getContext() {
-      return {
+      const ctx = {
         globalAlpha: 1,
         fillStyle: '#000',
+        font: '400 12px sans-serif',
         clearRect() {},
         fillRect(x, y, w, h) { canvas._drawn = (Number(canvas._drawn ?? 0) + Math.max(1, Math.round(w * h))) & 0xff; },
         drawImage(source) { if (source && (source._drawn !== undefined || source._content !== undefined)) canvas._drawn = source._drawn ?? source._content; },
@@ -58,7 +59,13 @@ function makeCanvas(w = 8, h = 8, content = 1) {
           const value = Number(canvas._drawn ?? canvas._content) & 0xff;
           return new TestImageData(new Uint8ClampedArray(cw * ch * 4).fill(value), cw, ch);
         },
+        // 只测「按字号线性变宽」：半角字宽 = 0.5×字号，足够验证二分收缩。
+        measureText(text) {
+          const size = Number((/(\d+(?:\.\d+)?)px/.exec(ctx.font) || [0, 12])[1]) || 12;
+          return { width: String(text).length * size * 0.5 };
+        },
       };
+      return ctx;
     },
     // 只有真的改了像素（蒙版合成）才需要重编码；返回带尺寸标记的稳定假 dataURL。
     toDataURL() { toDataUrlCalls += 1; return `data:image/png;base64,stub-${canvas.width}x${canvas.height}-${Number(canvas._drawn ?? canvas._content) & 0xff}`; },
@@ -157,6 +164,38 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
     }
   });
+  await test('editor.measure_text reports size without drawing and shrinks to fit a width', async () => {
+    const before = bridge.readState();
+    const plain = await bridge.handleRequest({ type: 'editor.measure_text', requestId: 'm1', editorInstanceId: bridge.editorInstanceId,
+      text: 'HELLO', style: { size: 40 } }, { postMessage(value) { this.value = value; } });
+    assert.equal(plain, undefined, 'handleRequest 只回 postMessage');
+    const send = async request => {
+      const box = {};
+      await bridge.handleRequest({ requestId: 'r', editorInstanceId: bridge.editorInstanceId, ...request }, { postMessage(value) { box.value = value; } });
+      return box.value;
+    };
+    const wide = await send({ type: 'editor.measure_text', text: 'HELLO', style: { size: 40 } });
+    assert.equal(wide.ok, true, JSON.stringify(wide));
+    assert.equal(wide.result.lineCount, 1);
+    assert.equal(wide.result.fittedSize, 40, '没给 maxWidth 时不应擅自改字号');
+    assert.equal(wide.result.fits, null);
+    // 5 字 × 0.5 × 字号 = 宽度；限 50px 时最大可用字号 = 20
+    const fitted = await send({ type: 'editor.measure_text', text: 'HELLO', style: { size: 40 }, maxWidth: 50 });
+    assert.equal(fitted.ok, true);
+    assert.ok(fitted.result.fittedSize <= 20, `应收缩到 ≤20，实际 ${fitted.result.fittedSize}`);
+    assert.ok(fitted.result.fittedSize >= 19, `应收得尽量满，实际 ${fitted.result.fittedSize}`);
+    assert.equal(fitted.result.fits, true);
+    const multiline = await send({ type: 'editor.measure_text', text: 'AB\nCD', style: { size: 20 } });
+    assert.equal(multiline.result.lineCount, 2);
+    assert.equal(multiline.result.height, 48, '行高 = 字号 × 1.2');
+    const after = bridge.readState();
+    assert.equal(after.revision, before.revision, '测量不能推进 revision');
+    assert.equal(after.contentDigest, before.contentDigest, '测量不能改内容');
+    const bad = await send({ type: 'editor.measure_text', text: '' });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'INVALID_REQUEST');
+  });
+
   await test('mask binding survives native undo/redo and composition reads the edited mask', async () => {
     const previousImage = context.Image;
     const previousOps = context.globalThis.__dshPixelOps;

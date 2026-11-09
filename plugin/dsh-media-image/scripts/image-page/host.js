@@ -1305,6 +1305,34 @@ function templatePreview(template) {
   return lines.join('\n');
 }
 
+/**
+ * 按槽宽收缩文字字号：先量再画，缩不下去就如实报告（不静默溢出）。
+ * 测量失败时保留原字号，并把失败原因说出来。
+ */
+async function fitTextCommands(plan) {
+  const texts = (plan.commands || []).filter(command => command.type === 'layer.add_text' && command.meta?.slotWidth);
+  if (!texts.length) return { fitted: [], failed: [] };
+  const state = await fetchEditorState();
+  const fitted = [], failed = [];
+  for (const command of texts) {
+    try {
+      const measured = await transport.request({
+        type: 'editor.measure_text', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId,
+        text: command.payload.text, style: command.payload.style, maxWidth: command.meta.slotWidth,
+      }, { timeoutMs: 10000 });
+      const before = command.payload.style.size;
+      if (measured.fittedSize && measured.fittedSize < before) {
+        command.payload.style.size = measured.fittedSize;
+        fitted.push({ slotId: command.meta.slotId, from: before, to: measured.fittedSize });
+      }
+      if (measured.fits === false) failed.push({ slotId: command.meta.slotId, reason: '即使缩到最小字号仍超出槽宽' });
+    } catch (error) {
+      failed.push({ slotId: command.meta.slotId, reason: `${error.code || 'MEASURE_FAILED'}：${error.message}` });
+    }
+  }
+  return { fitted, failed };
+}
+
 async function applyTemplateFlow(file, slotIndex = null) {
   const line = bubble('bot', file ? '正在解析 PSD 模板……' : '按已解析的模板重新规划……');
   try {
@@ -1343,6 +1371,13 @@ async function applyTemplateFlow(file, slotIndex = null) {
       bubble('bot', `底图合成失败（${applied.baseError.code}），改用纯色背景：PSD 装饰层不会还原。`);
     }
     bubble('bot', `规划 ${plan.summary.commands} 步（图片 ${plan.summary.images}、文字 ${plan.summary.texts}）${plan.summary.productSlot ? `；商品进槽 ${plan.summary.productSlot}` : ''}${plan.skipped.length ? `；${plan.skipped.length} 处无法还原` : ''}。逐步确认后生效。`);
+    const fit = await fitTextCommands(plan);
+    if (fit.fitted.length) {
+      bubble('bot', `文字按槽宽收缩：${fit.fitted.map(item => `${item.from}→${item.to}px`).join('、')}`);
+    }
+    if (fit.failed.length) {
+      bubble('bot', `文字排版有问题：${fit.failed.map(item => `${item.slotId}（${item.reason}）`).join('；')}`);
+    }
     for (const command of plan.commands) {
       const result = await runPlannedCommand(command, command.note);
       if (result.cancelled) { bubble('bot', '已取消，后续步骤停止；画布保留已确认的部分。'); return; }

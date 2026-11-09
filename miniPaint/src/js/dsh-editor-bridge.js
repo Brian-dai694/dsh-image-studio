@@ -223,6 +223,46 @@ export class DshEditorBridge {
   }
 
   /** 内容摘要（同步字符串）；算不出来就抛 DIGEST_TIMEOUT，绝不返回 Promise 或 {}。 */
+  /**
+   * 只测量、不绘制：调用方看不见画布，只能靠数字排版。
+   * 给 maxWidth 时返回能放进这个宽度的最大字号（fittedSize），不小于 8px。
+   */
+  measureText(request) {
+    const text = String(request?.text ?? '');
+    if (!text.length || text.length > 4000) throw this.error('INVALID_REQUEST', 'text 必须是 1..4000 字符');
+    const style = plain(request?.style) ? request.style : {};
+    const size = style.size === undefined ? 24 : Number(style.size);
+    if (!Number.isFinite(size) || size < 1 || size > 1000) throw this.error('INVALID_REQUEST', 'style.size 必须是 1..1000');
+    const maxWidth = request?.maxWidth === undefined ? null : Number(request.maxWidth);
+    if (maxWidth !== null && (!Number.isFinite(maxWidth) || maxWidth < 1)) throw this.error('INVALID_REQUEST', 'maxWidth 必须是正数');
+    const family = typeof style.family === 'string' && style.family ? style.family : null;
+    const fontFor = value => `${style.italic ? 'italic ' : ''}${style.bold ? '700' : '400'} ${value}px ${family ? `"${family}", ` : ''}sans-serif`;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx || typeof ctx.measureText !== 'function') throw this.error('EDITOR_ERROR', '当前环境无法测量文字');
+    const lines = text.split('\n');
+    const widthAt = value => {
+      ctx.font = fontFor(value);
+      let widest = 0;
+      for (const line of lines) widest = Math.max(widest, ctx.measureText(line).width);
+      return widest;
+    };
+    const width = widthAt(size);
+    const lineHeight = Math.round(size * 1.2);
+    let fittedSize = size;
+    if (maxWidth !== null && width > maxWidth + 0.5) {
+      // 二分找能放下的最大字号；下界 8px，宁可小也不溢出。
+      let lo = 8, hi = size;
+      for (let step = 0; step < 20 && hi - lo > 0.5; step += 1) {
+        const mid = (lo + hi) / 2;
+        if (widthAt(mid) <= maxWidth + 0.5) lo = mid; else hi = mid;
+      }
+      fittedSize = Math.max(8, Math.floor(lo));
+    }
+    return { width: Math.round(width * 100) / 100, height: lineHeight * lines.length, lineCount: lines.length,
+      lineHeight, size, fittedSize, maxWidth, fits: maxWidth === null ? null : widthAt(fittedSize) <= maxWidth + 0.5 };
+  }
+
   contentDigestValue() {
     const digest = digestOf(this.documentState());
     if (typeof digest !== 'string' || !/^fnv1a64-/.test(digest)) throw this.error('DIGEST_TIMEOUT', '内容摘要不可用，请重试');
@@ -476,6 +516,8 @@ export class DshEditorBridge {
           return item;
         }
         if (request.type === 'editor.export_inpaint_inputs') return this.exportInpaintInputs(request);
+        // 只测量不绘制：看不见画布的调用方靠它按数字排版。
+        if (request.type === 'editor.measure_text') return this.measureText(request);
         throw this.error('INVALID_REQUEST');
       });
       port?.postMessage({ requestId: request.requestId, ok: true, result });

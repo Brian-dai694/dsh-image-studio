@@ -39,6 +39,20 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 已知边界：批量固定使用同一商品槽与同一套文案（每份可用 `texts` 覆盖）；不同槽位的批量尚未支持。
 
+## 文字先量再画
+
+套版放置文字前会先用 `editor.measure_text` 量一次（不绘制、不推进 revision），把字号二分收缩到槽宽内；缩到 8px 仍放不下时如实报告，不静默溢出。回执会写「文字按槽宽收缩：40→22px」，排版失败也会列出来。
+
+`editor.measure_text` 契约：入参 `{text, style:{size,family,bold,italic}, maxWidth?}`，返回 `{width, height, lineCount, lineHeight, size, fittedSize, maxWidth, fits}`；给 `maxWidth` 时 `fittedSize` 是能放进该宽度的最大字号。
+
+## 写入熔断
+
+同一个 `operation + params` 连续失败两次后，第三次直接返回 `REPEATED_FAILURE`（`retryable: false`），要求改参数或先读 `read_state` 查前提；成功一次即清零。避免模型在同一个错误上反复重试。
+
+## 中继请求类型
+
+页面能发的每种 `editor.*` 请求都必须登记在 `lib/index.js` 的 `EDITOR_REQUEST_TYPES`，否则 relay 会在运行时直接拒成 `INVALID_REQUEST`。`test/guards.test.mjs` 会从页面与桥接源码里反查实际用到的类型并逐一核对——0.20.0 就是靠它发现 `editor.export_inpaint_inputs`（局部重绘导出）和 `editor.highlight`（面板定位高亮）两条漏登记。
+
 ## 局部重绘（ComfyUI inpaint workflow）
 
 局部重绘只对**显式声明**支持 image+mask 输入的后端开放。普通 text-to-image workflow（包括桌面 profile 当前的 `mock-comfy`）不支持局部重绘；助手会在提交前拒绝，不会把整图生图冒充 inpaint。

@@ -208,6 +208,8 @@ export function planTemplateApply(template, { background, baseAssetRef, product,
         },
       },
       note: `文案填入槽位 ${slot.id}（${slot.name}）`,
+      // 页面据此调用 editor.measure_text，把字号收缩到槽宽内；payload 本身不带这些字段。
+      meta: { slotId: String(slot.id), slotWidth: rect.width, slotHeight: rect.height },
     });
   }
 
