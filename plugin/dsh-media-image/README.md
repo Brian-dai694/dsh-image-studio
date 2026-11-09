@@ -25,7 +25,10 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 底图由 `lib/psd-composite.js` 生成：解析 PSD 各图层的像素通道（支持 raw/RLE 压缩），**排除文字层与选定的商品槽**，把其余可见图层按位置、alpha 与**混合模式**合成为一张整幅 PNG。
 
 已实现的混合模式：`norm` 正常、`mul` 正片叠底、`scrn` 滤色、`over` 叠加、`dark` 变暗、`lite` 变亮、`diff` 差值、`smud` 柔光、`hLit` 强光（按 W3C 分离通道公式）。**未实现的模式不猜**：退回正常模式并记进 `approximated`，页面会提示「N 处近似还原」。
-图层不透明度与**图层蒙版**（alpha 通道 -2）都会乘进该层的 alpha。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
+图层不透明度与**图层蒙版**（alpha 通道 -2）都会乘进该层的 alpha。
+**剪贴蒙版**（clipping 位）会把该层 alpha 乘上它下方底图层在同像素的 alpha。
+**调整图层**支持 `brit`（亮度/对比度），按近似公式作用在已合成像素上并登记 `ADJUSTMENT_BRIGHTNESS_APPROXIMATED`。
+图层效果（描边/投影）尚未还原：需要解析 `lmfx`/`effc` 二进制描述符，目前按原样跳过。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
 
 `POST /media-image/template/apply` 一次上传完成「解析 → 合成 → 规划」，请求头为 `x-psd-product-asset`（商品素材）、`x-psd-slot`（可选商品槽）、`x-psd-background`（降级背景色）、`x-psd-texts`（可选文案 JSON）。
 
@@ -41,6 +44,32 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 - 中途失败：撤销已应用步骤、停止批量、报告已完成份数，画布留在可检查的已知状态。
 
 已知边界：批量固定使用同一商品槽与同一套文案（每份可用 `texts` 覆盖）；不同槽位的批量尚未支持。
+
+## 本地重绘后端（`kind: command`）
+
+`scripts/inpaint-local.py` 是随包分发的本机填充脚本：**扩散填充（Telea 类松弛）+ 边界羽化**，只用 numpy + Pillow。
+
+- 适合：去小物体、去文字、补瑕疵，背景平整或带纹理都行
+- **不适合**：凭空生成新主体——它不是神经模型，别把它当 AI 重绘
+- 契约：`--image IN.png --mask MASK.png --out OUT.png`，蒙版白色=要补；空蒙版明确失败
+- 接入：profile 里 `generation.providers` 配 `kind: command` + `args` 占位符 `{image}/{mask}/{output}`
+
+配置示例（profile `cordis.patch.yml`）：
+
+```yaml
+- id: dsh-media-image
+  name: dsh-media-image
+  config:
+    dataDir: C:/Users/UEFR/.dsh/profiles/desktop/data/dsh-media-image
+    generation:
+      maxConcurrency: 2
+      providers:
+        - id: local-diffusion
+          kind: command
+          command: <本机 python 绝对路径>
+          args: [<包内>/scripts/inpaint-local.py, --image, "{image}", --mask, "{mask}", --out, "{output}"]
+          timeoutMs: 120000
+```
 
 ## 素材持久化
 

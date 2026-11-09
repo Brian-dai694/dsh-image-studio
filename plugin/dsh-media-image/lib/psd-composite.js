@@ -50,6 +50,49 @@ const BLEND_FUNCS = {
 };
 
 export const SUPPORTED_BLEND_KEYS = Object.keys(BLEND_FUNCS);
+
+/**
+ * 读附加图层信息块。只挑我们真会用的：'brit' 亮度/对比度调整图层。
+ * 其它块（含 'lmfx' 图层效果、'levl' 色阶）**不猜**，交给调用方登记。
+ */
+export function readLayerBlocks(buffer, offset, length) {
+  const blocks = new Map();
+  const end = Math.min(buffer.length, offset + length);
+  let o = offset;
+  // 附加数据开头固定是：图层蒙版数据（长度+内容）、混合范围（长度+内容）、Pascal 图层名。
+  for (let guard = 0; guard < 2; guard += 1) {
+    if (o + 4 > end) return blocks;
+    const size = buffer.readUInt32BE(o);
+    o += 4 + size;
+  }
+  if (o + 1 > end) return blocks;
+  const nameLength = buffer.readUInt8(o);
+  o += 1 + nameLength;
+  o += (4 - ((1 + nameLength) % 4)) % 4;
+  while (o + 12 <= end) {
+    const signature = buffer.toString('ascii', o, o + 4);
+    if (signature !== '8BIM' && signature !== '8B64') break;
+    const key = buffer.toString('ascii', o + 4, o + 8).trim();
+    const size = buffer.readUInt32BE(o + 8);
+    const dataOffset = o + 12;
+    if (dataOffset + size > end) break;
+    if (!blocks.has(key)) blocks.set(key, { offset: dataOffset, size });
+    o = dataOffset + size + ((4 - (size % 4)) % 4);
+  }
+  return blocks;
+}
+/** 亮度/对比度调整图层（'brit' 块）——按近似公式作用在已合成像素上。 */
+export function applyBrightnessContrast(canvas, brightness, contrast) {
+  const gain = 1 + contrast;
+  for (let i = 0; i < canvas.length; i += 4) {
+    if (canvas[i + 3] === 0) continue;
+    for (let c = 0; c < 3; c += 1) {
+      const unit = canvas[i + c] / 255;
+      canvas[i + c] = Math.round(Math.max(0, Math.min(1, (unit - 0.5) * gain + 0.5 + brightness)) * 255);
+    }
+  }
+}
+
 export function encodePngRgba(rgba, width, height) {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
@@ -156,16 +199,20 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
     // signature(4) + blend key(4) + opacity(1) + clipping(1) + flags(1) + filler(1)
     const blendKey = buffer.toString('ascii', o + 4, o + 8).trim();
     const layerOpacity = buffer.readUInt8(o + 8);
+    const clipping = buffer.readUInt8(o + 9) === 1;
     o += 12;
     const extraLen = buffer.readUInt32BE(o); o += 4;
+    const extraOffset = o;
     o += extraLen;
-    records.push({ index, left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top), channels, blendKey, layerOpacity });
+    records.push({ index, left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top), channels, blendKey, layerOpacity, clipping, extraOffset, extraLen });
   }
 
   // 通道数据紧跟在全部图层记录之后，按图层顺序、每层按通道顺序排列。
   const canvas = Buffer.alloc(width * height * 4);
   const skipped = [];
   const approximated = [];
+  // 剪贴蒙版的底：最近一次非剪贴图层在该像素上的 alpha（0..1）。
+  let clipBase = new Float32Array(width * height);
   let composited = 0;
   for (const record of records) {
     const channelData = [];
@@ -176,7 +223,22 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
     if (excluded.has(record.index) || record.width < 1 || record.height < 1) { skipped.push(record.index); continue; }
     const byId = new Map(channelData.map(item => [item.id, item]));
     const need = [0, 1, 2].map(id => byId.get(id));
-    if (need.some(item => !item)) { skipped.push(record.index); continue; }  // 非 RGB 通道（如形状矢量层）
+    if (need.some(item => !item)) {
+      // 没有 RGB 通道的图层：先看它是不是调整图层（'brit'），是就作用在已合成像素上。
+      const blocks = readLayerBlocks(buffer, record.extraOffset, record.extraLen);
+      if (blocks.has('brit')) {
+        const at = blocks.get('brit');
+        if (at.size >= 4) {
+          const brightness = buffer.readInt16BE(at.offset) / 255;
+          const contrast = buffer.readInt16BE(at.offset + 2) / 255;
+          applyBrightnessContrast(canvas, brightness, contrast);
+          composited += 1;
+          approximated.push({ layerIndex: record.index, reason: 'ADJUSTMENT_BRIGHTNESS_APPROXIMATED' });
+          continue;
+        }
+      }
+      skipped.push(record.index); continue;  // 非 RGB 通道（如形状矢量层/未支持的调整层）
+    }
     try {
       const planes = need.map(item => decodeChannel(buffer, item.offset, item.bytes, record.width, record.height));
       const alphaInfo = byId.get(-1);
@@ -187,6 +249,7 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
       const blend = BLEND_FUNCS[record.blendKey] || BLEND_FUNCS.norm;
       if (!BLEND_FUNCS[record.blendKey]) approximated.push({ layerIndex: record.index, reason: `BLEND_MODE_${String(record.blendKey).trim()}_AS_SOURCE_OVER` });
       const opacity = Math.max(0, Math.min(255, record.layerOpacity === undefined ? 255 : record.layerOpacity));
+      const layerAlpha = record.clipping ? null : new Float32Array(width * height);
       for (let y = 0; y < record.height; y += 1) {
         const cy = record.top + y;
         if (cy < 0 || cy >= height) continue;
@@ -197,8 +260,11 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
           let a = alpha ? alpha[src] : 255;
           if (layerMask) a = Math.round(a * (layerMask[src] / 255));
           a = Math.round(a * (opacity / 255));
+          // 剪贴蒙版：只保留底图层在该像素上的不透明部分。
+          if (record.clipping) a = Math.round(a * clipBase[cy * width + cx]);
           if (a === 0) continue;
           const dst = (cy * width + cx) * 4;
+          if (layerAlpha) layerAlpha[(cy * width + cx)] = a / 255;
           const sa = a / 255, da = canvas[dst + 3] / 255;
           const outA = sa + da * (1 - sa);
           if (outA === 0) continue;
@@ -212,6 +278,7 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
           canvas[dst + 3] = Math.round(outA * 255);
         }
       }
+      if (layerAlpha) clipBase = layerAlpha;
       composited += 1;
     } catch (error) {
       // 单层解不出来不该毁掉整张底图：记录并跳过，让调用方如实告知。

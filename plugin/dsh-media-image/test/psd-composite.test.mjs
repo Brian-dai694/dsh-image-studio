@@ -22,10 +22,10 @@ function buildPsd({ width = 8, height = 8, layers }) {
   const records = [];
   const channelData = [];
   layers.forEach((layer, index) => {
-    const { x, y, w, h, rgb, alpha = 255, name, blend = 'norm', opacity = 255, mask = null } = layer;
+    const { x, y, w, h, rgb, alpha = 255, name, blend = 'norm', opacity = 255, mask = null, clipping = false, brit = null, noRgb = false } = layer;
     const head = Buffer.alloc(16);
     head.writeInt32BE(y, 0); head.writeInt32BE(x, 4); head.writeInt32BE(y + h, 8); head.writeInt32BE(x + w, 12);
-    const ids = mask ? [0, 1, 2, -1, -2] : [0, 1, 2, -1];
+    const ids = noRgb ? [-1] : (mask ? [0, 1, 2, -1, -2] : [0, 1, 2, -1]);
     const chanHead = Buffer.alloc(2 + ids.length * 6);
     chanHead.writeUInt16BE(ids.length, 0);
     ids.forEach((chanId, i) => {
@@ -34,11 +34,20 @@ function buildPsd({ width = 8, height = 8, layers }) {
     });
     const pascal = Buffer.from([(name || `layer${index}`).length, ...Buffer.from(name || `layer${index}`, 'latin1')]);
     const pascalPadded = Buffer.concat([pascal, Buffer.alloc((4 - (pascal.length % 4)) % 4)]);
-    const extraBody = Buffer.concat([Buffer.alloc(4), Buffer.alloc(4), pascalPadded]);
+    // 附加数据：蒙版数据长度(4) + 混合范围长度(4) + Pascal 名 + 可选块
+    const blocks = [];
+    if (brit) {
+      const data = Buffer.alloc(4);
+      data.writeInt16BE(brit[0], 0); data.writeInt16BE(brit[1], 2);
+      const head8 = Buffer.alloc(12);
+      head8.write('8BIM', 0, 'ascii'); head8.write('brit', 4, 'ascii'); head8.writeUInt32BE(4, 8);
+      blocks.push(head8, data);
+    }
+    const extraBody = Buffer.concat([Buffer.alloc(4), Buffer.alloc(4), pascalPadded, ...blocks]);
     const extraHead = Buffer.alloc(4);
     extraHead.writeUInt32BE(extraBody.length, 0);
     const blendKey = String(blend).padEnd(4, ' ').slice(0, 4);
-    records.push(Buffer.concat([head, chanHead, Buffer.from(`8BIM${blendKey}`, 'ascii'), Buffer.from([opacity, 0, 0, 0]), extraHead, extraBody]));
+    records.push(Buffer.concat([head, chanHead, Buffer.from(`8BIM${blendKey}`, 'ascii'), Buffer.from([opacity, clipping ? 1 : 0, 0, 0]), extraHead, extraBody]));
     for (const chanId of ids) {
       let pixels;
       if (chanId === -1) pixels = Buffer.alloc(w * h, alpha);
@@ -268,6 +277,40 @@ test('图层不透明度与图层蒙版都乘进 alpha', () => {
   })).png);
   assert.equal(px(masked, 0, 0)[0], 0, '蒙版为 0 的像素应被隐藏');
   assert.equal(px(masked, 1, 0)[0], 255, '蒙版为 255 的像素应显示');
+});
+
+test('剪贴蒙版：上层只出现在底图不透明的像素上', () => {
+  // 底图只有左上 1×1 不透明；剪贴层铺满 2×2，理应只有左上可见。
+  const result = compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 1, h: 1, rgb: [0, 0, 0], name: 'base' },
+      { x: 0, y: 0, w: 2, h: 2, rgb: [255, 0, 0], clipping: true, name: 'clip' },
+    ],
+  }));
+  const image = decodePng(result.png);
+  assert.equal(px(image, 0, 0)[0], 255, '底图覆盖处应显示剪贴层');
+  const outside = px(image, 1, 0);
+  assert.equal(outside[3], 0, '底图没有的像素不应被剪贴层填上');
+});
+
+test('调整图层（亮度）：没有像素通道也能改变已合成结果，并登记为近似', () => {
+  const plain = decodePng(compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [{ x: 0, y: 0, w: 2, h: 2, rgb: [80, 80, 80], name: 'base' }],
+  })).png);
+  const adjusted = compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 2, h: 2, rgb: [80, 80, 80], name: 'base' },
+      // 调整图层没有 RGB 通道，只带 'brit' 块
+      { x: 0, y: 0, w: 2, h: 2, rgb: [0, 0, 0], name: 'brightness', noRgb: true, brit: [64, 0] },
+    ],
+  }));
+  const before = px(plain, 0, 0)[0];
+  const after = px(decodePng(adjusted.png), 0, 0)[0];
+  assert.ok(after > before, `亮度调整应提亮：${before} → ${after}`);
+  assert.ok(adjusted.approximated.some(item => /ADJUSTMENT/.test(item.reason)), JSON.stringify(adjusted.approximated));
 });
 
 test('非 RGB 或非 8bit 明确拒绝，不返回半成品', () => {
