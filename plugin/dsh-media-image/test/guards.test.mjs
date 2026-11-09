@@ -121,6 +121,21 @@ test('助手能执行计划：一次确认跑完整串，高危步骤整串拒�
   assert.match(ops, /整串回滚/, '失败要说明编辑器整串回滚');
 });
 
+test('助手自检与可读确认卡片：执行后量一遍，确认框显示图层名而不是裸 id', () => {
+  const host = readFileSync(resolve(pluginRoot, 'public/image/host.js'), 'utf8');
+  const check = host.slice(host.indexOf('async function reportSelfCheck'), host.indexOf('async function routeAssist'));
+  assert.match(check, /editor\.analyze/, '自检必须调用测量');
+  assert.match(check, /平均亮度/, '要报具体数值');
+  assert.match(check, /文字超框/, '要提示需要留意的地方');
+  assert.equal(/看起来很|效果不错|完美/.test(check), false, '自检不能做主观评价');
+  assert.match(check, /catch \{ \/\* 测不出来就不说/, '测不出来不能编数字');
+
+  const summary = host.slice(host.indexOf('function commandTargetSummary'), host.indexOf('async function reportSelfCheck'));
+  assert.match(summary, /图层已不存在/, '失效 id 要有明确说明');
+  assert.match(summary, /layer\.name/, '要显示真实图层名');
+  assert.match(host, /commandTargetSummary\(state, command\.type/, '确认框必须用上它');
+});
+
 test('套版文字命令带槽宽 meta，且 meta 不进入 payload（否则会被白名单拒）', async () => {
   const template = { canvas: { width: 400, height: 200 }, slots: [
     { id: 'slot-1', name: '标题', type: 'text', rect: { x: 10, y: 10, width: 120, height: 30 }, visible: true, text: '一个很长的标题文案', fontSize: 40 },

@@ -227,6 +227,103 @@ export class DshEditorBridge {
    * 只测量、不绘制：调用方看不见画布，只能靠数字排版。
    * 给 maxWidth 时返回能放进这个宽度的最大字号（fittedSize），不小于 8px。
    */
+  /**
+   * 只测量、不修改：在**降采样**合成图上算曝光/裁切/偏色/清晰度，外加图层级体检。
+   * 目的让看不见画布的调用方能"量一遍再改"，而不是凭感觉宣称改好了。
+   * 采样上限 320px（长边），所以大图也不会卡主线程。
+   */
+  analyzeDocument(request = {}) {
+    const maxSide = Number.isSafeInteger(request.maxSide) ? Math.min(640, Math.max(64, request.maxSide)) : 320;
+    const W = Math.max(1, Math.round(config.WIDTH || 1));
+    const H = Math.max(1, Math.round(config.HEIGHT || 1));
+    const scale = Math.min(1, maxSide / Math.max(W, H));
+    const sw = Math.max(1, Math.round(W * scale));
+    const sh = Math.max(1, Math.round(H * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = sw; canvas.height = sh;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法合成画布');
+    if (typeof ctx.getImageData !== 'function') throw this.error('EDITOR_ERROR', '当前环境无法读取像素');
+    // 先把整幅合成画到一张全尺寸临时画布，再缩到采样尺寸：直接缩放转换会比逐层缩放稳。
+    const full = this.compositeCanvas();
+    ctx.drawImage(full, 0, 0, sw, sh);
+    const { data } = ctx.getImageData(0, 0, sw, sh);
+
+    const histogram = new Array(8).fill(0);
+    let sum = 0, sumR = 0, sumG = 0, sumB = 0, shadows = 0, highlights = 0;
+    const grey = new Float32Array(sw * sh);
+    for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+      const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3] / 255;
+      // 透明区域不计入曝光统计，否则空画布会被算成"全黑"。
+      const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      grey[p] = luma;
+      if (a < 0.05) continue;
+      sum += luma; sumR += r; sumG += g; sumB += b;
+      histogram[Math.min(7, Math.floor(luma / 32))] += 1;
+      if (luma <= 4) shadows += 1;
+      if (luma >= 251) highlights += 1;
+    }
+    const counted = histogram.reduce((a, b) => a + b, 0);
+    const denom = counted || 1;
+
+    // Laplacian 方差：在灰度采样上算，衡量边缘能量（糊/锐）。
+    let lapSum = 0, lapSq = 0, lapCount = 0;
+    for (let y = 1; y < sh - 1; y += 1) {
+      for (let x = 1; x < sw - 1; x += 1) {
+        const p = y * sw + x;
+        const lap = 4 * grey[p] - grey[p - 1] - grey[p + 1] - grey[p - sw] - grey[p + sw];
+        lapSum += lap; lapSq += lap * lap; lapCount += 1;
+      }
+    }
+    const lapMean = lapCount ? lapSum / lapCount : 0;
+    const lapVariance = lapCount ? lapSq / lapCount - lapMean * lapMean : 0;
+
+    const layers = config.layers || [];
+    const offCanvas = [];
+    const zeroSize = [];
+    const textOverflow = [];
+    for (const layer of layers) {
+      if (layer.visible === false) continue;
+      const w = Number(layer.width) || 0, h = Number(layer.height) || 0;
+      if (w < 1 || h < 1) { zeroSize.push(String(layer.id)); continue; }
+      const x = Number(layer.x) || 0, y = Number(layer.y) || 0;
+      if (x < 0 || y < 0 || x + w > W + 1 || y + h > H + 1) offCanvas.push(String(layer.id));
+      if (layer.type === 'text') {
+        const text = textOf(layer);
+        if (text) {
+          try {
+            const measured = this.measureText({ text, style: { size: layer.params?.size ?? 24, family: layer.data?.[0]?.[0]?.meta?.family } });
+            if (measured.width > w + 1 || x + measured.width > W + 1) textOverflow.push({ id: String(layer.id), width: Math.round(measured.width) });
+          } catch { /* 字体没就绪就不算这一项，不编数字 */ }
+        }
+      }
+    }
+
+    return {
+      width: W, height: H, sampledWidth: sw, sampledHeight: sh,
+      luminance: { mean: Number((sum / denom / 255).toFixed(4)), histogram: histogram.map(value => Number((value / denom).toFixed(4))) },
+      clipping: { shadows: Number((shadows / denom).toFixed(4)), highlights: Number((highlights / denom).toFixed(4)) },
+      colorCast: {
+        r: Number((sumR / denom).toFixed(1)), g: Number((sumG / denom).toFixed(1)), b: Number((sumB / denom).toFixed(1)),
+        spread: Number((Math.max(sumR, sumG, sumB) / denom - Math.min(sumR, sumG, sumB) / denom).toFixed(1)),
+      },
+      sharpness: { laplacianVariance: Number(lapVariance.toFixed(2)) },
+      layers: { total: layers.length, visible: layers.filter(layer => layer.visible !== false).length, offCanvas, zeroSize, textOverflow },
+      opaqueRatio: Number((counted / (sw * sh)).toFixed(4)),
+    };
+  }
+
+  /** 把当前文档合成到一张全尺寸画布（只读，不改任何图层）。 */
+  compositeCanvas() {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(config.WIDTH || 1));
+    canvas.height = Math.max(1, Math.round(config.HEIGHT || 1));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法合成画布');
+    app.Layers.convert_layers_to_canvas(ctx, null, false);
+    return canvas;
+  }
+
   measureText(request) {
     const text = String(request?.text ?? '');
     if (!text.length || text.length > 4000) throw this.error('INVALID_REQUEST', 'text 必须是 1..4000 字符');
@@ -518,6 +615,8 @@ export class DshEditorBridge {
         if (request.type === 'editor.export_inpaint_inputs') return this.exportInpaintInputs(request);
         // 只测量不绘制：看不见画布的调用方靠它按数字排版。
         if (request.type === 'editor.measure_text') return this.measureText(request);
+        // 只测量不修改：曝光/裁切/偏色/清晰度 + 图层体检。
+        if (request.type === 'editor.analyze') return this.analyzeDocument(request);
         throw this.error('INVALID_REQUEST');
       });
       port?.postMessage({ requestId: request.requestId, ok: true, result });

@@ -43,7 +43,7 @@ const packagedRoot = resolve(publicDir, 'image');
 
 // 中继允许的编辑器请求类型。漏一个就会在运行时被 relay 直接拒成 INVALID_REQUEST，
 // 所以这份清单单独导出，由测试逐项核对（0.20.0 就是靠它发现 export_inpaint_inputs 漏登记的）。
-export const EDITOR_REQUEST_TYPES = ['editor.read_state', 'editor.apply_command', 'editor.get_command_result', 'editor.export_start', 'editor.export_status', 'editor.export_inpaint_inputs', 'editor.measure_text', 'editor.highlight'];
+export const EDITOR_REQUEST_TYPES = ['editor.read_state', 'editor.apply_command', 'editor.get_command_result', 'editor.export_start', 'editor.export_status', 'editor.export_inpaint_inputs', 'editor.measure_text', 'editor.highlight', 'editor.analyze'];
 
 export function apply(ctx, config = {}) {
   const token = randomBytes(32).toString('hex');

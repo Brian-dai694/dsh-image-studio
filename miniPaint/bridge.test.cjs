@@ -196,6 +196,31 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     assert.equal(bad.error.code, 'INVALID_REQUEST');
   });
 
+  await test('editor.analyze measures a downsampled composite and reports clipping without touching revision', async () => {
+    const before = bridge.readState();
+    // 合成结果固定为白色：期望平均亮度接近 1、高光裁切接近 100%。
+    const originalComposite = bridge.compositeCanvas.bind(bridge);
+    bridge.compositeCanvas = () => makeCanvas(64, 64, 255);
+    try {
+      const box = {};
+      await bridge.handleRequest({ type: 'editor.analyze', requestId: 'a1', editorInstanceId: bridge.editorInstanceId }, { postMessage(value) { box.value = value; } });
+      assert.equal(box.value.ok, true, JSON.stringify(box.value));
+      const analysis = box.value.result;
+      assert.ok(analysis.sampledWidth <= 320 && analysis.sampledWidth >= 1);
+      assert.ok(analysis.luminance.mean > 0.95, `平均亮度应接近 1，实际 ${analysis.luminance.mean}`);
+      assert.ok(analysis.clipping.highlights > 0.9, `高光裁切应接近 100%，实际 ${analysis.clipping.highlights}`);
+      assert.equal(analysis.clipping.shadows, 0);
+      assert.equal(analysis.layers.total, config.layers.length);
+      assert.ok(Array.isArray(analysis.layers.offCanvas));
+      assert.equal(typeof analysis.sharpness.laplacianVariance, 'number');
+    } finally {
+      bridge.compositeCanvas = originalComposite;
+    }
+    const after = bridge.readState();
+    assert.equal(after.revision, before.revision, '测量不能推进 revision');
+    assert.equal(after.contentDigest, before.contentDigest, '测量不能改内容');
+  });
+
   await test('mask binding survives native undo/redo and composition reads the edited mask', async () => {
     const previousImage = context.Image;
     const previousOps = context.globalThis.__dshPixelOps;

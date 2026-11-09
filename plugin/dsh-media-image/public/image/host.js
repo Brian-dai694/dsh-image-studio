@@ -955,6 +955,7 @@ async function execOps(ops) {
       try {
         const outcome = await runPlanOnEditor(steps);
         bubble('bot', `计划已执行：${outcome.applied} 步合成一步撤销（现在 R${outcome.revision}）。`);
+        await reportSelfCheck('计划');
       } catch (error) {
         const code = error.code || 'PLAN_FAILED';
         bubble('bot', String(code).startsWith('EDITOR_TIMEOUT')
@@ -974,10 +975,11 @@ async function execOps(ops) {
           title: risky ? `模型提议（高影响）：${command.type}` : `模型提议：${command.type}`,
           details: [
             `命令      ${command.type}`,
+            commandTargetSummary(state, command.type, command.payload || {}),
             `参数      ${JSON.stringify(command.payload)}`,
             `目标工程  ${state.documentId} · R${state.revision}`,
             '模型没有执行它，点击前它不会生效',
-          ].join('\n'),
+          ].filter(Boolean).join('\n'),
           maskAvailable: false,
         });
         if (!answer.ok) { bubble('bot', '已取消，没有发送任何命令；后面的步骤也一并停止。'); return; }
@@ -1590,6 +1592,45 @@ async function runPlanOnEditor(steps) {
     command: { type: 'history.batch', payload: { steps: steps.map(step => ({ type: step.operation, payload: step.params ?? {} })) } },
   }, { timeoutMs: 30000 });
   return { ok: true, applied: steps.length, revision: result?.revision };
+}
+
+/**
+ * 把命令里的图层 id 翻译成人能核对的内容（名字 · 类型 · 坐标尺寸）。
+ * 确认框里只显示 {"layerId":"3"} 时，人没法判断会不会改错层。
+ */
+function commandTargetSummary(state, command, payload = {}) {
+  const layers = state?.layers || [];
+  const byId = new Map(layers.map(layer => [String(layer.id), layer]));
+  const one = id => {
+    const layer = byId.get(String(id));
+    if (!layer) return `${id}（图层已不存在）`;
+    const rect = `${layer.x ?? 0},${layer.y ?? 0} ${layer.width ?? 0}×${layer.height ?? 0}`;
+    return `${layer.name || id} · ${layer.type || 'layer'} · ${rect}`;
+  };
+  if (payload.layerId !== undefined) return `目标图层  ${one(payload.layerId)}`;
+  if (payload.sourceLayerId !== undefined) return `源图层    ${one(payload.sourceLayerId)}`;
+  if (command === 'canvas.crop' || command === 'canvas.resize') return `画布      ${state?.canvas?.width ?? '?'}×${state?.canvas?.height ?? '?'}`;
+  return '';
+}
+
+/** 执行完量一遍：只报数值与需要留意的地方，不评价"好不好看"。 */
+async function reportSelfCheck(label) {
+  try {
+    const state = await fetchEditorState();
+    const analysis = await transport.request({ type: 'editor.analyze', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId }, { timeoutMs: 10000 });
+    if (!analysis) return;
+    const parts = [];
+    if (Number.isFinite(analysis.luminance?.mean)) parts.push(`平均亮度 ${analysis.luminance.mean}`);
+    if (Number.isFinite(analysis.clipping?.highlights)) parts.push(`高光裁切 ${(analysis.clipping.highlights * 100).toFixed(1)}%`);
+    if (Number.isFinite(analysis.clipping?.shadows)) parts.push(`暗部裁切 ${(analysis.clipping.shadows * 100).toFixed(1)}%`);
+    const flags = [];
+    const layers = analysis.layers || {};
+    if ((layers.offCanvas || []).length) flags.push(`${layers.offCanvas.length} 层越界`);
+    if ((layers.zeroSize || []).length) flags.push(`${layers.zeroSize.length} 层空尺寸`);
+    if ((layers.textOverflow || []).length) flags.push(`${layers.textOverflow.length} 处文字超框`);
+    if (!parts.length) return;
+    bubble('bot', `${label}自检：${parts.join(' · ')}${flags.length ? ` · 注意 ${flags.join('、')}` : ''}`);
+  } catch { /* 测不出来就不说，别编数字 */ }
 }
 
 async function routeAssist(raw) {

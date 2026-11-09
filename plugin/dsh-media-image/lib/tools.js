@@ -3,6 +3,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { MediaBridgeError, HIGH_RISK_COMMANDS } from './bridge.js';
 import { describeCommands, summarize, suggestOperation } from './commands.js';
+import { reviewMeasurements, summarizeMeasurements } from './analyze.js';
 import {
   HIGH_RISK_OPERATIONS, digestOf, requestHumanApproval, createSessionBindings, trustedSessionId, APPROVAL_WAIT_MS,
 } from './gate.js';
@@ -53,6 +54,11 @@ const RESULT_SCHEMA = {
     hint: { type: 'string' },
     // 命令目录（media_image_list_commands）：每条命令的契约与当前就绪度。
     commands: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    // 自检：测量值 + 可执行建议。
+    analysis: { type: 'object', additionalProperties: true },
+    findings: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    summary: { type: 'string' },
+    note: { type: 'string' },
     // 批量执行：逐步结果与回滚情况。
     steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
     rolledBack: {
@@ -625,6 +631,41 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: runPlan('image', bridge),
     timeoutMs: APPROVAL_BUDGET_MS,
+  }));
+
+  // 只读自检：在降采样合成图上量曝光/裁切/偏色/清晰度，外加图层体检。
+  // 让调用方"量一遍再改"，而不是做完就宣称完成。绝不改画布。
+  const analyze = (kind, bridge) => async (args, exec) => {
+    try {
+      bindings.assert(exec, kind, args);
+      const state = await verify(kind, bridge, args, exec);
+      const analysis = await bridge.analyze({ instanceId: args.instanceId, ...(args.maxSide === undefined ? {} : { maxSide: args.maxSide }) });
+      const findings = reviewMeasurements(analysis);
+      return {
+        status: 'applied', commandId: 'analyze', editorKind: kind,
+        projectId: state.documentId, revision: state.revision,
+        ...(state.stateDigest ? { stateDigest: state.stateDigest } : {}),
+        analysis,
+        findings,
+        summary: summarizeMeasurements(analysis),
+        counts: { findings: findings.length, high: findings.filter(item => item.severity === 'high').length, warn: findings.filter(item => item.severity === 'warn').length },
+        note: '只测量、不改画布；findings 里的 suggestedCommand 都是白名单命令，仍需另行提交。',
+      };
+    } catch (error) {
+      return failure(kind, 'analyze', error);
+    }
+  };
+
+  register(defineTool({
+    name: 'media_image_analyze',
+    description: 'Measure the shared image without changing it: mean luminance, 8-bucket histogram, shadow/highlight clipping ratios, colour cast (mean R/G/B spread), sharpness (Laplacian variance on a downsampled composite), plus layer checks (off-canvas, zero size, estimated text overflow). Returns findings[] where each item names a real allowlisted command that could address it. Read-only: revision does not change. Measure before claiming a correction worked.',
+    parameters: {
+      ...READ_PARAMS,
+      maxSide: { type: 'integer', description: 'Downsample long edge (64..640, default 320). Lower is faster and coarser.' },
+    },
+    output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+    execute: analyze('image', bridge),
+    timeoutMs: 10_000,
   }));
 
   register(defineTool({

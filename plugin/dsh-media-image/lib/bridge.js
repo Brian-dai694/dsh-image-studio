@@ -344,6 +344,15 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
       if (input.projectId && state.documentId !== input.projectId) throw new MediaBridgeError('DOCUMENT_MISMATCH', 'The active project changed.');
       return state;
     },
+    // 只读测量：曝光/裁切/偏色/清晰度 + 图层体检。不改画布、不推进 revision。
+    async analyze(input) {
+      opaqueId(input?.instanceId, 'instanceId');
+      const result = await request('editor.analyze', { editorInstanceId: input.instanceId, ...(input.maxSide === undefined ? {} : { maxSide: input.maxSide }) });
+      if (!isObject(result) || !isObject(result.luminance) || !isObject(result.clipping)) {
+        throw new MediaBridgeError('EDITOR_ERROR', 'Editor returned an invalid analysis.');
+      }
+      return result;
+    },
     async getCommandResult(input) {
       opaqueId(input?.instanceId, 'instanceId');
       opaqueId(input.commandId, 'commandId');
