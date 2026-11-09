@@ -8,6 +8,29 @@
 
 import { deflateSync } from 'node:zlib';
 import { parsePsdHeader, PsdError } from './psd.js';
+import { readLayerEffects, shadowOffset, dilate, blurAlpha, compositeTintedAlpha, readDescriptor } from './psd-effects.js';
+
+/** 描边环带：外描边=膨胀减自身，内描边=自身减腐蚀，居中各取一半。 */
+function strokeRing(alphaPlane, width, height, size, style) {
+  const ring = new Float32Array(alphaPlane.length);
+  if (style === 'InsF') {
+    const inverse = new Float32Array(alphaPlane.length);
+    for (let i = 0; i < alphaPlane.length; i += 1) inverse[i] = 1 - alphaPlane[i];
+    const eroded = dilate(inverse, width, height, size);
+    for (let i = 0; i < alphaPlane.length; i += 1) ring[i] = Math.max(0, alphaPlane[i] - (1 - eroded[i]));
+    return ring;
+  }
+  if (style === 'CtrF') {
+    const half = Math.max(1, Math.round(size / 2));
+    const outer = strokeRing(alphaPlane, width, height, half, 'OutF');
+    const inner = strokeRing(alphaPlane, width, height, half, 'InsF');
+    for (let i = 0; i < ring.length; i += 1) ring[i] = Math.max(outer[i], inner[i]);
+    return ring;
+  }
+  const dilated = dilate(alphaPlane, width, height, size);
+  for (let i = 0; i < alphaPlane.length; i += 1) ring[i] = Math.max(0, dilated[i] - alphaPlane[i]);
+  return ring;
+}
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -249,7 +272,19 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
       const blend = BLEND_FUNCS[record.blendKey] || BLEND_FUNCS.norm;
       if (!BLEND_FUNCS[record.blendKey]) approximated.push({ layerIndex: record.index, reason: `BLEND_MODE_${String(record.blendKey).trim()}_AS_SOURCE_OVER` });
       const opacity = Math.max(0, Math.min(255, record.layerOpacity === undefined ? 255 : record.layerOpacity));
-      const layerAlpha = record.clipping ? null : new Float32Array(width * height);
+
+      // 图层效果：先解析，解析不了就如实登记，不影响其它层。
+      let effects = null;
+      try {
+        const blocks = readLayerBlocks(buffer, record.extraOffset, record.extraLen);
+        const key = blocks.has('lmfx') ? 'lmfx' : blocks.has('lfx2') ? 'lfx2' : null;
+        if (key) effects = readLayerEffects(readDescriptor(buffer, blocks.get(key).offset).value);
+      } catch (error) {
+        approximated.push({ layerIndex: record.index, reason: 'LAYER_EFFECTS_UNPARSED' });
+      }
+
+      // 先算这一层的 alpha 平面：效果与本体都基于它。
+      const alphaPlane = new Float32Array(width * height);
       for (let y = 0; y < record.height; y += 1) {
         const cy = record.top + y;
         if (cy < 0 || cy >= height) continue;
@@ -260,11 +295,42 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
           let a = alpha ? alpha[src] : 255;
           if (layerMask) a = Math.round(a * (layerMask[src] / 255));
           a = Math.round(a * (opacity / 255));
-          // 剪贴蒙版：只保留底图层在该像素上的不透明部分。
           if (record.clipping) a = Math.round(a * clipBase[cy * width + cx]);
+          alphaPlane[cy * width + cx] = a / 255;
+        }
+      }
+      const bounds = { left: record.left, top: record.top, right: record.left + record.width, bottom: record.top + record.height };
+      const surface = { data: canvas, width, height };
+
+      // 投影画在层下面。
+      if (effects?.shadow) {
+        const { dx, dy } = shadowOffset(effects.shadow.angle, effects.shadow.distance);
+        const shifted = new Float32Array(width * height);
+        for (let y = 0; y < height; y += 1) {
+          for (let x = 0; x < width; x += 1) {
+            const sx = x - dx, sy = y - dy;
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+            shifted[y * width + x] = alphaPlane[sy * width + sx];
+          }
+        }
+        const shadowAlpha = blurAlpha(shifted, width, height, Math.round(effects.shadow.blur));
+        const pad = Math.round(effects.shadow.blur) + Math.max(Math.abs(dx), Math.abs(dy)) + 2;
+        compositeTintedAlpha(surface, shadowAlpha, width, effects.shadow.color, effects.shadow.opacity,
+          { left: bounds.left - pad, top: bounds.top - pad, right: bounds.right + pad, bottom: bounds.bottom + pad });
+        approximated.push({ layerIndex: record.index, reason: 'LAYER_EFFECT_SHADOW_APPROXIMATED' });
+      }
+      const layerAlpha = record.clipping ? null : alphaPlane;
+      for (let y = 0; y < record.height; y += 1) {
+        const cy = record.top + y;
+        if (cy < 0 || cy >= height) continue;
+        for (let x = 0; x < record.width; x += 1) {
+          const cx = record.left + x;
+          if (cx < 0 || cx >= width) continue;
+          const src = y * record.width + x;
+          const index = cy * width + cx;
+          const a = Math.round(alphaPlane[index] * 255);
           if (a === 0) continue;
-          const dst = (cy * width + cx) * 4;
-          if (layerAlpha) layerAlpha[(cy * width + cx)] = a / 255;
+          const dst = index * 4;
           const sa = a / 255, da = canvas[dst + 3] / 255;
           const outA = sa + da * (1 - sa);
           if (outA === 0) continue;
@@ -277,6 +343,14 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
           }
           canvas[dst + 3] = Math.round(outA * 255);
         }
+      }
+      // 描边画在层上面。
+      if (effects?.stroke) {
+        const ring = strokeRing(alphaPlane, width, height, effects.stroke.size, effects.stroke.style);
+        const pad = effects.stroke.size + 2;
+        compositeTintedAlpha(surface, ring, width, effects.stroke.color, effects.stroke.opacity,
+          { left: bounds.left - pad, top: bounds.top - pad, right: bounds.right + pad, bottom: bounds.bottom + pad });
+        approximated.push({ layerIndex: record.index, reason: 'LAYER_EFFECT_STROKE_APPROXIMATED' });
       }
       if (layerAlpha) clipBase = layerAlpha;
       composited += 1;

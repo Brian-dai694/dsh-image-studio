@@ -28,7 +28,16 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 图层不透明度与**图层蒙版**（alpha 通道 -2）都会乘进该层的 alpha。
 **剪贴蒙版**（clipping 位）会把该层 alpha 乘上它下方底图层在同像素的 alpha。
 **调整图层**支持 `brit`（亮度/对比度），按近似公式作用在已合成像素上并登记 `ADJUSTMENT_BRIGHTNESS_APPROXIMATED`。
-图层效果（描边/投影）尚未还原：需要解析 `lmfx`/`effc` 二进制描述符，目前按原样跳过。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
+**图层效果**支持描边与投影（解析 `lmfx`/`lfx2` 的 Descriptor）：
+
+| 效果 | 支持的字段 | 渲染方式 |
+|---|---|---|
+| 描边 `FrFX` | 颜色、尺寸、不透明度、位置（外/内/居中） | alpha 膨胀减法，外描边画在层上 |
+| 投影 `DrSh` | 颜色、不透明度、角度、距离、模糊 | alpha 平移 + box blur，画在层下 |
+
+投影角度按 PS 约定（角度是**光照方向**，阴影落在反方向：`angle+180°`）。
+渲染是近似：颜色/抗锯齿与 PS 不完全一致，因此都会登记 `LAYER_EFFECT_*_APPROXIMATED`；
+描述符解析失败时登记 `LAYER_EFFECTS_UNPARSED` 并**照常合成图层本体**，不会毁掉整张底图。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
 
 `POST /media-image/template/apply` 一次上传完成「解析 → 合成 → 规划」，请求头为 `x-psd-product-asset`（商品素材）、`x-psd-slot`（可选商品槽）、`x-psd-background`（降级背景色）、`x-psd-texts`（可选文案 JSON）。
 
