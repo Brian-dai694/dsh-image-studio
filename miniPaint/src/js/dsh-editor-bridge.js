@@ -475,6 +475,7 @@ export class DshEditorBridge {
           if (!item || item.documentId !== this.documentId) throw this.error('DOCUMENT_MISMATCH');
           return item;
         }
+        if (request.type === 'editor.export_inpaint_inputs') return this.exportInpaintInputs(request);
         throw this.error('INVALID_REQUEST');
       });
       port?.postMessage({ requestId: request.requestId, ok: true, result });
@@ -596,6 +597,41 @@ export class DshEditorBridge {
       else throw this.error('EDITOR_TIMEOUT_OUTCOME_UNKNOWN', '原生动作未能确认完整提交，结果未知，请查询原命令');
       throw error;
     }
+  }
+
+  async exportInpaintInputs(request) {
+    if (request.documentId !== this.documentId) throw this.error('DOCUMENT_MISMATCH');
+    const sourceLayerId = String(request.sourceLayerId || '');
+    const maskLayerId = request.maskLayerId == null ? null : String(request.maskLayerId);
+    const source = config.layers.find(layer => String(layer.id) === sourceLayerId);
+    if (!source) throw this.error('LAYER_NOT_FOUND');
+    if (source.type !== 'image' || source.is_vector) throw this.error('LAYER_NOT_RASTERIZED', '局部重绘需要栅格图片源图');
+    const image = this.rasterizeLayer(source);
+    let maskPixels;
+    if (maskLayerId) {
+      const mask = config.layers.find(layer => String(layer.id) === maskLayerId);
+      if (!mask) throw this.error('LAYER_NOT_FOUND', '蒙版层不存在');
+      if (mask.type !== 'image' || mask.is_vector) throw this.error('LAYER_NOT_RASTERIZED', '局部重绘蒙版必须是栅格图层');
+      if (String(mask.params?.dshMask?.sourceLayerId) !== sourceLayerId) throw this.error('MASK_SOURCE_MISMATCH', '该蒙版没有绑定到所选源图');
+      maskPixels = this.rasterizeLayer(mask);
+    } else {
+      const selection = this.readSelectionRect();
+      if (!selection) throw this.error('NO_SELECTION', '请选择一个区域或选择一张绑定蒙版的图层');
+      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+      const ctx = canvas.getContext('2d'); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      const sx = image.width / Math.max(1, config.WIDTH), sy = image.height / Math.max(1, config.HEIGHT);
+      ctx.fillRect(Math.round(selection.x * sx), Math.round(selection.y * sy), Math.max(1, Math.round(selection.width * sx)), Math.max(1, Math.round(selection.height * sy)));
+      maskPixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    }
+    if (image.width !== maskPixels.width || image.height !== maskPixels.height) throw this.error('INPAINT_MASK_SIZE_MISMATCH', '蒙版尺寸与源图不一致');
+    const toPng = pixels => {
+      const canvas = document.createElement('canvas'); canvas.width = pixels.width; canvas.height = pixels.height;
+      canvas.getContext('2d').putImageData(pixels, 0, 0);
+      return canvas.toDataURL('image/png');
+    };
+    return { documentId: this.documentId, revision: this.revision, sourceLayerId, maskLayerId, width: image.width, height: image.height,
+      imageDataUrl: toPng(image), maskDataUrl: toPng(maskPixels) };
   }
 
   async exportStart(request) {

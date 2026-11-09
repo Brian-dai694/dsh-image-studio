@@ -26,7 +26,8 @@ ops 只允许这几种（不认识的不要编）：
 - {"type":"insert","assetRef":"asset:<48位十六进制>"}                   指定某个已有素材插成图层
 - {"type":"status"}                                                     读一次编辑器状态（版本/图层数/选区）
 - {"type":"fontList"}                                                   列出已登记字体
-- {"type":"removeBackground","assetRef":"asset:<48位十六进制>"}      为指定已上传素材抠图，返回带透明通道的新素材
+- {"type":"removeBackground","assetRef":"asset:<48位十六进制>"}      对指定上传素材调用配置的背景移除服务
+- 用户说“局部重绘：...”时，需要选择图片层并有真实选区，或选择带 mask.sourceLayerId 绑定的蒙版层；只有 GET /media-image/inpaint 声明 inpaint=true 的 provider 才可提交，其他情况应说清缺输入/后端，不提议不支持的操作。
 - {"type":"command","command":{"type":"<命令名>","payload":{…}}}        提议一次画布编辑（用户确认后才执行）
 
 command 的 type 只能取下面这些（编辑器白名单，别的会被拒）：

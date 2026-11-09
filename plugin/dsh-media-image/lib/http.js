@@ -343,6 +343,28 @@ async function handleBatch(req, res, { batchQueue, token, prefix, pathname }) {
   return true;
 }
 
+async function handleInpaint(req, res, { generation, token, prefix, pathname }) {
+  const jobId = pathname.startsWith(`${prefix}/inpaint/`) ? pathname.slice(`${prefix}/inpaint/`.length) : '';
+  const rejection = authorizeSameOrigin(req, token, jobId ? ['GET'] : ['GET', 'POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!generation) { send(res, 501, { code: 'PROVIDER_UNAVAILABLE', message: '没有配置图像生成后端，局部重绘不可用。' }); return true; }
+  if (!jobId && req.method === 'GET') { send(res, 200, { ok: true, providers: generation.list().map(p => ({ ...p, capabilities: p.capabilities || { textToImage: true, inpaint: false } })) }); return true; }
+  if (!jobId) {
+    const body = await readJsonBody(req).catch(() => null);
+    if (!body || typeof body !== 'object') { send(res, 400, { code: 'INVALID_REQUEST', message: 'JSON body is required.' }); return true; }
+    try { send(res, 202, { ok: true, job: await generation.submitInpaint(body) }); }
+    catch (error) {
+      const code = error?.code || 'INPAINT_FAILED';
+      const status = code === 'PROVIDER_UNAVAILABLE' || code === 'INPAINT_UNSUPPORTED' ? 501 : code === 'ASSET_NOT_FOUND' ? 404 : code === 'GENERATION_BUSY' ? 429 : 400;
+      send(res, status, { code, message: error.message, hint: code === 'INPAINT_UNSUPPORTED' ? '配置支持 load_image、mask 输入和局部采样的 ComfyUI API workflow，并为该 provider 声明 editImageNode/editMaskNode。' : undefined });
+    }
+    return true;
+  }
+  try { send(res, 200, { ok: true, job: await generation.status(jobId) }); }
+  catch (error) { send(res, generationStatus(error), { code: error.code || 'INPAINT_FAILED', message: error.message }); }
+  return true;
+}
+
 async function handleBackgroundRemoval(req, res, { backgroundRemoval, token, prefix, pathname }) {
   const assetId = pathname.startsWith(`${prefix}/background-removal/`)
     ? pathname.slice(`${prefix}/background-removal/`.length)
@@ -494,6 +516,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/background-removal` || pathname.startsWith(`${prefix}/background-removal/`)) {
       return handleBackgroundRemoval(req, res, { backgroundRemoval, token, prefix, pathname });
+    }
+    if (pathname === `${prefix}/inpaint` || pathname.startsWith(`${prefix}/inpaint/`)) {
+      return handleInpaint(req, res, { generation, token, prefix, pathname });
     }
     if (pathname === `${prefix}/generate` || pathname.startsWith(`${prefix}/generate/`)) {
       // 批量路由必须在单作业路由之前匹配，否则 /generate/batch 会被当成 jobId。

@@ -75,8 +75,9 @@ function authHeaders(apiKey) {
 // 提交：POST {baseUrl}/prompt  body {prompt: <API 格式工作流>, client_id}
 // 轮询：GET  {baseUrl}/history/{prompt_id}
 // 取图：GET  {baseUrl}/view?filename=&subfolder=&type=output
-// 提示词注入点由配置给出（promptNode.nodeId + promptNode.field），不猜工作流结构。
-export function createComfyUiProvider({ id, baseUrl, workflow, promptNode = null, widthNode = null, heightNode = null, apiKey = null, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+// 提示词/尺寸/图片/蒙版注入点都必须由配置显式给出，不猜工作流结构。
+// 支持局部重绘的 provider 必须配置 editImageNode/editMaskNode；普通 txt2img workflow 不得冒充 inpaint。
+export function createComfyUiProvider({ id, baseUrl, workflow, promptNode = null, widthNode = null, heightNode = null, editImageNode = null, editMaskNode = null, apiKey = null, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (!isObject(workflow)) throw new GenerationError('PROVIDER_INVALID', `provider "${id}" 缺少 workflow（ComfyUI API 格式 JSON）`);
   if (!baseUrl) throw new GenerationError('PROVIDER_INVALID', `provider "${id}" 缺少 baseUrl`);
   const root = trimSlash(baseUrl);
@@ -101,12 +102,52 @@ export function createComfyUiProvider({ id, baseUrl, workflow, promptNode = null
   return {
     id,
     kind: 'comfyui',
-    describe() { return { id, kind: 'comfyui', baseUrl: root, hasApiKey: !!apiKey }; },
+    describe() { return { id, kind: 'comfyui', baseUrl: root, hasApiKey: !!apiKey, capabilities: { textToImage: true, inpaint: !!(editImageNode && editMaskNode) } }; },
+    supportsInpaint() { return !!(editImageNode && editMaskNode); },
     async start({ prompt, width, height }) {
       const payload = await requestJson(fetchImpl, `${root}/prompt`, {
         method: 'POST', headers, body: JSON.stringify({ prompt: graph(prompt, width, height), client_id: randomUUID() }),
       }, timeoutMs);
       if (!payload?.prompt_id) throw new GenerationError('GENERATION_FAILED', 'ComfyUI 没有返回 prompt_id');
+      return { remoteId: String(payload.prompt_id) };
+    },
+    async startInpaint({ prompt, width, height, imageName, maskName }) {
+      if (!this.supportsInpaint()) throw new GenerationError('INPAINT_UNSUPPORTED', `provider "${id}" 没有配置 editImageNode/editMaskNode，不能局部重绘`);
+      const copy = JSON.parse(JSON.stringify(workflow));
+      const injectText = (spec, value, label) => {
+        const node = copy?.[spec.nodeId];
+        if (!isObject(node?.inputs)) throw new GenerationError('PROVIDER_INVALID', `provider "${id}" 的 ${label} 节点不存在`);
+        node.inputs[spec.field || 'image'] = value;
+      };
+      injectText(editImageNode, imageName, 'editImageNode');
+      injectText(editMaskNode, maskName, 'editMaskNode');
+      if (promptNode) {
+        const node = copy?.[promptNode.nodeId];
+        if (!isObject(node?.inputs)) throw new GenerationError('PROVIDER_INVALID', `provider "${id}" 的 promptNode 指向不存在的节点`);
+        node.inputs[promptNode.field || 'text'] = prompt;
+      }
+      for (const [spec, value] of [[widthNode, width], [heightNode, height]]) {
+        if (!spec || value === undefined) continue;
+        const node = copy?.[spec.nodeId];
+        if (!isObject(node?.inputs)) throw new GenerationError('PROVIDER_INVALID', `provider "${id}" 的尺寸节点不存在`);
+        node.inputs[spec.field || 'value'] = value;
+      }
+      const form = new FormData();
+      form.append('image', new Blob([imageName.bytes], { type: imageName.mime }), imageName.filename || 'source.png');
+      form.append('type', 'input');
+      const imageUpload = await fetchImpl(`${root}/upload/image`, { method: 'POST', headers: authHeaders(apiKey), body: form, signal: AbortSignal.timeout(timeoutMs) });
+      if (!imageUpload.ok) throw new GenerationError('GENERATION_FAILED', `上传局部重绘源图失败：HTTP ${imageUpload.status}`);
+      const uploadedImage = await imageUpload.json();
+      const maskForm = new FormData();
+      maskForm.append('image', new Blob([maskName.bytes], { type: maskName.mime }), maskName.filename || 'mask.png');
+      maskForm.append('type', 'input');
+      const maskUpload = await fetchImpl(`${root}/upload/image`, { method: 'POST', headers: authHeaders(apiKey), body: maskForm, signal: AbortSignal.timeout(timeoutMs) });
+      if (!maskUpload.ok) throw new GenerationError('GENERATION_FAILED', `上传局部重绘蒙版失败：HTTP ${maskUpload.status}`);
+      const uploadedMask = await maskUpload.json();
+      const imageNode = copy[editImageNode.nodeId]; imageNode.inputs[editImageNode.field || 'image'] = uploadedImage.name;
+      const maskNode = copy[editMaskNode.nodeId]; maskNode.inputs[editMaskNode.field || 'image'] = uploadedMask.name;
+      const payload = await requestJson(fetchImpl, `${root}/prompt`, { method: 'POST', headers, body: JSON.stringify({ prompt: copy, client_id: randomUUID() }) }, timeoutMs);
+      if (!payload?.prompt_id) throw new GenerationError('GENERATION_FAILED', 'ComfyUI 没有返回 inpaint prompt_id');
       return { remoteId: String(payload.prompt_id) };
     },
     async poll({ remoteId }) {
@@ -144,7 +185,7 @@ export function createHttpJsonProvider({ id, baseUrl, submitPath = '/generate', 
   return {
     id,
     kind: 'http-json',
-    describe() { return { id, kind: 'http-json', baseUrl: root, submitPath, hasApiKey: !!apiKey }; },
+    describe() { return { id, kind: 'http-json', baseUrl: root, submitPath, hasApiKey: !!apiKey, capabilities: { textToImage: true, inpaint: false } }; },
     async start({ prompt, width, height, extra }) {
       const payload = await requestJson(fetchImpl, `${root}${submitPath}`, {
         method: 'POST', headers, body: JSON.stringify({ prompt, width, height, ...(isObject(extra) ? extra : {}) }),
@@ -241,6 +282,39 @@ export function createGenerationService({ providers = [], assets, fetchImpl = gl
       return [...registry.values()].map(provider => provider.describe());
     },
     configured() { return registry.size > 0; },
+    supportsInpaint(providerId) {
+      const provider = registry.get(providerId);
+      return !!provider?.supportsInpaint?.();
+    },
+    async submitInpaint({ provider, prompt, width, height, imageRef, maskRef, idempotencyKey } = {}) {
+      sweep();
+      const adapter = registry.get(provider);
+      if (!adapter) throw new GenerationError(registry.size ? 'PROVIDER_UNKNOWN' : 'PROVIDER_UNAVAILABLE', registry.size ? `未配置的 provider: ${String(provider)}` : '未配置任何生成后端');
+      if (!adapter.supportsInpaint?.() || typeof adapter.startInpaint !== 'function') throw new GenerationError('INPAINT_UNSUPPORTED', `Provider ${provider} 没有显式配置局部重绘 image/mask 节点`);
+      if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 4000) throw new GenerationError('INVALID_REQUEST', 'prompt 必须是 1..4000 字符');
+      for (const [key, value] of [['width', width], ['height', height]]) if (!Number.isSafeInteger(value) || value < 16 || value > 8192) throw new GenerationError('INVALID_REQUEST', `${key} 必须是 16..8192 的整数`);
+      const assetId = ref => { const m = /^asset:([a-f0-9]{48})$/.exec(String(ref || '')); if (!m) throw new GenerationError('INVALID_ASSET_REF', '局部重绘源图与蒙版必须是素材库 asset:<48位 id>'); const a = assets.get(m[1]); if (!a) throw new GenerationError('ASSET_NOT_FOUND', '局部重绘素材已过期，请重新上传'); return a; };
+      const source = assetId(imageRef), mask = assetId(maskRef);
+      const pngSize = asset => {
+        const b = asset.bytes;
+        if (asset.mime !== 'image/png' || b.length < 24 || !b.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) throw new GenerationError('INPAINT_INPUT_INVALID', '局部重绘源图与蒙版必须是 PNG');
+        return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+      };
+      const sourceSize = pngSize(source), maskSize = pngSize(mask);
+      if (sourceSize.width !== maskSize.width || sourceSize.height !== maskSize.height) throw new GenerationError('INPAINT_MASK_SIZE_MISMATCH', '蒙版尺寸必须与源图一致');
+      if (sourceSize.width !== width || sourceSize.height !== height) throw new GenerationError('INPAINT_SIZE_MISMATCH', '请求尺寸必须与源图/蒙版实际尺寸一致');
+      const idempotency = idempotencyKey ? `inpaint:${idempotencyKey}` : null;
+      if (idempotency) { const existing = byIdempotencyKey.get(idempotency); if (existing && jobs.has(existing)) return publicJob(jobs.get(existing)); }
+      if (jobs.size >= MAX_JOBS) throw new GenerationError('GENERATION_BUSY', '并发作业过多，请先处理已有作业');
+      const job = { jobId: randomUUID(), provider: adapter.id, prompt, width, height, kind: 'inpaint', status: 'queued', remoteId: null, assetRef: null, error: null, idempotencyKey: idempotency, createdAt: now(), updatedAt: now() };
+      jobs.set(job.jobId, job); if (idempotency) byIdempotencyKey.set(idempotency, job.jobId);
+      try {
+        const started = await adapter.startInpaint({ prompt, width, height, imageName: { bytes: source.bytes, mime: source.mime, filename: source.name }, maskName: { bytes: mask.bytes, mime: mask.mime, filename: mask.name } });
+        if (started.bytes) settle(job, { status: 'succeeded', bytes: started.bytes });
+        else { job.remoteId = started.remoteId; job.status = 'running'; job.updatedAt = now(); }
+      } catch (error) { job.status = 'failed'; job.error = error?.message || '提交局部重绘失败'; job.updatedAt = now(); }
+      return publicJob(job);
+    },
     async submit({ provider, prompt, width, height, extra, idempotencyKey } = {}) {
       sweep();
       const adapter = registry.get(provider);

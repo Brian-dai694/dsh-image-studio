@@ -317,6 +317,31 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('局部重绘按真实选区/绑定蒙版导出源图，能力不匹配时不提交，结果确认后独立落层', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const sendStart = code.indexOf('async function sendAssist');
+  const send = code.slice(sendStart, sendStart + 2400);
+  assert.match(code.slice(code.indexOf('async function routeAssist'), code.indexOf('async function sendAssist')), /\^局部重绘/, '自然语言显式局部重绘要走确定性入口');
+  const helperStart = code.indexOf('async function sendInpaint');
+  const helperEnd = code.indexOf('async function applyInpaintToCanvas', helperStart);
+  const helper = code.slice(helperStart, helperEnd);
+  assert.match(helper, /editor\.export_inpaint_inputs/, '必须从当前编辑器导出源图与蒙版');
+  assert.match(helper, /\/media-image\/inpaint/, '必须走局部重绘路由');
+  assert.match(helper, /idempotencyKey/, '提交需带幂等键');
+  assert.match(helper, /unknown/, '作业结果未知时不得重提');
+  const applyStart = helperEnd;
+  const applyEnd = code.indexOf('async function composeMaskLayer', applyStart);
+  const apply = code.slice(applyStart, applyEnd);
+  assert.match(apply, /await askConfirm\(/, '结果落画布前必须确认');
+  assert.match(apply, /maskRef: `layer:\$\{mask\.id\}`/, '结果图层应继承当前绑定蒙版');
+  assert.match(apply, /expectedRevision/, '落层必须使用新读状态的 revision');
+  const routeStart = code.indexOf('async function routeAssist');
+  const inpaintRoute = code.slice(code.indexOf('if (/^局部重绘', routeStart), code.indexOf('if (/^(抠图|去背景)', routeStart));
+  assert.match(inpaintRoute, /capabilities\?\.inpaint === true/, '必须由 provider capability 门控');
+  assert.match(inpaintRoute, /没有提交生成作业/, '不支持时必须拒绝提交');
+});
+
 test('用户输入抠图时直达本地去背景，不先让模型拒答；纯色底失败时如实提示需要 AI 服务', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

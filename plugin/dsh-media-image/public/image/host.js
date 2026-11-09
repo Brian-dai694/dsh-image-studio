@@ -994,7 +994,8 @@ const CHIPS = [
   ['批量', '批量：晨光|夜景|木桌'],
   ['上传', '@upload'],
   ['套版', '@psd'],
-  ['抠图', '抠图'],
+  ['局部重绘', '局部重绘：'],
+  ['抠图', '抠图'],,
   ['导入', '导入：https://example.com/a.png'],
   ['字体', '字体列表'],
   ['状态', '状态'],
@@ -1045,6 +1046,7 @@ function renderChips() {
     button.addEventListener('click', () => {
       if (command === '@upload') { $('assist-file')?.click(); return; }
       if (command === '@psd') { $('assist-psd')?.click(); return; }
+      if (command === '局部重绘：') { if (assistText) { assistText.value = command; assistText.focus(); } return; }
       void sendAssist(command);
     });
     box.append(button);
@@ -1085,6 +1087,7 @@ const HELP = [
   '面板已经收起来了，下面这些都在这儿说（走插件已有能力，不调模型）：',
   '· 生成：<提示词>             → 出一张图，完成后可插入图层',
   '· 批量：<提示词>|<提示词>    → 排队生成（并发 2），逐项状态，失败可单条重试',
+  '· 局部重绘：<描述>          → 当前只认选区/绑定蒙版；后端需配置 inpaint workflow，否则明确拒绝',
   '· 上传（点上面那颗按钮）      → 本地图片入库（PNG/JPEG/WebP ≤32 MiB）',
   '· 导入：<图片 URL>           → 受控拉取远程素材（拦内网）',
   '· 字体：<URL> <族名>         → 登记字体；「字体列表」看已登记的',
@@ -1098,6 +1101,54 @@ const HELP = [
 // 一句话 → 动作。返回给用户看的文本；失败要说清是哪个环节。
 // 本地自动去背景：不需要坐标、不依赖外部模型。白底/纯色底商品图可直接得到透明图；
 // 背景复杂时编辑器会回 BACKGROUND_NOT_DETECTED，此时如实告诉用户需要 AI 抠图服务。
+async function sendInpaint({ provider, prompt, connection, state, sourceLayerId, maskLayerId }) {
+  const exported = await transport.request({ type: 'editor.export_inpaint_inputs', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId, documentId: state.documentId, sourceLayerId, maskLayerId });
+  if (exported.revision !== state.revision) throw Object.assign(new Error('导出期间画布发生变化，请刷新状态并重新开始。'), { code: 'REVISION_CONFLICT' });
+  const uploadDataUrl = async (dataUrl, name) => {
+    const blob = await (await fetch(dataUrl)).blob();
+    const file = new File([blob], name, { type: 'image/png' });
+    const asset = await uploadImageAsset(file);
+    rememberAsset(asset);
+    return `asset:${asset.id}`;
+  };
+  const imageRef = await uploadDataUrl(exported.imageDataUrl, `inpaint-source-${sourceLayerId}.png`);
+  const maskRef = await uploadDataUrl(exported.maskDataUrl, `inpaint-mask-${maskLayerId}.png`);
+  const started = await api('/media-image/inpaint', { method: 'POST', body: {
+    provider, prompt, width: exported.width, height: exported.height, imageRef, maskRef,
+    idempotencyKey: crypto.randomUUID(),
+  } });
+  let job = started.job;
+  for (let i = 0; i < 120 && !['succeeded', 'failed', 'unknown'].includes(job.status); i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    job = (await api(`/media-image/inpaint/${encodeURIComponent(job.jobId)}`)).job;
+  }
+  return { job, sourceLayerId, maskLayerId, documentId: state.documentId, revision: exported.revision };
+}
+
+async function applyInpaintToCanvas(result) {
+  const job = result.job;
+  if (job.status === 'unknown') { bubble('bot', `局部重绘结果未知（${job.jobId}），请查询原作业；不得重新提交。`); return; }
+  if (job.status !== 'succeeded' || !job.assetRef) { bubble('bot', `局部重绘失败：${job.error || job.status}`); return; }
+  const connection = await connect();
+  const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+  if (state.documentId !== result.documentId) { bubble('bot', '画布文档已切换，生成结果保留为素材；没有写入当前画布。'); return; }
+  const mask = state.layers.find(layer => layer.id === result.maskLayerId);
+  const source = state.layers.find(layer => layer.id === result.sourceLayerId);
+  if (!mask || !source || mask.mask?.sourceLayerId !== source.id) { bubble('bot', '源图或绑定蒙版已变化；生成图保留为素材，请先重新检查蒙版关系。'); return; }
+  const answer = await askConfirm({
+    title: '将局部重绘结果添加为新图层',
+    details: [`源图层  ${source.name}`, `蒙版层  ${mask.name}`, `结果素材 ${job.assetRef}`, '原图和蒙版均不会修改；新图层会带同一张蒙版。'].join('\\n'),
+    maskAvailable: true,
+  });
+  if (!answer.ok) { bubble('bot', '已取消落层，生成结果仍保留在素材库。'); return; }
+  const fresh = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+  if (fresh.documentId !== result.documentId || fresh.revision !== state.revision) { bubble('bot', '确认期间工程发生变化，已停止写入；生成结果仍在素材库。请重新核对后再落层。'); return; }
+  const applied = await transport.request({ type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
+    documentId: fresh.documentId, expectedRevision: fresh.revision, commandId: crypto.randomUUID(),
+    command: { type: 'layer.add_image', payload: { sourceRef: job.assetRef, maskRef: `layer:${mask.id}`, maskMode: 'alpha', x: source.x || 0, y: source.y || 0, width: source.width, height: source.height, fit: 'contain', name: `局部重绘·${source.name}` } } }, { timeoutMs: 20000 });
+  bubble('bot', `局部重绘结果已添加为独立蒙版图层 · R${applied.revision}。原图与蒙版仍保留。`);
+}
+
 async function composeMaskLayer(maskId) {
   const connection = await connect();
   const read = () => transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
@@ -1289,11 +1340,34 @@ async function routeAssist(raw) {
     return;
   }
 
-  if (/^(插入|落层|插入图层|放进去)/.test(text)) {
-    const match = /asset:([a-f0-9]{48})/.exec(lastAssetRef || '');
-    if (!match) { say('还没有可插入的素材。先「上传」一张，或说「生成：…」出一张。'); return; }
-    await insertAssetAsLayer({ id: match[1], name: nearestAssetName() });
-    say('已发出插入请求，确认框里点「确认插入」才真正落层。');
+  if (/^局部重绘[:：]\s*([\s\S]+)$/.test(text)) {
+    const prompt = /^局部重绘[:：]\s*([\s\S]+)$/.exec(text)[1].trim();
+    const connection = await connect();
+    const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+    const selected = state.layers.find(layer => layer.id === state.selectedLayerId);
+    const selectedMask = selected?.mask?.sourceLayerId ? selected : null;
+    const sourceLayerId = selectedMask?.mask.sourceLayerId || (selected?.type === 'image' ? selected.id : null);
+    const maskLayerId = selectedMask?.id || null;
+    if (!sourceLayerId || (!maskLayerId && !state.selection)) {
+      say('局部重绘需要：选中带源图绑定的蒙版层，或选中图片层并保持选区。先用画笔修好蒙版/选区，再重试。');
+      return;
+    }
+    const provider = assistProvider();
+    const providerList = await api('/media-image/inpaint');
+    const capable = (providerList.providers || []).find(p => p.id === provider && p.capabilities?.inpaint === true);
+    if (!capable) {
+      const configured = (providerList.providers || []).map(p => `${p.id}${p.capabilities?.inpaint ? '（局部重绘）' : '（仅普通生图）'}`).join('、');
+      say(`当前后端不支持局部重绘${configured ? `：${configured}` : ''}。需要在插件配置中为 ComfyUI provider 声明 editImageNode 与 editMaskNode，并使用支持 inpaint 的 API workflow；没有提交生成作业。`);
+      return;
+    }
+    const pending = bubble('bot', '正在读取源图与当前选区/蒙版，并提交局部重绘……');
+    try {
+      const result = await sendInpaint({ provider, prompt, connection, state, sourceLayerId, maskLayerId });
+      pending.textContent = result.job.status === 'succeeded' ? '局部重绘已完成；结果还只是素材，等待确认后才写入画布。' : `局部重绘作业状态：${result.job.status}`;
+      if (result.job.status === 'succeeded') await applyInpaintToCanvas(result);
+      else if (result.job.status === 'unknown') bubble('bot', `结果未知，不能重提；作业 ${result.job.jobId} 可查询。`);
+      else if (result.job.status === 'failed') bubble('bot', `局部重绘失败：${result.job.error || '后端返回失败'}`);
+    } catch (error) { pending.textContent = `${error.code || 'INPAINT_FAILED'}：${error.message}`; }
     return;
   }
 

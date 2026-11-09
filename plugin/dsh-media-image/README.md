@@ -10,6 +10,35 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里的原生 Conversation 默认隐藏，页面右下角悬浮助手保留。隐藏的只是对话子组件，不会移除侧栏插件入口、画布或本人授权入口。若要恢复红框对话，可设置 `globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true` 或 `localStorage.setItem('dsh-media-image-conversation', 'visible')` 并刷新；设为 `false` / `'hidden'` 可再次隐藏。旧开关 `__DSH_MEDIA_IMAGE_PANEL__` 不再控制插件侧栏，避免把整个插件误藏。
 
 
+## 局部重绘（ComfyUI inpaint workflow）
+
+局部重绘只对**显式声明**支持 image+mask 输入的 ComfyUI provider 开放。普通 text-to-image workflow（包括桌面 profile 当前的 `mock-comfy`）不支持局部重绘；助手会在提交前拒绝，不会把整图生图冒充 inpaint。
+
+在对应 provider 配置中增加 `editImageNode`、`editMaskNode`（均为 `{ nodeId, field? }`，默认 field=`image`），并确保 API workflow 确实将图像节点接到 inpaint/latent noise mask 输入：
+
+```yaml
+generation:
+  providers:
+    - id: comfy-inpaint
+      kind: comfyui
+      baseUrl: http://127.0.0.1:8188
+      workflow: # ComfyUI API-format inpaint workflow
+        # ...真实 workflow 节点...
+      promptNode: { nodeId: "6", field: text }
+      editImageNode: { nodeId: "20", field: image }
+      editMaskNode: { nodeId: "21", field: image }
+```
+
+节点 ID 必须来自你实际 ComfyUI workflow；插件只把源图和蒙版上传到该配置的 ComfyUI，再按这两个节点 ID 注入文件名，不会猜 workflow。页面要求选中带源图绑定的蒙版层，或选中图片层并保留有效选区。结果先回到临时素材库，再经用户确认成为带同一蒙版的新图层；原图不改。
+
+配置虽然存在并不自动证明 workflow 做了正确的局部采样：需用实际 ComfyUI inpaint workflow 做端到端测试，确认蒙版外像素保持不变。
+
+## 局部重绘
+
+阶段 2 提供源图+选区/绑定蒙版 → 显式支持 inpaint 的 ComfyUI API workflow → 新素材 → 用户确认后独立结果层。ComfyUI provider 必须配置 `editImageNode` 与 `editMaskNode`，并确认 workflow 确实将 mask 接到局部采样节点；插件将源图、蒙版通过同源鉴权上传到该 ComfyUI，Host Relay 不传像素数据。执行前会再读 document/revision；结果未知只可查原 job，不重提。结果落层前二次读状态，原图和蒙版不覆盖。
+
+**当前桌面 profile 仅有 `mock-comfy` 文本生图 workflow，未配置 edit image/mask 节点，不能真实局部重绘。** 页面 capability 会拒绝提交并告知配置要求；测试模拟 Provider 只验证协议，不代表真实 AI 输出。配置真实 ComfyUI inpaint workflow 后，仍需用真实后端做端到端验证。
+
 ## 可修正蒙版闭环
 
 本地「抠图」创建独立蒙版层并合成结果副本，原图不改。蒙版绑定存储在图层 `params.dshMask.sourceLayerId`，`read_state.layers[].mask` 可读取源图关系。选择蒙版层并用画笔/橡皮修正后，说「合成蒙版」会读取当前像素新增结果副本。多张蒙版必须先选中一张；源图已删除时拒绝合成；确认期间 revision 改变时停止。每次合成是快照，不会随蒙版实时更新。蒙版是普通 alpha 图层，并非原生实时图层蒙版。颜色法不能保证复杂背景抠图质量。
