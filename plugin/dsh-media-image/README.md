@@ -20,7 +20,13 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 说完「套版」按默认 `#1` 执行；要换槽就说「套版：2」。规划器 `planTemplateApply` 同时返回 `candidates`（候选槽）、`mapping`（逐槽结论：`place-product` / `replaced-by-solid-background` / `skip` / `place-text`）与 `skipped`，页面和测试都据此核对，不靠猜。指定整幅背景槽会以 `TEMPLATE_SLOT_NOT_FOUND` 拒绝。
 
-执行仍是重建式：`canvas.resize` → 纯色背景 → 商品图 → 文字，每条命令单独确认，可撤销。PSD 里的渐变、描边、投影等效果不会还原，会逐条登记在 `skipped` 里。
+执行是**合成式**（0.17 起）：`canvas.resize` → 逐层合成底图 → 商品图 → 文字，每条命令单独确认，可撤销。
+
+底图由 `lib/psd-composite.js` 生成：解析 PSD 各图层的像素通道（支持 raw/RLE 压缩），**排除文字层与选定的商品槽**，把其余可见图层按位置和 alpha 合成为一张整幅 PNG。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
+
+`POST /media-image/template/apply` 一次上传完成「解析 → 合成 → 规划」，请求头为 `x-psd-product-asset`（商品素材）、`x-psd-slot`（可选商品槽）、`x-psd-background`（降级背景色）、`x-psd-texts`（可选文案 JSON）。
+
+已知边界：混合模式目前统一按 source-over 合成，特殊混合模式（如 multiply）会有色差；图层蒙版、剪贴蒙版、调整图层没有还原。
 
 ## 局部重绘（ComfyUI inpaint workflow）
 

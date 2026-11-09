@@ -6,6 +6,7 @@ import { extname, relative, resolve, sep } from 'node:path';
 import { fetchRemoteBytes } from './remote.js';
 import { MAX_FONT_BYTES } from './fonts.js';
 import { psdToTemplate } from './psd.js';
+import { compositePsdLayers } from './psd-composite.js';
 import { planTemplateApply } from './template.js';
 
 const MIME = {
@@ -411,6 +412,62 @@ async function handleTemplatePlan(req, res, { token }) {
   return true;
 }
 
+/**
+ * PSD 直套：一次上传完成「解析 → 逐层合成底图 → 规划」。
+ * 先用不含底图的方式规划一次，拿到真正选中的商品槽，再把它和文字层从底图里挖掉，
+ * 这样底图保留装饰、商品槽留空给商品图、文字留空给 layer.add_text。
+ */
+async function handleTemplateApply(req, res, { token, assets }) {
+  const rejection = authorizeSameOrigin(req, token, ['POST'], { requireJson: false });
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  if (!assets) { send(res, 501, { code: 'ASSET_UNAVAILABLE', message: 'This deployment has no asset store.' }); return true; }
+  try {
+    const body = await readBinaryBody(req, MAX_ASSET_BYTES);
+    if (!body.length) { send(res, 400, { code: 'PSD_EMPTY', message: '请求体是空的，请直接上传 .psd 文件字节。' }); return true; }
+    const header = key => { const value = req.headers?.[key]; return typeof value === 'string' && value ? decodeURIComponent(value) : undefined; };
+    const template = psdToTemplate(body, { name: String(header('x-psd-name') || 'uploaded.psd').slice(0, 120) });
+    const productAsset = header('x-psd-product-asset');
+    const slotId = header('x-psd-slot');
+    const background = header('x-psd-background');
+    let texts = {};
+    const textsRaw = header('x-psd-texts');
+    if (textsRaw) {
+      try { texts = JSON.parse(textsRaw); } catch { send(res, 400, { code: 'TEMPLATE_BAD_TEXTS', message: 'x-psd-texts 必须是 JSON 对象' }); return true; }
+    }
+
+    const probe = planTemplateApply(template, { product: productAsset ? { assetRef: productAsset, ...(slotId ? { slotId } : {}) } : undefined, texts, background });
+    const textLayerIndices = template.slots.filter(slot => slot.type === 'text').map(slot => Number(String(slot.id).replace('slot-', '')) - 1);
+    const productLayerIndex = probe.summary.productSlot ? Number(String(probe.summary.productSlot).replace('slot-', '')) - 1 : null;
+    const exclude = textLayerIndices.concat(productLayerIndex === null ? [] : [productLayerIndex]);
+
+    let base = null;
+    let baseError = null;
+    let composite = null;
+    try {
+      composite = compositePsdLayers(body, { excludeLayerIndices: exclude });
+      const stored = assets.add({ bytes: composite.png, name: `psd-base-${template.name}.png` });
+      base = { assetRef: `asset:${stored.id}`, width: composite.width, height: composite.height, composited: composite.composited, skipped: composite.skipped.length, approximated: composite.approximated };
+    } catch (error) {
+      // 合成失败不该毁掉套版：退回纯色背景，并如实说明为什么没有底图。
+      baseError = { code: error?.code || 'PSD_COMPOSITE_FAILED', message: error.message };
+    }
+
+    const plan = planTemplateApply(template, {
+      baseAssetRef: base?.assetRef,
+      background,
+      product: productAsset ? { assetRef: productAsset, ...(slotId ? { slotId } : {}) } : undefined,
+      texts,
+      textStyle: { fill_color: '#15181f' },
+    });
+    send(res, 200, { ok: true, plan, base, baseError, template: { name: template.name, canvas: template.canvas, summary: template.summary } });
+  } catch (error) {
+    const code = error?.code || 'TEMPLATE_FAILED';
+    const status = code === 'PAYLOAD_TOO_LARGE' ? 413 : String(code).startsWith('PSD_') || String(code).startsWith('TEMPLATE_') ? 400 : 500;
+    send(res, status, { code, message: error.message });
+  }
+  return true;
+}
+
 async function handlePsdSlots(req, res, { token, assets }) {
   const rejection = authorizeSameOrigin(req, token, ['POST'], { requireJson: false });
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
@@ -507,6 +564,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/template/plan`) {
       return handleTemplatePlan(req, res, { token });
+    }
+    if (pathname === `${prefix}/template/apply`) {
+      return handleTemplateApply(req, res, { token, assets });
     }
     if (pathname === `${prefix}/psd/slots`) {
       return handlePsdSlots(req, res, { token, assets });

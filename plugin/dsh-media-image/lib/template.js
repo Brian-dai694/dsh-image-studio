@@ -48,7 +48,7 @@ export function solidColorDataUrl(hex = '#ffffff') {
  * @param options.texts {slotId: 文案} 覆盖文字槽文案（默认沿用 PSD 原文）
  * @param options.textStyle {size?, fill_color?, family?, bold?}
  */
-export function planTemplateApply(template, { background, product, texts = {}, textStyle = {} } = {}) {
+export function planTemplateApply(template, { background, baseAssetRef, product, texts = {}, textStyle = {} } = {}) {
   if (!template || !template.canvas || !Array.isArray(template.slots)) {
     throw Object.assign(new Error('模板缺少 canvas/slots'), { code: 'TEMPLATE_INVALID' });
   }
@@ -66,7 +66,16 @@ export function planTemplateApply(template, { background, product, texts = {}, t
 
   commands.push({ type: 'canvas.resize', payload: { width: canvasWidth, height: canvasHeight }, note: `画布对齐模板 ${canvasWidth}×${canvasHeight}` });
 
-  if (background) {
+  // 底图优先：PSD 逐层合成出的 PNG 已经把装饰（渐变/描边/投影）画好了，
+  // 比纯色背景更接近模板；纯色背景只在没有底图时用来占位。
+  if (baseAssetRef) {
+    if (!/^asset:[a-f0-9]{48}$/.test(String(baseAssetRef))) throw Object.assign(new Error('baseAssetRef 必须是 asset:<48 位 id>'), { code: 'TEMPLATE_BAD_ASSET' });
+    commands.push({
+      type: 'layer.add_image',
+      payload: { sourceRef: baseAssetRef, x: 0, y: 0, width: canvasWidth, height: canvasHeight, fit: 'stretch', name: '模板底图' },
+      note: 'PSD 装饰层合成底图（不含文字与商品槽）',
+    });
+  } else if (background) {
     commands.push({
       type: 'layer.add_image',
       payload: { sourceRef: solidColorDataUrl(background), x: 0, y: 0, width: canvasWidth, height: canvasHeight, fit: 'stretch', name: '背景' },
@@ -113,6 +122,8 @@ export function planTemplateApply(template, { background, product, texts = {}, t
   for (const slot of imageSlots) {
     if (slot === productSlot) {
       mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'product', action: 'place-product', reason: null });
+    } else if (baseAssetRef) {
+      mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'decoration', action: 'preserved-in-base', reason: null });
     } else if (isFullCanvas(slot) && background) {
       mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'background', action: 'replaced-by-solid-background', reason: `整幅背景槽由纯色 ${background} 取代，PSD 原背景像素不还原` });
     } else {

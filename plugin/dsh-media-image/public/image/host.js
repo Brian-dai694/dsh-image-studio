@@ -1240,13 +1240,14 @@ async function localCutout(assetHint) {
   }
 }
 
-// 套版：PSD 模板 → 槽位 → 规划 → 逐条确认执行（重建式，丢弃装饰图层并如实告知）。
+// 套版：PSD 模板 → 预览候选槽 → 逐层合成底图 → 规划 → 逐条确认执行。
 let psdTemplate = null;
-async function apiRaw(pathname, bytes, name) {
+let psdFile = null;
+async function apiRaw(pathname, bytes, name, extraHeaders = {}) {
   const token = await boot();
   const response = await fetch(pathname, {
     method: 'POST', credentials: 'same-origin', body: bytes,
-    headers: { authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1', 'x-psd-name': encodeURIComponent(name || 'template.psd') },
+    headers: { authorization: `Bearer ${token}`, 'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1', 'x-psd-name': encodeURIComponent(name || 'template.psd'), ...extraHeaders },
   });
   const value = await response.json().catch(() => null);
   if (!response.ok) throw Object.assign(new Error(value?.message || `HTTP ${response.status}`), { code: value?.code || 'REQUEST_FAILED' });
@@ -1299,7 +1300,7 @@ function templatePreview(template) {
   }
   const texts = textSlots.filter(slot => String(slot.text || '').trim()).map(slot => `「${String(slot.text).slice(0, 24)}」`);
   if (texts.length) lines.push(`文字沿用 PSD：${texts.slice(0, 4).join('、')}${texts.length > 4 ? '…' : ''}`);
-  lines.push('装饰图层（渐变/描边/投影）不会被还原，会逐条列出。');
+  lines.push('执行时会把装饰层逐层合成进底图（文字层与商品槽留空）；合成失败才退化为纯色背景。');
   return lines.join('\n');
 }
 
@@ -1308,12 +1309,13 @@ async function applyTemplateFlow(file, slotIndex = null) {
   try {
     let template = psdTemplate;
     if (file) {
+      psdFile = file;
       const parsed = await apiRaw('/media-image/psd/slots', await file.arrayBuffer(), file.name);
       template = parsed.template;
       psdTemplate = template;
       line.textContent = templatePreview(template);
     }
-    if (!template) { line.textContent = '还没有套版模板：先点「套版」选一个 .psd 文件。'; return; }
+    if (!template || !psdFile) { line.textContent = '还没有套版模板：先点「套版」选一个 .psd 文件。'; return; }
     if (!lastAssetRef) { bubble('bot', '还没有商品图：先点「上传」选一张（白底图更好），我再套版。'); return; }
     const candidates = (template.slots || []).filter(slot => slot.type === 'image' && slot.visible !== false);
     let slotId = null;
@@ -1326,11 +1328,19 @@ async function applyTemplateFlow(file, slotIndex = null) {
       if (!picked) { line.textContent = `没有第 ${slotIndex} 个可选图片槽（共 ${ordered.length} 个）。`; return; }
       slotId = picked.id;
     }
-    const planned = await api('/media-image/template/plan', {
-      method: 'POST',
-      body: { template, background: '#f4f5f7', product: { assetRef: lastAssetRef, ...(slotId ? { slotId } : {}) }, textStyle: { fill_color: '#15181f' } },
+    // 一次上传完成「逐层合成底图 + 规划」：装饰层回到画布，商品槽与文字层留空。
+    const applied = await apiRaw('/media-image/template/apply', await psdFile.arrayBuffer(), psdFile.name, {
+      'x-psd-product-asset': lastAssetRef,
+      'x-psd-background': '#f4f5f7',
+      ...(slotId ? { 'x-psd-slot': slotId } : {}),
     });
-    const plan = planned.plan;
+    const plan = applied.plan;
+    if (applied.base) {
+      rememberAsset({ id: applied.base.assetRef.slice(6), name: '模板底图', bytes: 0 });
+      bubble('bot', `装饰层已合成进底图（${applied.base.composited} 层${applied.base.skipped ? `，${applied.base.skipped} 层跳过` : ''}）。`);
+    } else if (applied.baseError) {
+      bubble('bot', `底图合成失败（${applied.baseError.code}），改用纯色背景：PSD 装饰层不会还原。`);
+    }
     bubble('bot', `规划 ${plan.summary.commands} 步（图片 ${plan.summary.images}、文字 ${plan.summary.texts}）${plan.summary.productSlot ? `；商品进槽 ${plan.summary.productSlot}` : ''}${plan.skipped.length ? `；${plan.skipped.length} 处无法还原` : ''}。逐步确认后生效。`);
     for (const command of plan.commands) {
       const result = await runPlannedCommand(command, command.note);

@@ -324,11 +324,14 @@ test('套版先给预览（候选槽/文字/装饰），支持「套版：N」�
   const preview = code.slice(code.indexOf('function templatePreview('), code.indexOf('async function applyTemplateFlow'));
   assert.match(preview, /可选商品槽/, '预览要列出可选商品槽');
   assert.match(preview, /#\$\{index \+ 1\}/, '候选槽要带序号，用户才能回「套版：2」');
-  assert.match(preview, /装饰图层|不会被还原/, '预览要提前说明装饰图层不还原');
+  assert.match(preview, /合成进底图/, '预览要说清装饰层会合成进底图');
+  assert.match(preview, /合成失败才退化/, '预览要说明失败时的降级');
   assert.match(preview, /文字沿用 PSD/, '预览要显示将沿用的 PSD 文案');
   const flow = code.slice(code.indexOf('async function applyTemplateFlow'), code.indexOf('async function routeAssist'));
   assert.match(flow, /slotIndex/, 'applyTemplateFlow 必须接受槽位选择');
-  assert.match(flow, /slotId/, '选槽后要作为 product.slotId 传给规划');
+  assert.match(flow, /x-psd-slot/, '选槽后要作为请求头传给套版接口');
+  assert.match(flow, /\/media-image\/template\/apply/, '执行必须走一次上传即合成底图的接口');
+  assert.match(flow, /psdFile/, '要保留 PSD 字节以支持换槽重规划');
   assert.match(flow, /templatePreview\(template\)/, '解析后必须先展示预览');
   assert.match(code.slice(code.indexOf('async function routeAssist')), /\^套版\(\?::\\s\*\(\\d\+\)\)\?\$/, '必须支持「套版」与「套版：N」');
 });
