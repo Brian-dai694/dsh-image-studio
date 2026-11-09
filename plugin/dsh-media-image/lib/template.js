@@ -77,29 +77,56 @@ export function planTemplateApply(template, { background, product, texts = {}, t
   const visible = template.slots.filter(slot => slot.visible !== false);
   const imageSlots = visible.filter(slot => slot.type === 'image');
   const textSlots = visible.filter(slot => slot.type === 'text');
+  const canvasArea = canvasWidth * canvasHeight;
+  const isFullCanvas = slot => slot.rect.width * slot.rect.height >= canvasArea * 0.98;
 
-  // 商品图槽：显式指定优先；否则取"面积最大但不是整幅背景"的图片槽。
+  // 可放商品图的槽位候选（排除整幅背景槽），按面积从大到小；页面据此让用户挑槽。
+  // 下标从 1 开始，方便用户直接回「套版：2」。
+  const candidates = imageSlots
+    .filter(slot => !isFullCanvas(slot))
+    .slice()
+    .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)
+    .map((slot, index) => ({
+      index: index + 1,
+      id: String(slot.id),
+      name: slot.name || '',
+      rect: { x: Math.round(slot.rect.x), y: Math.round(slot.rect.y), width: Math.round(slot.rect.width), height: Math.round(slot.rect.height) },
+      areaRatio: Number(((slot.rect.width * slot.rect.height) / canvasArea).toFixed(4)),
+    }));
+
+  // 商品图槽：显式指定优先；否则取面积最大的非整幅图槽。
   let productSlot = null;
   if (product) {
     if (!/^asset:[a-f0-9]{48}$/.test(String(product.assetRef || ''))) throw Object.assign(new Error('product.assetRef 必须是 asset:<48 位 id>'), { code: 'TEMPLATE_BAD_ASSET' });
     if (product.slotId) {
-      productSlot = imageSlots.find(slot => slot.id === product.slotId) || null;
+      productSlot = imageSlots.find(slot => String(slot.id) === String(product.slotId)) || null;
       if (!productSlot) throw Object.assign(new Error(`模板里没有这个图片槽：${product.slotId}`), { code: 'TEMPLATE_SLOT_NOT_FOUND' });
+      if (isFullCanvas(productSlot) && candidates.length) throw Object.assign(new Error('整幅背景槽不能放商品图，请换一个槽位'), { code: 'TEMPLATE_SLOT_NOT_FOUND' });
     } else {
-      const canvasArea = canvasWidth * canvasHeight;
-      productSlot = imageSlots
-        .filter(slot => slot.rect.width * slot.rect.height < canvasArea * 0.98)
-        .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height)[0] || null;
-      if (!productSlot) productSlot = imageSlots[0] || null;
+      productSlot = candidates.length
+        ? imageSlots.find(slot => String(slot.id) === candidates[0].id)
+        : (imageSlots[0] || null);
     }
   }
 
-  let stack = 0;
+  const mapping = [];
   for (const slot of imageSlots) {
-    if (slot === productSlot) continue;
-    // 除背景/商品之外的图片槽在重建式里是装饰（形状、阴影位图），无法还原：如实登记。
-    skipped.push({ slotId: slot.id, name: slot.name, kind: 'image', reason: '重建式不还原 PSD 的装饰图层（渐变/描边/投影等）' });
-    void stack;
+    if (slot === productSlot) {
+      mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'product', action: 'place-product', reason: null });
+    } else if (isFullCanvas(slot) && background) {
+      mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'background', action: 'replaced-by-solid-background', reason: `整幅背景槽由纯色 ${background} 取代，PSD 原背景像素不还原` });
+    } else {
+      // 除背景/商品之外的图片槽在重建式里是装饰（形状、阴影位图），无法还原：如实登记。
+      mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'decoration', action: 'skip', reason: '重建式不还原 PSD 的装饰图层（渐变/描边/投影等）' });
+      skipped.push({ slotId: slot.id, name: slot.name, kind: 'image', reason: '重建式不还原 PSD 的装饰图层（渐变/描边/投影等）' });
+    }
+  }
+  for (const slot of textSlots) {
+    const text = Object.prototype.hasOwnProperty.call(texts, slot.id) ? texts[slot.id] : (slot.text || '');
+    const hasText = Boolean(text && String(text).trim());
+    mapping.push({ slotId: String(slot.id), name: slot.name || '', kind: 'text', action: hasText ? 'place-text' : 'skip', text: hasText ? String(text) : null,
+      reason: hasText ? null : '没有文案（模板里该文字层为空，且未提供替换文案）' });
+    if (!hasText) skipped.push({ slotId: slot.id, name: slot.name, kind: 'text', reason: '没有文案（模板里该文字层为空，且未提供替换文案）' });
   }
 
   if (product) {
@@ -117,10 +144,8 @@ export function planTemplateApply(template, { background, product, texts = {}, t
 
   for (const slot of textSlots) {
     const text = Object.prototype.hasOwnProperty.call(texts, slot.id) ? texts[slot.id] : (slot.text || '');
-    if (!text || !String(text).trim()) {
-      skipped.push({ slotId: slot.id, name: slot.name, kind: 'text', reason: '没有文案（模板里该文字层为空，且未提供替换文案）' });
-      continue;
-    }
+    // 缺文案已在 mapping 阶段登记过 skipped，这里只跳过、不重复登记。
+    if (!text || !String(text).trim()) continue;
     const rect = clampRect(slot.rect);
     commands.push({
       type: 'layer.add_text',
@@ -143,12 +168,16 @@ export function planTemplateApply(template, { background, product, texts = {}, t
     canvas: { width: canvasWidth, height: canvasHeight },
     commands,
     skipped,
+    // 预览用：哪些槽能放商品图、每个槽最终会被怎么处理。页面先展示这个再执行。
+    candidates,
+    mapping,
     summary: {
       commands: commands.length,
       images: commands.filter(command => command.type === 'layer.add_image').length,
       texts: commands.filter(command => command.type === 'layer.add_text').length,
       skipped: skipped.length,
       productSlot: productSlot?.id || null,
+      productSlotIndex: candidates.find(item => item.id === String(productSlot?.id ?? ''))?.index ?? null,
     },
   };
 }

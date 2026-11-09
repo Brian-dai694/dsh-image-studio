@@ -102,6 +102,56 @@ test('可显式指定槽位与替换文案；越界矩形被夹紧在画布内',
   }
 });
 
+test('候选槽排除整幅背景、按面积排序，映射逐槽给出结论', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const plan = planTemplateApply(template, { background: '#f4f5f7', product: { assetRef: ASSET } });
+  const canvasArea = 970 * 600;
+  assert.ok(plan.candidates.length >= 1, '应给出可选商品槽');
+  assert.ok(plan.candidates.every(item => item.rect.width * item.rect.height < canvasArea * 0.98), '整幅背景槽不得进入候选');
+  for (let i = 1; i < plan.candidates.length; i += 1) {
+    const prev = plan.candidates[i - 1].rect, next = plan.candidates[i].rect;
+    assert.ok(prev.width * prev.height >= next.width * next.height, '候选必须按面积从大到小');
+  }
+  assert.equal(plan.candidates[0].index, 1, '下标从 1 开始');
+  assert.equal(plan.summary.productSlot, plan.candidates[0].id, '默认槽就是第一个候选');
+  assert.equal(plan.summary.productSlotIndex, 1);
+  const product = plan.mapping.find(item => item.kind === 'product');
+  assert.equal(product.action, 'place-product');
+  assert.ok(plan.mapping.some(item => item.kind === 'background' && item.action === 'replaced-by-solid-background'), '整幅背景槽要标明被纯色取代');
+  assert.ok(plan.mapping.some(item => item.kind === 'decoration' && item.action === 'skip'), '装饰槽要标明跳过');
+  assert.ok(plan.mapping.filter(item => item.kind === 'text').every(item => item.action === 'place-text' || item.action === 'skip'));
+});
+
+test('整幅背景槽不能被选作商品槽', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const canvasArea = 970 * 600;
+  const full = template.slots.find(slot => slot.type === 'image' && slot.visible !== false && slot.rect.width * slot.rect.height >= canvasArea * 0.98);
+  if (!full) return t.skip('该样例没有整幅图片槽');
+  assert.throws(() => planTemplateApply(template, { background: '#ffffff', product: { assetRef: ASSET, slotId: full.id } }), error => error.code === 'TEMPLATE_SLOT_NOT_FOUND');
+});
+
+test('用户选第 N 个候选槽时商品落进该槽', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const probe = planTemplateApply(template, { product: { assetRef: ASSET } });
+  if (probe.candidates.length < 2) return t.skip('该样例可选槽不足 2 个');
+  const plan = planTemplateApply(template, { product: { assetRef: ASSET, slotId: planSlotId(template, 2) } });
+  assert.equal(plan.summary.productSlotIndex, 2, '选第二个候选应回报下标 2');
+  assert.equal(plan.summary.productSlot, plan.candidates[1].id);
+});
+
+function planSlotId(template, index) {
+  const canvasArea = template.canvas.width * template.canvas.height;
+  const ordered = template.slots
+    .filter(slot => slot.type === 'image' && slot.visible !== false)
+    .filter(slot => slot.rect.width * slot.rect.height < canvasArea * 0.98)
+    .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+  return ordered[index - 1].id;
+}
+
+
 test('模板没有图片槽时，商品图不放置且明确登记', () => {
   const template = { canvas: { width: 100, height: 100 }, slots: [{ id: 'slot-1', name: '标题', type: 'text', rect: { x: 0, y: 0, width: 50, height: 20 }, visible: true, text: 'hi' }] };
   const plan = planTemplateApply(template, { product: { assetRef: ASSET } });

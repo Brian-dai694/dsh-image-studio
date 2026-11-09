@@ -317,6 +317,22 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('套版先给预览（候选槽/文字/装饰），支持「套版：N」选槽', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.match(code, /function templatePreview\(/, '必须有套版预览函数');
+  const preview = code.slice(code.indexOf('function templatePreview('), code.indexOf('async function applyTemplateFlow'));
+  assert.match(preview, /可选商品槽/, '预览要列出可选商品槽');
+  assert.match(preview, /#\$\{index \+ 1\}/, '候选槽要带序号，用户才能回「套版：2」');
+  assert.match(preview, /装饰图层|不会被还原/, '预览要提前说明装饰图层不还原');
+  assert.match(preview, /文字沿用 PSD/, '预览要显示将沿用的 PSD 文案');
+  const flow = code.slice(code.indexOf('async function applyTemplateFlow'), code.indexOf('async function routeAssist'));
+  assert.match(flow, /slotIndex/, 'applyTemplateFlow 必须接受槽位选择');
+  assert.match(flow, /slotId/, '选槽后要作为 product.slotId 传给规划');
+  assert.match(flow, /templatePreview\(template\)/, '解析后必须先展示预览');
+  assert.match(code.slice(code.indexOf('async function routeAssist')), /\^套版\(\?::\\s\*\(\\d\+\)\)\?\$/, '必须支持「套版」与「套版：N」');
+});
+
 test('局部重绘按真实选区/绑定蒙版导出源图，能力不匹配时不提交，结果确认后独立落层', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

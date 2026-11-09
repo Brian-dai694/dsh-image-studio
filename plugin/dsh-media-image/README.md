@@ -10,6 +10,18 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里的原生 Conversation 默认隐藏，页面右下角悬浮助手保留。隐藏的只是对话子组件，不会移除侧栏插件入口、画布或本人授权入口。若要恢复红框对话，可设置 `globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true` 或 `localStorage.setItem('dsh-media-image-conversation', 'visible')` 并刷新；设为 `false` / `'hidden'` 可再次隐藏。旧开关 `__DSH_MEDIA_IMAGE_PANEL__` 不再控制插件侧栏，避免把整个插件误藏。
 
 
+## 套版（PSD → 画布）
+
+选一个 `.psd` 后，页面**先给预览**再动手：
+
+- 列出可选商品槽 `#1..#n`（按面积排序，整幅背景槽排除在外）及各自占画布比例；
+- 列出将沿用的 PSD 文案；
+- 说明装饰图层（渐变/描边/投影）不会被还原。
+
+说完「套版」按默认 `#1` 执行；要换槽就说「套版：2」。规划器 `planTemplateApply` 同时返回 `candidates`（候选槽）、`mapping`（逐槽结论：`place-product` / `replaced-by-solid-background` / `skip` / `place-text`）与 `skipped`，页面和测试都据此核对，不靠猜。指定整幅背景槽会以 `TEMPLATE_SLOT_NOT_FOUND` 拒绝。
+
+执行仍是重建式：`canvas.resize` → 纯色背景 → 商品图 → 文字，每条命令单独确认，可撤销。PSD 里的渐变、描边、投影等效果不会还原，会逐条登记在 `skipped` 里。
+
 ## 局部重绘（ComfyUI inpaint workflow）
 
 局部重绘只对**显式声明**支持 image+mask 输入的 ComfyUI provider 开放。普通 text-to-image workflow（包括桌面 profile 当前的 `mock-comfy`）不支持局部重绘；助手会在提交前拒绝，不会把整图生图冒充 inpaint。

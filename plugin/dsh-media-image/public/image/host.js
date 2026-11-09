@@ -1092,6 +1092,8 @@ const HELP = [
   '· 导入：<图片 URL>           → 受控拉取远程素材（拦内网）',
   '· 字体：<URL> <族名>         → 登记字体；「字体列表」看已登记的',
   '· 插入图层                  → 把最近一次结果落成图层（会弹确认框）',
+  '· 套版（点按钮选 .psd）      → 先给预览：候选商品槽 #1..#n、将沿用的文案、还原不了的装饰层',
+  '· 套版：2                    → 用第 2 个候选槽放商品图（不再弹选择框）',
   '· 合成蒙版                  → 选择已绑定蒙版层，按最新蒙版新增结果副本（需确认）',
   '· 状态                      → 读一次编辑器：文档、版本、图层数',
 ].join('\n');
@@ -1280,20 +1282,56 @@ async function runPlannedCommand(command, label) {
   return { ok: true, revision: result?.revision };
 }
 
-async function applyTemplateFlow(file) {
-  const line = bubble('bot', '正在解析 PSD 模板……');
+/** 套版预览：先把「哪个槽放商品、哪些槽还原不了」摊开给用户看，再执行。 */
+function templatePreview(template) {
+  const imageSlots = template.slots.filter(slot => slot.type === 'image' && slot.visible !== false);
+  const textSlots = template.slots.filter(slot => slot.type === 'text' && slot.visible !== false);
+  const canvasArea = template.canvas.width * template.canvas.height;
+  const candidates = imageSlots
+    .filter(slot => slot.rect.width * slot.rect.height < canvasArea * 0.98)
+    .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+  const lines = [`模板 ${template.name}：${template.canvas.width}×${template.canvas.height}，图片槽 ${imageSlots.length}、文字槽 ${textSlots.length}`];
+  if (candidates.length) {
+    lines.push(`可选商品槽：${candidates.slice(0, 5).map((slot, index) => `#${index + 1} ${slot.name || slot.id}（${Math.round(slot.rect.width * slot.rect.height / canvasArea * 100)}%）`).join('、')}`);
+    lines.push('默认用 #1；想换就说「套版：2」。');
+  } else {
+    lines.push('这张模板没有可放商品图的图片槽。');
+  }
+  const texts = textSlots.filter(slot => String(slot.text || '').trim()).map(slot => `「${String(slot.text).slice(0, 24)}」`);
+  if (texts.length) lines.push(`文字沿用 PSD：${texts.slice(0, 4).join('、')}${texts.length > 4 ? '…' : ''}`);
+  lines.push('装饰图层（渐变/描边/投影）不会被还原，会逐条列出。');
+  return lines.join('\n');
+}
+
+async function applyTemplateFlow(file, slotIndex = null) {
+  const line = bubble('bot', file ? '正在解析 PSD 模板……' : '按已解析的模板重新规划……');
   try {
-    const parsed = await apiRaw('/media-image/psd/slots', await file.arrayBuffer(), file.name);
-    psdTemplate = parsed.template;
-    const { canvas, summary } = psdTemplate;
-    line.textContent = `模板 ${psdTemplate.name}：画布 ${canvas.width}×${canvas.height}，图片槽 ${summary.image}、文字槽 ${summary.text}。`;
+    let template = psdTemplate;
+    if (file) {
+      const parsed = await apiRaw('/media-image/psd/slots', await file.arrayBuffer(), file.name);
+      template = parsed.template;
+      psdTemplate = template;
+      line.textContent = templatePreview(template);
+    }
+    if (!template) { line.textContent = '还没有套版模板：先点「套版」选一个 .psd 文件。'; return; }
     if (!lastAssetRef) { bubble('bot', '还没有商品图：先点「上传」选一张（白底图更好），我再套版。'); return; }
+    const candidates = (template.slots || []).filter(slot => slot.type === 'image' && slot.visible !== false);
+    let slotId = null;
+    if (slotIndex !== null) {
+      const canvasArea = template.canvas.width * template.canvas.height;
+      const ordered = candidates
+        .filter(slot => slot.rect.width * slot.rect.height < canvasArea * 0.98)
+        .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height);
+      const picked = ordered[slotIndex - 1];
+      if (!picked) { line.textContent = `没有第 ${slotIndex} 个可选图片槽（共 ${ordered.length} 个）。`; return; }
+      slotId = picked.id;
+    }
     const planned = await api('/media-image/template/plan', {
       method: 'POST',
-      body: { template: psdTemplate, background: '#f4f5f7', product: { assetRef: lastAssetRef }, textStyle: { fill_color: '#15181f' } },
+      body: { template, background: '#f4f5f7', product: { assetRef: lastAssetRef, ...(slotId ? { slotId } : {}) }, textStyle: { fill_color: '#15181f' } },
     });
     const plan = planned.plan;
-    bubble('bot', `规划出 ${plan.summary.commands} 步（图片 ${plan.summary.images}、文字 ${plan.summary.texts}）；${plan.skipped.length ? `有 ${plan.skipped.length} 处无法还原已登记。` : ''}逐步确认后生效。`);
+    bubble('bot', `规划 ${plan.summary.commands} 步（图片 ${plan.summary.images}、文字 ${plan.summary.texts}）${plan.summary.productSlot ? `；商品进槽 ${plan.summary.productSlot}` : ''}${plan.skipped.length ? `；${plan.skipped.length} 处无法还原` : ''}。逐步确认后生效。`);
     for (const command of plan.commands) {
       const result = await runPlannedCommand(command, command.note);
       if (result.cancelled) { bubble('bot', '已取消，后续步骤停止；画布保留已确认的部分。'); return; }
@@ -1302,7 +1340,7 @@ async function applyTemplateFlow(file) {
     if (plan.skipped.length) {
       bubble('bot', `未还原：${plan.skipped.slice(0, 4).map(item => `${item.name || item.slotId || item.kind}（${item.reason}）`).join('；')}`);
     }
-    bubble('bot', '套版完成。要换文案或换商品图，再说一次即可（会另起一次规划）。');
+    bubble('bot', '套版完成。要换文案或换商品槽再说一次（会另起一次规划）。');
   } catch (error) {
     line.textContent = error.code === 'PSD_BAD_SIGNATURE'
       ? '这不是 PSD 文件。请选择 .psd 模板；PNG/JPG 请走「上传」。'
@@ -1370,6 +1408,14 @@ async function routeAssist(raw) {
     } catch (error) { pending.textContent = `${error.code || 'INPAINT_FAILED'}：${error.message}`; }
     return;
   }
+
+  const templateChoice = /^套版(?::\s*(\d+))?$/.exec(text);
+  if (templateChoice) {
+    if (!psdTemplate) { say('还没有套版模板：点「套版」选一个 .psd 文件，解析后再说「套版」。'); return; }
+    await applyTemplateFlow(null, templateChoice[1] ? Number(templateChoice[1]) : null);
+    return;
+  }
+
 
   const remove = /^抠图(?:[:：]\s*(.+))?$/.exec(text);
   if (remove) {
