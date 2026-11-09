@@ -24,6 +24,8 @@ function load(file, symbol, injected = {}) {
 context.Base_action = load('actions/base.js', 'Base_action');
 for (const [file, symbol] of [['insert-layer','Insert_layer_action'], ['update-layer','Update_layer_action'], ['reorder-layer','Reorder_layer_action'], ['toggle-layer-visibility','Toggle_layer_visibility_action'], ['bundle','Bundle_action']]) app.Actions[symbol] = load(`actions/${file}.js`, symbol);
 app.Layers = {auto_increment: 1, render() {}, get_layer(id) { return config.layers.find(layer => layer.id == id); },
+  // 合成桩：画一块灰，够 analyze/preview 走通即可（像素精度由浏览器验收）。
+  convert_layers_to_canvas(ctx) { ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 8, 8); },
   get_sorted_layers() {return config.layers.slice().sort((a,b) => b.order-a.order);},
   find_previous(id) {const layers = this.get_sorted_layers(); return layers[layers.findIndex(l => l.id == id)+1];},
   find_next(id) {const layers = this.get_sorted_layers(); return layers[layers.findIndex(l => l.id == id)-1];}};
@@ -219,6 +221,30 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     const after = bridge.readState();
     assert.equal(after.revision, before.revision, '测量不能推进 revision');
     assert.equal(after.contentDigest, before.contentDigest, '测量不能改内容');
+  });
+
+  await test('editor.preview_png returns a downsampled data URL and refuses oversized output', async () => {
+    const originalComposite = bridge.compositeCanvas.bind(bridge);
+    bridge.compositeCanvas = () => makeCanvas(1200, 600, 200);
+    try {
+      const box = {};
+      await bridge.handleRequest({ type: 'editor.preview_png', requestId: 'p1', editorInstanceId: bridge.editorInstanceId, maxWidth: 300 }, { postMessage(value) { box.value = value; } });
+      assert.equal(box.value.ok, true, JSON.stringify(box.value));
+      const preview = box.value.result;
+      assert.ok(preview.dataUrl.startsWith('data:image/png;base64,'), '必须是 PNG data URL');
+      assert.equal(preview.width, 300, '长边被压到 maxWidth');
+      assert.equal(preview.height, 150, '按比例缩放');
+      assert.ok(preview.bytes > 0);
+    } finally {
+      bridge.compositeCanvas = originalComposite;
+    }
+    const before = bridge.readState();
+    const box2 = {};
+    await bridge.handleRequest({ type: 'editor.preview_png', requestId: 'p2', editorInstanceId: bridge.editorInstanceId }, { postMessage(value) { box2.value = value; } });
+    const after = bridge.readState();
+    assert.equal(box2.value.ok, true);
+    assert.equal(after.revision, before.revision, '预览不能推进 revision');
+    assert.equal(after.contentDigest, before.contentDigest, '预览不能改内容');
   });
 
   await test('mask binding survives native undo/redo and composition reads the edited mask', async () => {

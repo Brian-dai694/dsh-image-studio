@@ -313,6 +313,27 @@ export class DshEditorBridge {
     };
   }
 
+  /**
+   * 缩略预览：返回降采样后的 PNG data URL（只读，不改画布、不推进 revision）。
+   * 上限 256 KB，超了就明确报错让调用方降低 maxWidth，而不是悄悄截断。
+   */
+  previewPng(request = {}) {
+    const maxWidth = Number.isSafeInteger(request.maxWidth) ? Math.min(1024, Math.max(64, request.maxWidth)) : 640;
+    const full = this.compositeCanvas();
+    const scale = Math.min(1, maxWidth / Math.max(1, full.width));
+    const width = Math.max(1, Math.round(full.width * scale));
+    const height = Math.max(1, Math.round(full.height * scale));
+    const small = document.createElement('canvas');
+    small.width = width; small.height = height;
+    const ctx = small.getContext('2d');
+    if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法生成预览');
+    ctx.drawImage(full, 0, 0, width, height);
+    const dataUrl = small.toDataURL('image/png');
+    const bytes = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
+    if (bytes > 256 * 1024) throw this.error('PREVIEW_TOO_LARGE', `预览 ${Math.round(bytes / 1024)} KB 超过 256 KB，请调低 maxWidth`);
+    return { dataUrl, width, height, bytes };
+  }
+
   /** 把当前文档合成到一张全尺寸画布（只读，不改任何图层）。 */
   compositeCanvas() {
     const canvas = document.createElement('canvas');
@@ -617,6 +638,7 @@ export class DshEditorBridge {
         if (request.type === 'editor.measure_text') return this.measureText(request);
         // 只测量不修改：曝光/裁切/偏色/清晰度 + 图层体检。
         if (request.type === 'editor.analyze') return this.analyzeDocument(request);
+        if (request.type === 'editor.preview_png') return this.previewPng(request);
         throw this.error('INVALID_REQUEST');
       });
       port?.postMessage({ requestId: request.requestId, ok: true, result });
@@ -764,6 +786,10 @@ export class DshEditorBridge {
       const sx = image.width / Math.max(1, config.WIDTH), sy = image.height / Math.max(1, config.HEIGHT);
       ctx.fillRect(Math.round(selection.x * sx), Math.round(selection.y * sy), Math.max(1, Math.round(selection.width * sx)), Math.max(1, Math.round(selection.height * sy)));
       maskPixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // 外缘渐隐（选区较长边的 1/8）：模型才知道"边缘要往里收"，接缝才不会硬。
+      const ops = await this.pixelOps();
+      const radius = Math.max(1, Math.round(Math.max(selection.width, selection.height) / 8));
+      maskPixels = ops.ensureImageData(ops.blurAlpha(maskPixels, Math.min(64, radius)));
     }
     if (image.width !== maskPixels.width || image.height !== maskPixels.height) throw this.error('INPAINT_MASK_SIZE_MISMATCH', '蒙版尺寸与源图不一致');
     const toPng = pixels => {

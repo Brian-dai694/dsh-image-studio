@@ -136,6 +136,29 @@ test('助手自检与可读确认卡片：执行后量一遍，确认框显示�
   assert.match(host, /commandTargetSummary\(state, command\.type/, '确认框必须用上它');
 });
 
+test('重绘输入：选区蒙版外缘渐隐（较长边 1/8），不是硬边', () => {
+  const bridge = readFileSync(resolve(pluginRoot, '../../miniPaint/src/js/dsh-editor-bridge.js'), 'utf8');
+  const start = bridge.indexOf('async exportInpaintInputs');
+  assert.ok(start > 0);
+  const body = bridge.slice(start, bridge.indexOf('async exportStart', start));
+  assert.match(body, /blurAlpha/, '选区蒙版必须做渐隐');
+  assert.match(body, /\/ 8\)/, '渐隐半径按选区较长边的 1/8');
+  assert.match(body, /Math\.min\(64, radius\)/, '半径要夹在 64 以内');
+});
+
+test('助手侧：同义说法被归一，未命中给可点建议', () => {
+  const host = readFileSync(resolve(pluginRoot, 'public/image/host.js'), 'utf8');
+  assert.match(host, /INTENT_SYNONYMS/, '必须有同义词表');
+  assert.match(host, /背景\|底色\)/, '「去掉背景」要能归一');
+  assert.match(host, /canonicalIntent\(rawText\)/, '进入分支前先归一');
+  assert.match(host, /INTENT_SUGGESTIONS/, '未命中要给出建议');
+  assert.match(host, /还没听懂「\$\{rawText\}」/, '提示里要带用户原话');
+  // 高频操作都要有本地入口
+  for (const [pattern, label] of [[/\^\(撤销\|回退\|undo\)\$/, '撤销'], [/\^\(重做\|redo\)\$/, '重做'], [/删除这层/, '删除图层'], [/透明度/, '透明度'], [/导出PNG/, '导出']]) {
+    assert.match(host, pattern, `缺少 ${label} 的本地入口`);
+  }
+});
+
 test('套版文字命令带槽宽 meta，且 meta 不进入 payload（否则会被白名单拒）', async () => {
   const template = { canvas: { width: 400, height: 200 }, slots: [
     { id: 'slot-1', name: '标题', type: 'text', rect: { x: 10, y: 10, width: 120, height: 30 }, visible: true, text: '一个很长的标题文案', fontSize: 40 },

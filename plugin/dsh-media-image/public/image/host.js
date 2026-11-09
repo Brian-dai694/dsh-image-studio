@@ -1633,12 +1633,114 @@ async function reportSelfCheck(label) {
   } catch { /* 测不出来就不说，别编数字 */ }
 }
 
+/**
+ * 同义说法 → 既有指令（声明式，便于追加）。
+ * 只做"改写"，不新增执行路径：改写后的句子仍然走下面同一批分支。
+ */
+const INTENT_SYNONYMS = [
+  [/^(把|将)?(背景|底色)(去掉|删除|移除|拿掉)$/, '抠图'],
+  [/^(去掉|删除|移除)(背景|底色)$/, '抠图'],
+  [/^抠(图|一下|出来)?$/, '抠图'],
+  [/^(再|重新)?合成(一下|蒙版)?$/, '合成蒙版'],
+  [/^(撤销|回退|undo)$/i, '撤销'],
+  [/^(重做|redo)$/i, '重做'],
+  [/^(删掉这层|删除这层|删除当前图层|删除图层)$/, '删除这层'],
+  [/^透明度\s*(\d{1,3})\s*%?$/, matched => `透明度 ${matched[1]}`],
+  [/^(导出|导出图片|导出png|保存成?png)$/i, '导出PNG'],
+  [/^(看看画布|看状态|现在怎么样)$/, '状态'],
+  [/^(能做什么|怎么用|有什么功能)$/, '帮助'],
+];
+
+/** 未命中时的建议：从 HELP 里挑几条最常用的，带例子。 */
+const INTENT_SUGGESTIONS = [
+  '抠图', '合成蒙版', '套版', '批量套版', '撤销', '透明度 60%', '导出PNG', '状态', '帮助',
+];
+
+function canonicalIntent(text) {
+  const value = String(text || '').trim();
+  for (const [pattern, target] of INTENT_SYNONYMS) {
+    const matched = pattern.exec(value);
+    if (!matched) continue;
+    return typeof target === 'function' ? target(matched) : target;
+  }
+  return value;
+}
+
 async function routeAssist(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return;
+  const rawText = String(raw || '').trim();
+  if (!rawText) return;
+  // 同义说法归一到既有指令，避免用户必须背关键词。
+  const text = canonicalIntent(rawText);
   const say = (msg, ref) => bubble('bot', msg, ref);
 
   if (/^(帮助|能做什么|help|\?)$/i.test(text)) { say(HELP); return; }
+
+  if (/^(撤销|回退|undo)$/i.test(text)) {
+    try {
+      const state = await fetchEditorState();
+      if (!state?.history?.canUndo) { say('没有可撤销的操作。'); return; }
+      const result = await applyEditorCommand(state, { type: 'history.undo', payload: {} });
+      say(`已撤销一步 · 现在 R${result.revision}`);
+    } catch (error) { say(`${error.code || 'UNDO_FAILED'}：${error.message}`); }
+    return;
+  }
+
+  if (/^(重做|redo)$/i.test(text)) {
+    try {
+      const state = await fetchEditorState();
+      if (!state?.history?.canRedo) { say('没有可重做的操作。'); return; }
+      const result = await applyEditorCommand(state, { type: 'history.redo', payload: {} });
+      say(`已重做一步 · 现在 R${result.revision}`);
+    } catch (error) { say(`${error.code || 'REDO_FAILED'}：${error.message}`); }
+    return;
+  }
+
+  const deleteLayer = /^(删除这层|删除当前图层|删掉这层|删除图层)$/.exec(text);
+  if (deleteLayer) {
+    try {
+      const state = await fetchEditorState();
+      const layer = (state.layers || []).find(item => item.id === state.selectedLayerId);
+      if (!layer) { say('先在图层面板选中要删除的图层。'); return; }
+      const answer = await askConfirm({
+        title: '删除图层（高影响）',
+        details: [`图层      ${layer.name || layer.id} · ${layer.type}`, `位置      ${layer.x ?? 0},${layer.y ?? 0} ${layer.width ?? 0}×${layer.height ?? 0}`, '删除后可用「撤销」找回'].join('\n'),
+        maskAvailable: false,
+      });
+      if (!answer.ok) { say('已取消，没有删除。'); return; }
+      const result = await applyEditorCommand(state, { type: 'layer.remove', payload: { layerId: String(layer.id) } });
+      say(`已删除「${layer.name || layer.id}」· 现在 R${result.revision}（要反悔就说「撤销」）`);
+    } catch (error) { say(`${error.code || 'REMOVE_FAILED'}：${error.message}`); }
+    return;
+  }
+
+  const opacity = /^透明度\s*(\d{1,3})\s*%?$/.exec(text);
+  if (opacity) {
+    const value = Number(opacity[1]);
+    if (!(value >= 0 && value <= 100)) { say('透明度要 0..100。'); return; }
+    try {
+      const state = await fetchEditorState();
+      const layer = (state.layers || []).find(item => item.id === state.selectedLayerId);
+      if (!layer) { say('先选中一个图层再调透明度。'); return; }
+      const result = await applyEditorCommand(state, { type: 'layer.set_appearance', payload: { layerId: String(layer.id), opacity: value } });
+      say(`「${layer.name || layer.id}」透明度 → ${value}% · 现在 R${result.revision}`);
+    } catch (error) { say(`${error.code || 'APPEARANCE_FAILED'}：${error.message}`); }
+    return;
+  }
+
+  if (/^(导出|导出png|导出图片)$/i.test(text)) {
+    try {
+      const state = await fetchEditorState();
+      const result = await transport.request({ type: 'editor.export_start', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId,
+        documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(), format: 'png' }, { timeoutMs: 30000 });
+      if (!result?.artifactRef) { say('导出没有完成。'); return; }
+      const link = document.createElement('a');
+      link.href = result.artifactRef;
+      link.download = `image-${state.revision}.png`;
+      link.click();
+      say(`已导出 PNG（${Math.round((result.bytes || 0) / 1024)} KB）· 导出不改画布`);
+    } catch (error) { say(`${error.code || 'EXPORT_FAILED'}：${error.message}`); }
+    return;
+  }
 
   if (/^(字体列表|看字体|字体)$/.test(text)) {
     try {
@@ -1804,7 +1906,7 @@ async function routeAssist(raw) {
     return;
   }
 
-  say('还没听懂。点下面的快捷按钮，或说「帮助」看全部说法。');
+  say(`还没听懂「${rawText}」。可以试试：${INTENT_SUGGESTIONS.join(' / ')}；说「帮助」看全部说法。`);
 }
 
 let assistBusy = false;

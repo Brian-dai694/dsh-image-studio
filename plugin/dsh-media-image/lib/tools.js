@@ -59,6 +59,11 @@ const RESULT_SCHEMA = {
     findings: { type: 'array', items: { type: 'object', additionalProperties: true } },
     summary: { type: 'string' },
     note: { type: 'string' },
+    preview: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { dataUrl: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' }, bytes: { type: 'integer' } },
+    },
     // 批量执行：逐步结果与回滚情况。
     steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
     rolledBack: {
@@ -665,6 +670,35 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     },
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: analyze('image', bridge),
+    timeoutMs: 10_000,
+  }));
+
+  // 缩略预览：只读。能不能"看见"取决于宿主是否渲染 tool 结果里的图，这里不做任何承诺。
+  const preview = (kind, bridge) => async (args, exec) => {
+    try {
+      bindings.assert(exec, kind, args);
+      const state = await verify(kind, bridge, args, exec);
+      const image = await bridge.preview({ instanceId: args.instanceId, ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }) });
+      return {
+        status: 'applied', commandId: 'preview', editorKind: kind,
+        projectId: state.documentId, revision: state.revision,
+        preview: { dataUrl: image.dataUrl, width: image.width, height: image.height, bytes: image.bytes },
+        note: '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。',
+      };
+    } catch (error) {
+      return failure(kind, 'preview', error);
+    }
+  };
+
+  register(defineTool({
+    name: 'media_image_preview',
+    description: 'Return a downsampled PNG preview of the shared image as a data URL (long edge 64..1024, default 640, max 256 KB). Read-only: revision does not change. Whether the caller can actually see the picture depends on whether its host renders images carried in tool results; when it does not, this is just a thumbnail you can save.',
+    parameters: {
+      ...READ_PARAMS,
+      maxWidth: { type: 'integer', description: 'Long-edge pixel cap (64..1024, default 640). Larger means more detail and more bytes.' },
+    },
+    output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+    execute: preview('image', bridge),
     timeoutMs: 10_000,
   }));
 
