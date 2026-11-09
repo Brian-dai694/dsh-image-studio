@@ -10,6 +10,10 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里的原生 Conversation 默认隐藏，页面右下角悬浮助手保留。隐藏的只是对话子组件，不会移除侧栏插件入口、画布或本人授权入口。若要恢复红框对话，可设置 `globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true` 或 `localStorage.setItem('dsh-media-image-conversation', 'visible')` 并刷新；设为 `false` / `'hidden'` 可再次隐藏。旧开关 `__DSH_MEDIA_IMAGE_PANEL__` 不再控制插件侧栏，避免把整个插件误藏。
 
 
+## 可修正蒙版闭环
+
+本地「抠图」创建独立蒙版层并合成结果副本，原图不改。蒙版绑定存储在图层 `params.dshMask.sourceLayerId`，`read_state.layers[].mask` 可读取源图关系。选择蒙版层并用画笔/橡皮修正后，说「合成蒙版」会读取当前像素新增结果副本。多张蒙版必须先选中一张；源图已删除时拒绝合成；确认期间 revision 改变时停止。每次合成是快照，不会随蒙版实时更新。蒙版是普通 alpha 图层，并非原生实时图层蒙版。颜色法不能保证复杂背景抠图质量。
+
 ## 抠图服务（需配置真实引擎）
 
 助手支持“抠图 / 去背景”指令，但**本插件不自带分割模型**。必须在 Host plugin config 中配置一个受信任的 rembg 兼容 endpoint：`backgroundRemoval: { endpoint: "http://127.0.0.1:5000/api/remove", apiKey: "…" }`。服务需接受 multipart 字段 `image_file`，成功返回带 alpha 的 PNG。插件会校验返回 PNG 的透明通道并保存为新 `asset:<id>`；原图不修改，结果也不会自动落画布，用户说“插入图层”后仍要确认。未配置时助手明确提示缺少后端，`GET /media-image/background-removal` 返回 `available:false` 与配置提示。

@@ -7,8 +7,12 @@ const root = __dirname;
 const config = { WIDTH: 800, HEIGHT: 600, COLOR: '#000000', TOOL: {name: 'select'}, layers: [], layer: null };
 const app = {Actions: {}, GUI: { GUI_layers: { render_layers() {} } }};
 const zoomView = {getPosition() {return {x: 12, y: 18};}, getScale() {return 1.5;}};
+class TestImageData {
+  constructor(data, width, height) { this.data = data; this.width = width; this.height = height; }
+}
+globalThis.ImageData = TestImageData;
 const listeners = {};
-const context = vm.createContext({ console, config, app, zoomView, globalThis: { crypto: { randomUUID: require('node:crypto').randomUUID } },
+const context = vm.createContext({ console, config, app, zoomView, ImageData: TestImageData, globalThis: { crypto: { randomUUID: require('node:crypto').randomUUID } },
   window: {addEventListener() {}}, document: {activeElement: null, addEventListener(type, fn) { (listeners[type] ||= []).push(fn); }},
   alertify: {error() {}, success() {}}, performance: {} });
 function load(file, symbol, injected = {}) {
@@ -43,6 +47,7 @@ function makeCanvas(w = 8, h = 8, content = 1) {
         fillRect(x, y, w, h) { canvas._drawn = (Number(canvas._drawn ?? 0) + Math.max(1, Math.round(w * h))) & 0xff; },
         drawImage(source) { if (source && (source._drawn !== undefined || source._content !== undefined)) canvas._drawn = source._drawn ?? source._content; },
         putImageData(image) {
+          assert.ok(image instanceof TestImageData, 'Canvas only accepts native ImageData');
           // 用抽样和代表「内容」：只要像素内容变了，这个值就会变，用来观察摘要是否跟随。
           const data = image && image.data;
           let sum = 0;
@@ -51,7 +56,7 @@ function makeCanvas(w = 8, h = 8, content = 1) {
         },
         getImageData: (x, y, cw, ch) => {
           const value = Number(canvas._drawn ?? canvas._content) & 0xff;
-          return { width: cw, height: ch, data: new Uint8ClampedArray(cw * ch * 4).fill(value) };
+          return new TestImageData(new Uint8ClampedArray(cw * ch * 4).fill(value), cw, ch);
         },
       };
     },
@@ -149,6 +154,49 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       assert.equal(missing.ok, false);
       assert.equal(missing.error.code, 'INVALID_REQUEST');
     } finally {
+      if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
+    }
+  });
+  await test('mask binding survives native undo/redo and composition reads the edited mask', async () => {
+    const previousImage = context.Image;
+    const previousOps = context.globalThis.__dshPixelOps;
+    const previousRaster = bridge.rasterizeLayer;
+    const source = { id: 'source-mask-test', name: 'original', type: 'image', x: 7, y: 9, width: 4, height: 4, order: 0, params: {}, link: makeCanvas(4, 4, 77) };
+    config.layers.push(source); config.layer = source;
+    bridge.refreshRevision();
+    const originalLink = source.link;
+    const pixels = new TestImageData(new Uint8ClampedArray(64).fill(255), 4, 4);
+    let maskVersion = 1, observedMaskVersion = null;
+    context.Image = class { set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); } };
+    context.globalThis.__dshPixelOps = {
+      ensureImageData: img => new TestImageData(img.data, img.width, img.height),
+      backgroundMask: () => ({ image: pixels }),
+      applyMask: (src, mask) => { observedMaskVersion = mask.data[0]; return src; },
+    };
+    bridge.rasterizeLayer = layer => new TestImageData(new Uint8ClampedArray(64).fill(layer === source ? 77 : maskVersion), 4, 4);
+    try {
+      const created = await send({ type: 'layer.add_mask_layer', payload: { sourceLayerId: source.id } });
+      assert.equal(created.ok, true, JSON.stringify(created));
+      const maskId = created.result.changedObjectIds[0];
+      assert.notEqual(maskId, 'null');
+      const mask = config.layer;
+      assert.equal(mask.params.dshMask.sourceLayerId, source.id);
+      assert.equal(bridge.readState().layers.find(l => l.id === maskId).mask.sourceLayerId, source.id);
+      await app.State.undo();
+      assert.equal(bridge.readState().layers.some(l => l.id === maskId), false);
+      await app.State.redo();
+      assert.equal(bridge.readState().layers.find(l => l.id === maskId).mask.sourceLayerId, source.id);
+      maskVersion = 93; // simulate a person's committed mask edit
+      const composed = await send({ type: 'layer.add_image', payload: { sourceRef: 'layer:' + source.id, maskRef: 'layer:' + maskId, maskMode: 'alpha', width: 4, height: 4, name: 'result' } });
+      assert.equal(composed.ok, true, JSON.stringify(composed));
+      assert.equal(source.link, originalLink, 'original pixels must not be replaced');
+      assert.notEqual(composed.result.changedObjectIds[0], maskId);
+      await app.State.undo(); // removes only composed copy
+      assert.ok(config.layers.includes(source));
+      assert.ok(bridge.readState().layers.find(l => l.id === maskId).mask);
+    } finally {
+      bridge.rasterizeLayer = previousRaster;
+      context.globalThis.__dshPixelOps = previousOps;
       if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
     }
   });

@@ -43,7 +43,10 @@ export class DshEditorBridge {
     return ctx.getImageData(0, 0, width, height);
   }
   /** 把处理后的像素封装成原生动作：一步撤销、一个 revision。 */
-  imageAction(image) {
+  imageAction(image, layerId) {
+    if (layerId === undefined || layerId === null || !config.layers.some(layer => String(layer.id) === String(layerId))) {
+      throw this.error('LAYER_NOT_FOUND', '像素动作必须指定真实目标图层');
+    }
     // putImageData 只认 ImageData：像素算法返回的是纯 {width,height,data}，必须先转换。
     if (typeof ImageData !== 'function' || !(image instanceof ImageData)) {
       throw this.error('PIXEL_DATA_NOT_IMAGE_DATA', '像素结果必须先经 ensureImageData 转换再写回画布');
@@ -51,7 +54,7 @@ export class DshEditorBridge {
     const canvas = document.createElement('canvas');
     canvas.width = image.width; canvas.height = image.height;
     canvas.getContext('2d').putImageData(image, 0, 0);
-    return new app.Actions.Update_layer_image_action(canvas, image.layerId);
+    return new app.Actions.Update_layer_image_action(canvas, layerId);
   }
   /** 取（或建立）该图层处理前的首帧快照；之后每次都从它重算，保证幂等。 */
   baseSnapshot(layerId, image, pixelDigest) {
@@ -485,6 +488,7 @@ export class DshEditorBridge {
       const applied = this.pixelApplied.get(String(layer.id)) || {};
       return { id: String(layer.id), name: String(layer.name || ''), type: String(layer.type || 'empty'),
         visible: layer.visible !== false, x: layer.x, y: layer.y, width: layer.width, height: layer.height,
+        ...(layer.params?.dshMask ? { mask: { sourceLayerId: String(layer.params.dshMask.sourceLayerId), editable: true } } : {}),
         // 外观三元组要能被 read_state 看到，否则模型改完无法自我核对。
         opacity: layer.opacity ?? 100, blendMode: layer.composition || 'source-over',
         rotationDeg: layer.rotate || 0,
@@ -895,7 +899,7 @@ export class DshEditorBridge {
       // 「已应用」必须跟着历史走：把参数挂到该动作的 do/undo 上，撤销时回退、重做时恢复，
       // 否则撤销后 read_state 还会说 feather/colorMatch 在生效，等于骗人。
       const previous = { ...(this.pixelApplied.get(key) || {}) };
-      const action = this.imageAction(ops.ensureImageData(output));
+      const action = this.imageAction(ops.ensureImageData(output), layer.id);
       const nativeDo = action.do.bind(action);
       const nativeUndo = action.undo.bind(action);
       const appliedState = this.pixelApplied;
@@ -930,7 +934,7 @@ export class DshEditorBridge {
       if (result.coverage === 0) throw this.error('BACKGROUND_NOT_DETECTED', '边界背景与商品颜色接近或背景不纯，未擦除任何像素；请换一张白底/纯色底图，或配置 AI 抠图服务');
       if (result.coverage >= 0.999) throw this.error('BACKGROUND_REMOVAL_TOO_MUCH', '自动识别会擦掉几乎整张图，已中止；请降低 tolerance 或改用 AI 抠图服务');
       const key = String(layer.id);
-      const action = this.imageAction(ops.ensureImageData(result.image));
+      const action = this.imageAction(ops.ensureImageData(result.image), layer.id);
       const nativeDo = action.do.bind(action);
       const nativeUndo = action.undo.bind(action);
       const owner = this;
@@ -957,7 +961,7 @@ export class DshEditorBridge {
       const result = ops.magicErase(current, { x, y, tolerance, contiguous });
       if (!result.erased) throw this.error('MAGIC_ERASE_NO_MATCH', `该点颜色 ${JSON.stringify(result.seedColor)} 在容差 ${tolerance} 内没有可擦除的相连区域`);
       const key = String(layer.id);
-      const action = this.imageAction(ops.ensureImageData(result.image));
+      const action = this.imageAction(ops.ensureImageData(result.image), layer.id);
       const nativeDo = action.do.bind(action);
       const nativeUndo = action.undo.bind(action);
       const owner = this;
@@ -992,7 +996,8 @@ export class DshEditorBridge {
         type: 'image', data: canvas.toDataURL('image/png'),
         x: source.x || 0, y: source.y || 0,
         width, height, width_original: mask.image.width, height_original: mask.image.height,
-        visible: true, opacity: 100, rotate: 0,
+        visible: true, opacity: 100, rotate: source.rotate || 0,
+        params: { dshMask: { sourceLayerId: String(source.id), mode } },
       };
       const action = new app.Actions.Insert_layer_action(layer, false);
       // changedObjectIds 里带上新蒙版层 id，调用方据此拼 layer.add_image 的 maskRef。

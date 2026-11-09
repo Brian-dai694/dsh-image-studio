@@ -329,11 +329,15 @@ test('用户输入抠图时直达本地去背景，不先让模型拒答；纯�
   assert.ok(cutoutStart > 0, '必须存在本地去背景执行函数');
   const cutout = code.slice(cutoutStart, cutoutStart + 8000);
   assert.match(cutout, /layer\.add_mask_layer/, '必须走"先加蒙版图层"的人类式流程');
-  assert.match(cutout, /maskRef: `layer:\$\{maskLayerId\}`/, '必须用蒙版层作为 maskRef 合成抠图');
+  const compose = code.slice(code.indexOf('async function composeMaskLayer'), cutoutStart);
+  assert.match(compose, /maskRef: 'layer:' \+ mask\.id/, '必须使用绑定蒙版的真实 ID');
+  assert.match(compose, /mask\.mask\.sourceLayerId/, '源图必须来自蒙版绑定，不能猜最后一层');
+  assert.match(compose, /state\.revision !== before\.revision/, '确认期间修改画布应停止');
+  assert.match(send, /合成蒙版/, '修蒙版后必须有确定性重合成入口');
   assert.match(cutout, /原图(未改动|一个像素都不改|保留)/, '要明确原图不动');
   assert.match(cutout, /画笔/, '告诉用户蒙版层还能继续用手修');
   assert.match(cutout, /AI 抠图服务/, '告诉用户下一步该配置什么');
-  assert.ok((cutout.match(/askConfirm\(/g) || []).length >= 2, '建蒙版与合成各自都要确认');
+  assert.ok((cutout.match(/askConfirm\(/g) || []).length >= 1 && compose.includes('askConfirm('), '建蒙版与合成各自都要确认');
   const routeStart = code.indexOf('const remove = /^抠图');
   assert.ok(routeStart > 0);
   assert.match(code.slice(routeStart, routeStart + 900), /localCutout\(\)/, '默认走本地去背景而不是先要外部服务');

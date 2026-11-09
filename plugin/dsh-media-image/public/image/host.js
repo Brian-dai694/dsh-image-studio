@@ -1089,6 +1089,7 @@ const HELP = [
   '· 导入：<图片 URL>           → 受控拉取远程素材（拦内网）',
   '· 字体：<URL> <族名>         → 登记字体；「字体列表」看已登记的',
   '· 插入图层                  → 把最近一次结果落成图层（会弹确认框）',
+  '· 合成蒙版                  → 选择已绑定蒙版层，按最新蒙版新增结果副本（需确认）',
   '· 状态                      → 读一次编辑器：文档、版本、图层数',
 ].join('\n');
 
@@ -1097,6 +1098,27 @@ const HELP = [
 // 一句话 → 动作。返回给用户看的文本；失败要说清是哪个环节。
 // 本地自动去背景：不需要坐标、不依赖外部模型。白底/纯色底商品图可直接得到透明图；
 // 背景复杂时编辑器会回 BACKGROUND_NOT_DETECTED，此时如实告诉用户需要 AI 抠图服务。
+async function composeMaskLayer(maskId) {
+  const connection = await connect();
+  const read = () => transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+  const before = await read();
+  const masks = before.layers.filter(layer => layer.mask?.sourceLayerId);
+  const mask = maskId ? masks.find(layer => layer.id === maskId)
+    : masks.find(layer => layer.id === before.selectedLayerId) || (masks.length === 1 ? masks[0] : null);
+  if (!mask) throw Object.assign(new Error('请选择一张带源图绑定的蒙版层，再说「合成蒙版」。'), { code: 'MASK_TARGET_REQUIRED' });
+  const source = before.layers.find(layer => layer.id === mask.mask.sourceLayerId);
+  if (!source) throw Object.assign(new Error('蒙版对应的源图已删除，请先撤销删除或重新建立蒙版。'), { code: 'MASK_SOURCE_MISSING' });
+  const answer = await askConfirm({ title: '用最新蒙版生成副本', details: '源图：' + source.name + '\n蒙版：' + mask.name + '\n读取当前蒙版像素，新增结果层。原图与蒙版均不改动。', maskAvailable: false });
+  if (!answer.ok) { bubble('bot', '已取消合成，现有图层保持不变。'); return; }
+  const state = await read();
+  if (state.documentId !== before.documentId || state.revision !== before.revision) throw Object.assign(new Error('确认期间画布发生变化，请检查最新蒙版后重新合成。'), { code: 'REVISION_CONFLICT' });
+  const result = await transport.request({ type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
+    documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(),
+    command: { type: 'layer.add_image', payload: { sourceRef: 'layer:' + source.id, maskRef: 'layer:' + mask.id, maskMode: 'alpha',
+      x: source.x || 0, y: source.y || 0, width: source.width, height: source.height, fit: 'stretch', name: '蒙版结果·' + source.name } } }, { timeoutMs: 20000 });
+  bubble('bot', '已新增蒙版结果层 · R' + result.revision + '。这是合成快照；继续修蒙版后可再次合成，不会覆盖旧结果。');
+}
+
 async function localCutout(assetHint) {
   const line = bubble('bot', '正在自动去背景：先取边界背景色，再按连通区域擦除…');
   try {
@@ -1156,39 +1178,8 @@ async function localCutout(assetHint) {
     if (!maskLayerId) { line.textContent = '蒙版图层没有返回 id，已停止（画布只多了这张蒙版，可撤销）。'; return; }
     bubble('bot', `蒙版图层已建立（${maskLayerId}）· R${revision}。可以随时用画笔修它。`);
 
-    const composeAnswer = await askConfirm({
-      title: '用蒙版抠出商品',
-      details: [
-        `源图层    ${target.name || target.id}`,
-        `蒙版图层  ${maskLayerId}`,
-        '做法      复制源图层并按蒙版 alpha 挖空，得到一张独立的抠图图层',
-        '影响      原图保留；结果是新图层，可单独移动/导出',
-      ].join('\n'),
-      maskAvailable: false,
-    });
-    if (!composeAnswer.ok) { line.textContent = '已取消合成。蒙版图层保留在画布上，之后可以再用它。'; return; }
-
-    const compose = await transport.request({
-      type: 'editor.apply_command',
-      requestId: crypto.randomUUID(),
-      editorInstanceId: connection.editorInstanceId,
-      documentId: state.documentId,
-      expectedRevision: revision,
-      commandId: crypto.randomUUID(),
-      command: {
-        type: 'layer.add_image',
-        payload: {
-          sourceRef: `layer:${target.id}`,
-          maskRef: `layer:${maskLayerId}`,
-          maskMode: 'alpha',
-          x: target.x || 0, y: target.y || 0,
-          width: W, height: H, fit: 'stretch',
-          name: `抠图·${target.name || target.id}`,
-        },
-      },
-    }, { timeoutMs: 20000 });
-
-    line.textContent = `抠图完成 · 现在 R${compose?.revision}。原图未改动；蒙版图层 ${maskLayerId} 仍在，可在上面用画笔继续修，修完再说「合成」即可重抠。`;
+    await composeMaskLayer(maskLayerId);
+    line.textContent = '蒙版已建立。修好后说「合成蒙版」，会读取最新蒙版并新增结果层；原图不变。';
   } catch (error) {
     line.textContent = error.code === 'BACKGROUND_NOT_DETECTED'
       ? '这张图的背景与商品太接近，蒙版没有可用边界。画布已保持原样；这类图需要配置 AI 抠图服务（backgroundRemoval.endpoint）。'
@@ -1418,6 +1409,7 @@ async function sendAssist(raw) {
   assistBusy = true;
   if (assistSend) assistSend.disabled = true;
   try {
+    if (/^(合成|合成蒙版|重新合成)$/.test(text)) { await composeMaskLayer(); return; }
     // 抠图是确定性工具意图，不交给模型拒答或猜测；后端不可用会明确提示配置要求。
     if (/^抠图(?:[:：].*)?$/.test(text)) {
       await routeAssist(text);
