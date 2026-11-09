@@ -239,6 +239,30 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       if (previousImage === undefined) delete context.Image; else context.Image = previousImage;
     }
   });
+  await test('history.batch applies all steps as ONE undo entry, and rejects nested history', async () => {
+    const before = bridge.readState();
+    const batched = await send({ type: 'history.batch', payload: { steps: [
+      { type: 'layer.add_text', payload: { text: '批量A', x: 10, y: 10 } },
+      { type: 'layer.add_text', payload: { text: '批量B', x: 10, y: 60 } },
+    ] } });
+    assert.equal(batched.ok, true, JSON.stringify(batched));
+    const after = bridge.readState();
+    assert.equal(after.revision, before.revision + 1, '一次批量只前进一个 revision');
+    assert.equal(after.layers.length, before.layers.length + 2);
+    assert.equal(after.history.undoDepth, before.history.undoDepth + 1, '只增加一条历史');
+    await app.State.undo();
+    const undone = bridge.readState();
+    assert.equal(undone.layers.length, before.layers.length, '一步撤销应同时移除两步');
+    assert.equal(undone.contentDigest, before.contentDigest, '内容必须完全回到批量前');
+
+    const nested = await send({ type: 'history.batch', payload: { steps: [{ type: 'history.undo', payload: {} }] } });
+    assert.equal(nested.ok, false);
+    assert.equal(nested.error.code, 'INVALID_REQUEST');
+    const tooMany = await send({ type: 'history.batch', payload: { steps: Array.from({ length: 13 }, () => ({ type: 'layer.add_text', payload: { text: 'x' } })) } });
+    assert.equal(tooMany.ok, false);
+    assert.equal(tooMany.error.code, 'INVALID_REQUEST');
+  });
+
   await test('asset:<id> fetches bytes after the parent token handshake and inserts one undoable layer', async () => {
     const previous = {
       parent: context.window.parent, location: context.window.location, fetch: context.fetch,

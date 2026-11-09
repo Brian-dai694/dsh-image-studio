@@ -108,16 +108,17 @@ test('助手能执行计划：一次确认跑完整串，高危步骤整串拒�
   const start = host.indexOf('async function runPlanOnEditor');
   assert.ok(start > 0, '必须有批量执行函数');
   const runner = host.slice(start, host.indexOf('async function routeAssist', start));
-  assert.match(runner, /expectedRevision: state\.revision/, '每一步都要用当时的 revision');
-  assert.match(runner, /undoApplied\(applied, startDigest\)/, '失败要撤销已执行步骤');
-  assert.match(runner, /restored/, '要回报是否回到原状');
+  assert.match(runner, /expectedRevision: state\.revision/, '必须带当时的 revision');
+  assert.match(runner, /type: 'history\.batch'/, '整串必须作为一条 history.batch 提交（一步撤销）');
+  assert.match(runner, /steps: steps\.map/, '步骤要映射成 {type,payload}');
 
   const ops = host.slice(host.indexOf("if (op.type === 'plan')"), host.indexOf("if (op.type === 'command')"));
   assert.equal((ops.match(/askConfirm\(/g) || []).length, 1, '整串只确认一次');
   assert.match(ops, /layer\.remove.*canvas\.crop/, '高危命令要识别出来');
   assert.match(ops, /已拒绝整串执行/, '高危步骤必须整串拒绝，不能跳过继续');
   assert.match(ops, /runPlanOnEditor\(steps\)/, '确认后真的执行');
-  assert.match(ops, /计划在第 \$\{outcome\.applied \+ 1\} 步失败/, '失败要指明第几步');
+  assert.match(ops, /EDITOR_TIMEOUT/, '超时不能声称已回滚');
+  assert.match(ops, /整串回滚/, '失败要说明编辑器整串回滚');
 });
 
 test('套版文字命令带槽宽 meta，且 meta 不进入 payload（否则会被白名单拒）', async () => {

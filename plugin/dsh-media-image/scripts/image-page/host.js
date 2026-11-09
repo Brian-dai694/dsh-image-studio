@@ -952,9 +952,15 @@ async function execOps(ops) {
         maskAvailable: false,
       });
       if (!answer.ok) { bubble('bot', '已取消，画布没有改动。'); continue; }
-      const outcome = await runPlanOnEditor(steps);
-      if (outcome.ok) bubble('bot', `计划已执行：${outcome.applied} 步全部完成。`);
-      else bubble('bot', `计划在第 ${outcome.applied + 1} 步失败（${outcome.error.code || 'PLAN_FAILED'}：${outcome.error.message}），已撤销 ${outcome.undo.undone} 步${outcome.undo.restored === false ? '，但画布未完全恢复，请检查' : ''}。`);
+      try {
+        const outcome = await runPlanOnEditor(steps);
+        bubble('bot', `计划已执行：${outcome.applied} 步合成一步撤销（现在 R${outcome.revision}）。`);
+      } catch (error) {
+        const code = error.code || 'PLAN_FAILED';
+        bubble('bot', String(code).startsWith('EDITOR_TIMEOUT')
+          ? `计划结果未知（${code}）：不要重放，先读状态确认画布是否已变。`
+          : `计划未生效（${code}：${error.message}）。编辑器整串回滚，不会留下半步。`);
+      }
       continue;
     }
     if (op.type === 'command') {
@@ -1571,28 +1577,19 @@ async function runTemplateBatch() {
   line.append(ref);
 }
 
-/** 按顺序执行一串命令；任一步失败就把已执行的步骤撤销，并回报是否回到原状。 */
+/**
+ * 一串命令 → 编辑器里的一条历史记录（history.batch）。
+ * Bundle_action 自带"任一步失败就回滚已做的"，所以这里不再手动撤销，撤销栈里也只有一步。
+ */
 async function runPlanOnEditor(steps) {
   const connection = await connect();
-  const readOnce = () => transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
-  let state = await readOnce();
-  const startDigest = state.contentDigest;
-  let applied = 0;
-  try {
-    for (const step of steps) {
-      const result = await transport.request({
-        type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
-        documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(),
-        command: { type: step.operation, payload: step.params ?? {} },
-      }, { timeoutMs: 20000 });
-      applied += 1;
-      state = { ...state, revision: result.revision };
-    }
-    return { ok: true, applied };
-  } catch (error) {
-    const undo = applied ? await undoApplied(applied, startDigest) : { undone: 0, restored: true };
-    return { ok: false, error, applied, undo };
-  }
+  const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+  const result = await transport.request({
+    type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
+    documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(),
+    command: { type: 'history.batch', payload: { steps: steps.map(step => ({ type: step.operation, payload: step.params ?? {} })) } },
+  }, { timeoutMs: 30000 });
+  return { ok: true, applied: steps.length, revision: result?.revision };
 }
 
 async function routeAssist(raw) {

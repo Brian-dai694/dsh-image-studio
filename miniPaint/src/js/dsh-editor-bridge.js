@@ -5,7 +5,7 @@ import zoomView from './libs/zoomView.js';
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
 const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
-const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'history.batch', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -886,6 +886,30 @@ export class DshEditorBridge {
   async prepare(command) {
     if (!keysOnly(command, ['type', 'payload']) || !COMMANDS.has(command.type)) throw this.error('UNSUPPORTED_COMMAND');
     const p = command.payload;
+    if (command.type === 'history.batch') {
+      // 批量：一串命令合成**一条**历史记录（Bundle_action 自带"任一步失败就回滚已做的"）。
+      // 里面不允许再嵌套批量或历史命令——否则撤销语义会变得没法解释。
+      if (!keysOnly(p, ['steps', 'name'])) throw this.error('INVALID_REQUEST');
+      const steps = p.steps;
+      if (!Array.isArray(steps) || steps.length < 1 || steps.length > 12) throw this.error('INVALID_REQUEST', 'steps 必须是 1..12 条命令');
+      const prepared = [];
+      for (const [index, step] of steps.entries()) {
+        if (!plain(step) || !keysOnly(step, ['type', 'payload']) || typeof step.type !== 'string' || !COMMANDS.has(step.type)) {
+          throw this.error('INVALID_REQUEST', `step ${index + 1} 不是有效命令`);
+        }
+        if (step.type === 'history.batch' || step.type === 'history.undo' || step.type === 'history.redo') {
+          throw this.error('INVALID_REQUEST', `step ${index + 1}：批量里不能包含历史命令`);
+        }
+        // 复用单条命令的校验与动作构造；这一步只构造、不动画布。
+        prepared.push(await this.prepare({ type: step.type, payload: step.payload ?? {} }));
+      }
+      const actions = prepared.map(item => item.action);
+      const label = typeof p.name === 'string' && p.name ? p.name.slice(0, 80) : `批量 ${actions.length} 步`;
+      return {
+        action: new app.Actions.Bundle_action('dsh_batch', label, actions),
+        ids: () => prepared.flatMap(item => item.ids()),
+      };
+    }
     if (command.type === 'history.undo' || command.type === 'history.redo') {
       if (!keysOnly(p, command.type === 'history.undo' ? ['targetCommandId', 'afterDigest'] : [])) throw this.error('INVALID_REQUEST');
       if ((p.targetCommandId === undefined) !== (p.afterDigest === undefined)) throw this.error('INVALID_REQUEST');

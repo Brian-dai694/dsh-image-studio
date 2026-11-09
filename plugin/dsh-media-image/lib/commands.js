@@ -5,7 +5,7 @@
 //
 // 单一事实来源：命令 id 直接取自 bridge 的白名单，避免目录和实现漂移（测试会逐条核对）。
 
-import { ALLOWED_COMMANDS } from './bridge.js';
+import { ALLOWED_COMMANDS, HIGH_RISK_COMMANDS } from './bridge.js';
 
 /** 每条命令需要什么前提。none=随时可发；layer=需要选中任意图层；text=需要选中文字层；image=需要选中图片层；history=看历史栈。 */
 export const COMMAND_NEEDS = {
@@ -15,6 +15,7 @@ export const COMMAND_NEEDS = {
   'canvas.crop': 'none',
   'history.undo': 'history',
   'history.redo': 'history',
+  'history.batch': 'none',
   'layer.update_text': 'text',
   'layer.set_transform': 'layer',
   'layer.set_visibility': 'layer',
@@ -49,9 +50,10 @@ export const COMMAND_PARAMS = {
   'canvas.crop': '{x, y, width, height}',
   'history.undo': '{targetCommandId, afterDigest}',
   'history.redo': '{}',
+  'history.batch': '{steps:[{type,payload}] (1..12, no history.*, no high-risk), name?}',
 };
 
-export const HIGH_RISK_COMMANDS = new Set(['layer.remove', 'canvas.crop', 'layer.add_image']);
+
 
 const distance = (a, b) => {
   const rows = [];

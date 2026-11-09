@@ -53,6 +53,7 @@ command 命令名必须属于编辑器白名单。参数契约：
 - canvas.crop: {x,y,width,height}，高影响，说明裁切范围。
 - history.undo: {targetCommandId,afterDigest}；只撤销最近一条 Agent 改动，凭据必须来自 read_state.history，不得猜。
 - history.redo: {}；先确认 read_state.history.canRedo 为真，否则会被 HISTORY_EMPTY 拒绝。
+- history.batch: {steps:[{type,payload?}],name?}；1..12 条，不能含 history.*，不能含高危命令；整串合成**一步**撤销，任一步失败整串回滚。
 
 每个 command 由用户逐项确认，最多连续提议 3 个；上一项完成后会重新读取 revision，再显示下一项确认。
 

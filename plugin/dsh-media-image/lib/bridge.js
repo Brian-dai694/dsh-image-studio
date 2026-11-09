@@ -25,7 +25,7 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo', 'history.batch']);
 
 // 与编辑器 modules/layer/composition.js 同源：Canvas globalCompositeOperation 全集。
 export const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
@@ -35,6 +35,9 @@ const fieldsOnly = (payload, fields) => {
 };
 
 export const ALLOWED_COMMANDS = { image: IMAGE_COMMANDS };
+
+// 需要人工审批的命令：既不能藏在批量里，也不能在计划里。
+export const HIGH_RISK_COMMANDS = new Set(['layer.remove', 'canvas.crop', 'layer.add_image']);
 
 // 图片命令校验：白名单 + 逐字段类型/范围检查，必须在发给编辑器之前拒绝。
 // 重点边界：canvas 尺寸 1..16384 像素、crop 的 x/y 非负、transform 必须平铺字段、
@@ -57,8 +60,33 @@ function validateImageCommand(command) {
     'layer.remove_background': ['layerId', 'tolerance', 'featherPx'],
     'layer.magic_erase': ['layerId', 'x', 'y', 'tolerance', 'contiguous'],
     'layer.add_mask_layer': ['sourceLayerId', 'mode', 'tolerance', 'featherPx', 'name'],
+    'history.batch': ['steps', 'name'],
   };
   fieldsOnly(p, fields[command.type]);
+  if (command.type === 'history.batch') {
+    // 批量 = 编辑器里一条历史记录（Bundle_action）。这里只做形状与策略校验，
+    // 每条步骤的字段细节由编辑器按同一套白名单再验一次。
+    if (!Array.isArray(p.steps) || p.steps.length < 1 || p.steps.length > 12) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'steps must contain 1..12 commands.');
+    }
+    if (p.name !== undefined && (typeof p.name !== 'string' || p.name.length > 80)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'name must be a string up to 80 characters.');
+    }
+    for (const [index, step] of p.steps.entries()) {
+      if (!isObject(step)) throw new MediaBridgeError('INVALID_REQUEST', `step ${index + 1} must be an object.`);
+      const extra = Object.keys(step).find(key => key !== 'type' && key !== 'payload');
+      if (extra) throw new MediaBridgeError('INVALID_REQUEST', `step ${index + 1} has an unsupported field: ${extra}.`);
+      if (typeof step.type !== 'string' || !IMAGE_COMMANDS.has(step.type)) {
+        throw new MediaBridgeError('UNSUPPORTED_COMMAND', `step ${index + 1} is not in the image allowlist.`);
+      }
+      if (step.type.startsWith('history.')) throw new MediaBridgeError('INVALID_REQUEST', `step ${index + 1}: batch cannot contain history commands.`);
+      // 与 run_plan 同一条策略：高危动作必须单独走审批，不能藏在批量里。
+      if (HIGH_RISK_COMMANDS.has(step.type)) {
+        throw new MediaBridgeError('HIGH_RISK_IN_PLAN', `step ${index + 1}: ${step.type} needs its own approval and cannot be batched.`);
+      }
+      if (step.payload !== undefined && !isObject(step.payload)) throw new MediaBridgeError('INVALID_REQUEST', `step ${index + 1} payload must be an object.`);
+    }
+  }
   if (command.type === 'history.undo' && (p.targetCommandId !== undefined || p.afterDigest !== undefined)) {
     opaqueId(p.targetCommandId, 'targetCommandId'); opaqueId(p.afterDigest, 'afterDigest');
   }

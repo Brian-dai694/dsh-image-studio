@@ -39,6 +39,16 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 已知边界：批量固定使用同一商品槽与同一套文案（每份可用 `texts` 覆盖）；不同槽位的批量尚未支持。
 
+## 批量执行与单步撤销
+
+`history.batch {steps:[{type,payload}], name?}` 把 1..12 条命令合成**编辑器里的一条历史记录**（miniPaint 的 `Bundle_action`）：
+
+- 任一步失败，`Bundle_action` 会先把已执行的步骤撤销再抛错——**整体回滚**，不留半步
+- 撤销栈只增加一条，Ctrl+Z 一次就整串撤销
+- 里面不能嵌套 `history.*`，也不能包含高危命令（`layer.remove` / `canvas.crop` / `layer.add_image`），它们必须单独走审批
+
+`media_image_run_plan` 与助手侧的 `{"type":"plan","steps":[…]}` 都走这条命令，所以"一次确认、一次写入、一步撤销"是同一个实现。
+
 ## 命令目录（给调用方的前置知识）
 
 `media_image_list_commands` 只读、不写画布，返回每条白名单命令的：
