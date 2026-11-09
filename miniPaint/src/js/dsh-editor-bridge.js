@@ -282,12 +282,25 @@ export class DshEditorBridge {
     const offCanvas = [];
     const zeroSize = [];
     const textOverflow = [];
+    const textContrast = [];
+    const upscaled = [];
+    const scaleX = sw / W, scaleY = sh / H;
+    const lumaAt = (x, y) => {
+      const i = (y * sw + x) * 4;
+      if (i < 0 || i + 3 >= data.length) return null;
+      if (data[i + 3] < 13) return null;   // 透明像素不参与，否则"没背景"会被算成黑
+      return (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+    };
     for (const layer of layers) {
       if (layer.visible === false) continue;
       const w = Number(layer.width) || 0, h = Number(layer.height) || 0;
       if (w < 1 || h < 1) { zeroSize.push(String(layer.id)); continue; }
       const x = Number(layer.x) || 0, y = Number(layer.y) || 0;
       if (x < 0 || y < 0 || x + w > W + 1 || y + h > H + 1) offCanvas.push(String(layer.id));
+      // 位图被放大：链接画布的自然尺寸小于版面尺寸，成品会发虚。
+      if (layer.link && Number(layer.link.width) > 0 && w > Number(layer.link.width) * 1.05) {
+        upscaled.push({ id: String(layer.id), natural: Number(layer.link.width), scaled: Math.round(w) });
+      }
       if (layer.type === 'text') {
         const text = textOf(layer);
         if (text) {
@@ -295,6 +308,32 @@ export class DshEditorBridge {
             const measured = this.measureText({ text, style: { size: layer.params?.size ?? 24, family: layer.data?.[0]?.[0]?.meta?.family } });
             if (measured.width > w + 1 || x + measured.width > W + 1) textOverflow.push({ id: String(layer.id), width: Math.round(measured.width) });
           } catch { /* 字体没就绪就不算这一项，不编数字 */ }
+        }
+        // 文字与背景对比：只取文字框**外圈**的背景像素，和文字声明的颜色比。
+        const fill = layer.data?.[0]?.[0]?.meta?.fill_color;
+        if (typeof fill === 'string' && /^#[0-9a-f]{6}$/i.test(fill)) {
+          const box = {
+            x0: Math.max(0, Math.round(x * scaleX)), y0: Math.max(0, Math.round(y * scaleY)),
+            x1: Math.min(sw, Math.round((x + w) * scaleX)), y1: Math.min(sh, Math.round((y + h) * scaleY)),
+          };
+          const pad = 4;
+          let sum = 0, count = 0;
+          for (let py = Math.max(0, box.y0 - pad); py < Math.min(sh, box.y1 + pad); py += 1) {
+            for (let pxx = Math.max(0, box.x0 - pad); pxx < Math.min(sw, box.x1 + pad); pxx += 1) {
+              const inside = pxx >= box.x0 && pxx < box.x1 && py >= box.y0 && py < box.y1;
+              if (inside) continue;
+              const luma = lumaAt(pxx, py);
+              if (luma === null) continue;
+              sum += luma; count += 1;
+            }
+          }
+          if (count > 0) {
+            const bgLuma = sum / count;
+            const rr = parseInt(fill.slice(1, 3), 16), gg = parseInt(fill.slice(3, 5), 16), bb = parseInt(fill.slice(5, 7), 16);
+            const textLuma = (0.2126 * rr + 0.7152 * gg + 0.0722 * bb) / 255;
+            const contrast = Math.abs(bgLuma - textLuma);
+            if (contrast < 0.25) textContrast.push({ id: String(layer.id), contrast: Number(contrast.toFixed(3)), textLuma: Number(textLuma.toFixed(3)), backgroundLuma: Number(bgLuma.toFixed(3)) });
+          }
         }
       }
     }
@@ -308,7 +347,7 @@ export class DshEditorBridge {
         spread: Number((Math.max(sumR, sumG, sumB) / denom - Math.min(sumR, sumG, sumB) / denom).toFixed(1)),
       },
       sharpness: { laplacianVariance: Number(lapVariance.toFixed(2)) },
-      layers: { total: layers.length, visible: layers.filter(layer => layer.visible !== false).length, offCanvas, zeroSize, textOverflow },
+      layers: { total: layers.length, visible: layers.filter(layer => layer.visible !== false).length, offCanvas, zeroSize, textOverflow, textContrast, upscaled },
       opaqueRatio: Number((counted / (sw * sh)).toFixed(4)),
     };
   }
@@ -328,6 +367,25 @@ export class DshEditorBridge {
     const ctx = small.getContext('2d');
     if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法生成预览');
     ctx.drawImage(full, 0, 0, width, height);
+    // 可选坐标网格：按源图像素每 100 画一条线并标注坐标，方便调用方把"位置"对上数字。
+    if (request.grid) {
+      const stepSource = 100;
+      const stepScaled = Math.max(8, Math.round(stepSource * scale));
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,0,0,0.55)';
+      ctx.fillStyle = 'rgba(255,0,0,0.85)';
+      ctx.lineWidth = 1;
+      ctx.font = '9px monospace';
+      for (let gx = stepScaled; gx < width; gx += stepScaled) {
+        ctx.beginPath(); ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, height); ctx.stroke();
+        ctx.fillText(String(Math.round(gx / scale)), gx + 2, 9);
+      }
+      for (let gy = stepScaled; gy < height; gy += stepScaled) {
+        ctx.beginPath(); ctx.moveTo(0, gy + 0.5); ctx.lineTo(width, gy + 0.5); ctx.stroke();
+        ctx.fillText(String(Math.round(gy / scale)), 2, gy - 2);
+      }
+      ctx.restore();
+    }
     const dataUrl = small.toDataURL('image/png');
     const bytes = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
     if (bytes > 256 * 1024) throw this.error('PREVIEW_TOO_LARGE', `预览 ${Math.round(bytes / 1024)} KB 超过 256 KB，请调低 maxWidth`);
@@ -1258,7 +1316,7 @@ export class DshEditorBridge {
       return { action: new app.Actions.Update_layer_action(layer.id, { x, y, width, height }), ids: () => [String(layer.id)] };
     }
     const fields = {
-      'layer.add_text': ['text', 'x', 'y', 'style', 'fontUrl'], 'layer.update_text': ['layerId', 'text', 'fontUrl'],
+      'layer.add_text': ['text', 'x', 'y', 'style', 'fontUrl'], 'layer.update_text': ['layerId', 'text', 'fontUrl', 'style'],
       'layer.set_transform': ['layerId', 'x', 'y', 'scaleX', 'scaleY', 'rotationDeg'],
       'layer.set_visibility': ['layerId', 'visible'], 'layer.reorder': ['layerId', 'toIndex'],
       'layer.set_appearance': ['layerId', 'opacity', 'blendMode', 'name']
@@ -1297,13 +1355,20 @@ export class DshEditorBridge {
     if (command.type === 'layer.update_text') {
       if (layer.type !== 'text' || !validText(p.text)) throw this.error('INVALID_REQUEST');
       const existingStyle = layer.data?.[0]?.[0]?.meta || {};
+      // 允许只改颜色：自检报"文字与背景对比不足"时，这是唯一能落地的修复动作。
+      let nextStyle = existingStyle;
+      if (p.style !== undefined) {
+        if (!plain(p.style) || !keysOnly(p.style, ['fill_color'])) throw this.error('INVALID_REQUEST');
+        if (p.style.fill_color !== undefined && !/^#[0-9a-f]{6}$/i.test(p.style.fill_color)) throw this.error('INVALID_REQUEST');
+        nextStyle = { ...existingStyle, ...p.style };
+      }
       const fontUrl = this.readFontSpec(p);
       if (fontUrl) {
         const family = existingStyle.family;
         if (typeof family !== 'string' || !family) throw this.error('INVALID_REQUEST', '该文本层没有字体族，无法绑定 fontUrl');
         await this.ensureFontLoaded(family, fontUrl);
       }
-      return { action: new app.Actions.Update_layer_action(layer.id, { data: lines(p.text, existingStyle) }), ids };
+      return { action: new app.Actions.Update_layer_action(layer.id, { data: lines(p.text, nextStyle) }), ids };
     }
     if (command.type === 'layer.set_transform') {
       const settings = {};

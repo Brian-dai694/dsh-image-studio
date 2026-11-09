@@ -80,6 +80,18 @@ export function reviewMeasurements(measurement) {
   for (const item of m.layers?.textOverflow || []) {
     findings.push({ code: 'TEXT_OVERFLOW', severity: 'warn', message: `文字层 ${item.id} 估计宽 ${item.width}px，超出所在框或画布`, suggestedCommand: suggest('layer.set_frame'), evidence: { layerId: item.id, width: item.width } });
   }
+  for (const item of m.layers?.textContrast || []) {
+    // 唯一能自动修的路径是换颜色；对比度本身就摆在这里，不评价"好不好看"。
+    findings.push({
+      code: 'TEXT_LOW_CONTRAST', severity: 'warn',
+      message: `文字层 ${item.id} 与背景对比 ${item.contrast}（文字亮度 ${item.textLuma} / 背景亮度 ${item.backgroundLuma}）`,
+      suggestedCommand: suggest('layer.update_text'),
+      evidence: { layerId: item.id, ...item },
+    });
+  }
+  for (const item of m.layers?.upscaled || []) {
+    findings.push({ code: 'UPSCALED_IMAGE', severity: 'info', message: `图层 ${item.id} 被放大到 ${item.scaled}px（原图 ${item.natural}px），会发虚`, suggestedCommand: null, evidence: { layerId: item.id, ...item } });
+  }
 
   return findings;
 }

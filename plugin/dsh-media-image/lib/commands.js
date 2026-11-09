@@ -33,7 +33,7 @@ export const COMMAND_NEEDS = {
 /** 参数契约（给人看的字符串，不做 JSON Schema；与 assist 提示词里的描述同源）。 */
 export const COMMAND_PARAMS = {
   'layer.add_text': '{text, x?, y?, style?:{size?,family?,fill_color?,bold?,italic?}, fontUrl?}',
-  'layer.update_text': '{layerId, text, fontUrl?}',
+  'layer.update_text': '{layerId, text, fontUrl?, style?:{fill_color}}',
   'layer.add_image': '{sourceRef, x?, y?, width?, height?, fit?, name?, maskRef?, maskRect?, maskMode?, maskInvert?, featherPx?}',
   'layer.set_transform': '{layerId, x?, y?, scaleX?, scaleY?, rotationDeg?}',
   'layer.set_visibility': '{layerId, visible}',

@@ -66,6 +66,8 @@ function makeCanvas(w = 8, h = 8, content = 1) {
           const size = Number((/(\d+(?:\.\d+)?)px/.exec(ctx.font) || [0, 12])[1]) || 12;
           return { width: String(text).length * size * 0.5 };
         },
+        // 网格绘制用的路径 API：桩里不真的画线，只要调用不炸。
+        save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillText() {},
       };
       return ctx;
     },
@@ -245,6 +247,41 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     assert.equal(box2.value.ok, true);
     assert.equal(after.revision, before.revision, '预览不能推进 revision');
     assert.equal(after.contentDigest, before.contentDigest, '预览不能改内容');
+  });
+
+  await test('layer.update_text can change fill colour (style.fill_color) as one undoable step', async () => {
+    const idsBefore = new Set(config.layers.map(item => String(item.id)));
+    const created = await send({ type: 'layer.add_text', payload: { text: 'colour test', x: 5, y: 5, style: { size: 20, fill_color: '#ffffff' } } });
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const added = config.layers.find(item => !idsBefore.has(String(item.id)));
+    assert.ok(added, '新图层应出现在 config 里');
+    const id = String(added.id);
+    assert.equal(added.data[0][0].meta.fill_color, '#ffffff');
+    const before = bridge.readState();
+    const updated = await send({ type: 'layer.update_text', payload: { layerId: String(id), text: 'colour test', style: { fill_color: '#101010' } } });
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    assert.equal(added.data[0][0].meta.fill_color, '#101010', '颜色应被改掉');
+    assert.equal(bridge.readState().history.undoDepth, before.history.undoDepth + 1, '只增加一条历史');
+    const rejected = await send({ type: 'layer.update_text', payload: { layerId: String(id), text: 'x', style: { fill_color: 'red' } } });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error.code, 'INVALID_REQUEST');
+    const extraKey = await send({ type: 'layer.update_text', payload: { layerId: String(id), text: 'x', style: { size: 10 } } });
+    assert.equal(extraKey.ok, false, 'style 只允许 fill_color');
+    await app.State.undo();
+    assert.equal(added.data[0][0].meta.fill_color, '#ffffff', '撤销后回到原色');
+  });
+
+  await test('editor.preview_png accepts a coordinate grid option without changing the document', async () => {
+    const originalComposite = bridge.compositeCanvas.bind(bridge);
+    bridge.compositeCanvas = () => makeCanvas(300, 300, 180);
+    try {
+      const box = {};
+      await bridge.handleRequest({ type: 'editor.preview_png', requestId: 'g1', editorInstanceId: bridge.editorInstanceId, maxWidth: 200, grid: true }, { postMessage(value) { box.value = value; } });
+      assert.equal(box.value.ok, true, JSON.stringify(box.value));
+      assert.ok(box.value.result.dataUrl.startsWith('data:image/png;base64,'));
+    } finally {
+      bridge.compositeCanvas = originalComposite;
+    }
   });
 
   await test('mask binding survives native undo/redo and composition reads the edited mask', async () => {

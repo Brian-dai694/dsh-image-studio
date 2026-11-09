@@ -49,7 +49,7 @@ function validateImageCommand(command) {
   const fields = {
     'history.undo': ['targetCommandId', 'afterDigest'], 'history.redo': [], 'canvas.resize': ['width', 'height'],
     'canvas.crop': ['x', 'y', 'width', 'height'], 'layer.remove': ['layerId'],
-    'layer.add_text': ['text', 'x', 'y', 'style', 'fontUrl'], 'layer.update_text': ['layerId', 'text', 'fontUrl'],
+    'layer.add_text': ['text', 'x', 'y', 'style', 'fontUrl'], 'layer.update_text': ['layerId', 'text', 'fontUrl', 'style'],
     'layer.set_transform': ['layerId', 'x', 'y', 'scaleX', 'scaleY', 'rotationDeg'],
     'layer.set_visibility': ['layerId', 'visible'], 'layer.reorder': ['layerId', 'toIndex'],
     'layer.set_appearance': ['layerId', 'opacity', 'blendMode', 'name'],
@@ -63,6 +63,15 @@ function validateImageCommand(command) {
     'history.batch': ['steps', 'name'],
   };
   fieldsOnly(p, fields[command.type]);
+  if (command.type === 'layer.update_text' && p.style !== undefined) {
+    // 只允许改颜色：这是"文字与背景对比不足"唯一能落地的自动修复动作。
+    if (!isObject(p.style)) throw new MediaBridgeError('INVALID_REQUEST', 'style must be an object.');
+    const extra = Object.keys(p.style).find(key => key !== 'fill_color');
+    if (extra) throw new MediaBridgeError('INVALID_REQUEST', `style only supports fill_color, got ${extra}.`);
+    if (p.style.fill_color !== undefined && !/^#[0-9a-f]{6}$/i.test(p.style.fill_color)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'fill_color must be #rrggbb.');
+    }
+  }
   if (command.type === 'history.batch') {
     // 批量 = 编辑器里一条历史记录（Bundle_action）。这里只做形状与策略校验，
     // 每条步骤的字段细节由编辑器按同一套白名单再验一次。
@@ -356,7 +365,7 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
     // 缩略预览：只读，返回 data URL；超 256 KB 明确报错而不是截断。
     async preview(input) {
       opaqueId(input?.instanceId, 'instanceId');
-      const result = await request('editor.preview_png', { editorInstanceId: input.instanceId, ...(input.maxWidth === undefined ? {} : { maxWidth: input.maxWidth }) });
+      const result = await request('editor.preview_png', { editorInstanceId: input.instanceId, ...(input.maxWidth === undefined ? {} : { maxWidth: input.maxWidth }), ...(input.grid ? { grid: true } : {}) });
       if (!isObject(result) || typeof result.dataUrl !== 'string' || !result.dataUrl.startsWith('data:image/png;base64,')) {
         throw new MediaBridgeError('EDITOR_ERROR', 'Editor returned an invalid preview.');
       }

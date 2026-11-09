@@ -66,6 +66,23 @@ test('每条建议命令都必须真实存在于白名单', () => {
   }
 });
 
+test('文字对比不足与放大图层都被点名，且建议命令可执行', () => {
+  const findings = reviewMeasurements(base({
+    layers: {
+      total: 2, visible: 2, offCanvas: [], zeroSize: [], textOverflow: [],
+      textContrast: [{ id: 't1', contrast: 0.08, textLuma: 0.9, backgroundLuma: 0.95 }],
+      upscaled: [{ id: 'i1', natural: 400, scaled: 900 }],
+    },
+  }));
+  const contrast = findings.find(item => item.code === 'TEXT_LOW_CONTRAST');
+  assert.ok(contrast, JSON.stringify(findings));
+  assert.equal(contrast.suggestedCommand, 'layer.update_text', '对比不足要能指向改颜色的命令');
+  const upscaled = findings.find(item => item.code === 'UPSCALED_IMAGE');
+  assert.ok(upscaled);
+  assert.equal(upscaled.severity, 'info');
+  assert.match(upscaled.message, /400/);
+});
+
 test('没有测量值时返回空清单，不编造', () => {
   assert.deepEqual(reviewMeasurements(null), []);
   assert.deepEqual(reviewMeasurements(undefined), []);

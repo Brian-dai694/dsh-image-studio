@@ -678,7 +678,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     try {
       bindings.assert(exec, kind, args);
       const state = await verify(kind, bridge, args, exec);
-      const image = await bridge.preview({ instanceId: args.instanceId, ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }) });
+      const image = await bridge.preview({ instanceId: args.instanceId, ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }), ...(args.grid ? { grid: true } : {}) });
       return {
         status: 'applied', commandId: 'preview', editorKind: kind,
         projectId: state.documentId, revision: state.revision,
@@ -696,6 +696,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     parameters: {
       ...READ_PARAMS,
       maxWidth: { type: 'integer', description: 'Long-edge pixel cap (64..1024, default 640). Larger means more detail and more bytes.' },
+      grid: { type: 'boolean', description: 'Draw a 100px coordinate grid with labels on the preview so positions can be checked numerically.' },
     },
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: preview('image', bridge),
