@@ -1094,6 +1094,7 @@ const HELP = [
   '· 插入图层                  → 把最近一次结果落成图层（会弹确认框）',
   '· 套版（点按钮选 .psd）      → 先给预览：候选商品槽 #1..#n、将沿用的文案、还原不了的装饰层',
   '· 套版：2                    → 用第 2 个候选槽放商品图（不再弹选择框）',
+  '· 批量套版                  → 用已上传的每张商品各出一份 PNG 入素材库（画布最后恢复原状）',
   '· 合成蒙版                  → 选择已绑定蒙版层，按最新蒙版新增结果副本（需确认）',
   '· 状态                      → 读一次编辑器：文档、版本、图层数',
 ].join('\n');
@@ -1358,6 +1359,125 @@ async function applyTemplateFlow(file, slotIndex = null) {
   }
 }
 
+/** 把当前画布导出成 PNG 并入库；导出不写画布，也不推进 revision。 */
+async function exportCanvasAsAsset(name) {
+  const state = await fetchEditorState();
+  const result = await transport.request({
+    type: 'editor.export_start', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId,
+    documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(), format: 'png',
+  }, { timeoutMs: 30000 });
+  if (result?.status !== 'completed' || !result.artifactRef) throw Object.assign(new Error('导出未完成'), { code: 'EXPORT_FAILED' });
+  const blob = await (await fetch(result.artifactRef)).blob();
+  const file = new File([blob], `${name || 'variant'}.png`, { type: 'image/png' });
+  const asset = await uploadImageAsset(file);
+  rememberAsset(asset);
+  return asset;
+}
+
+/**
+ * 撤销最近 n 条命令，回到批量开始前的状态。
+ * 第一步用精确凭据证明栈顶就是我们刚写的命令；桥接 undo 后会清掉 lastCommandId，
+ * 所以后续只能走普通撤销，最后用内容摘要核对是否真的回到原状。
+ */
+async function undoApplied(count, startDigest) {
+  let undone = 0;
+  for (let i = 0; i < count; i += 1) {
+    const state = await fetchEditorState();
+    const history = state.history || {};
+    if (!history.canUndo) break;
+    const payload = (i === 0 && history.lastCommandId && history.afterDigest)
+      ? { targetCommandId: history.lastCommandId, afterDigest: history.afterDigest }
+      : {};
+    await applyEditorCommand(state, { type: 'history.undo', payload });
+    undone += 1;
+  }
+  const after = await fetchEditorState();
+  return { undone, digest: after.contentDigest, restored: startDigest ? after.contentDigest === startDigest : null };
+}
+
+/** 读一次编辑器状态给批量流程用（返回对象，不打印）。 */
+async function fetchEditorState() {
+  const connection = await connect();
+  return transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+}
+
+async function applyEditorCommand(state, command) {
+  return transport.request({
+    type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId,
+    documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(), command,
+  }, { timeoutMs: 20000 });
+}
+
+/** 批量套版：一次确认，逐份执行→导出→撤销，最后画布回到原状。 */
+async function runTemplateBatch() {
+  if (!psdTemplate || !psdFile) { bubble('bot', '还没有套版模板：先点「套版」选一个 .psd 文件。'); return; }
+  const products = knownAssets.filter(asset => asset.id).slice(0, 20);
+  if (products.length === 0) { bubble('bot', '没有商品素材：先「上传」几张商品图，再用批量套版。'); return; }
+  if (products.length === 1) { bubble('bot', '目前只有 1 张商品素材；批量套版需要多张，先多上传几张。'); return; }
+  const answer = await askConfirm({
+    title: `批量套版：${products.length} 份`,
+    details: [
+      `模板     ${psdTemplate.name}`,
+      `商品     ${products.map(asset => asset.name || asset.id).slice(0, 5).join('、')}${products.length > 5 ? '…' : ''}`,
+      '做法     逐份：写入画布 → 导出 PNG 入库 → 撤销回原状',
+      '影响     画布最终保持现在的样子；成品是素材库里的 PNG',
+    ].join('\n'),
+    maskAvailable: false,
+  });
+  if (!answer.ok) { bubble('bot', '已取消，没有写入任何内容。'); return; }
+
+  const line = bubble('bot', '正在提交批量套版规划……');
+  let batch;
+  try {
+    const applied = await apiRaw('/media-image/template/batch', await psdFile.arrayBuffer(), psdFile.name, {
+      'x-psd-background': '#f4f5f7',
+      'x-psd-products': encodeURIComponent(JSON.stringify(products.map(asset => ({ assetRef: `asset:${asset.id}`, name: asset.name })))),
+    });
+    batch = applied;
+  } catch (error) {
+    line.textContent = `${error.code || 'TEMPLATE_BATCH_FAILED'}：${error.message}`;
+    return;
+  }
+  if (batch.baseError) bubble('bot', `底图合成失败（${batch.baseError.code}），改用纯色背景：装饰层不会还原。`);
+  const created = [];
+  for (const variant of batch.variants) {
+    const startState = await fetchEditorState();
+    let applied = 0;
+    try {
+      let revision = startState.revision;
+      for (const command of variant.plan.commands) {
+        const result = await applyEditorCommand({ ...startState, revision }, command);
+        revision = result.revision;
+        applied += 1;
+      }
+      const asset = await exportCanvasAsAsset(`套版-${variant.index}-${variant.name || '商品'}`);
+      created.push({ index: variant.index, assetRef: `asset:${asset.id}`, name: asset.name });
+      line.textContent = `已出第 ${variant.index}/${batch.variants.length} 份：${asset.name}`;
+    } catch (error) {
+      const undo = await undoApplied(applied, startState.contentDigest);
+      bubble('bot', `第 ${variant.index} 份失败（${error.code || 'TEMPLATE_VARIANT_FAILED'}：${error.message}），已撤销 ${undo.undone} 步${undo.restored === false ? '，但画布未完全恢复，请手动检查' : ''}；批量停止。已完成 ${created.length} 份。`);
+      break;
+    }
+    const undo = await undoApplied(applied, startState.contentDigest);
+    if (undo.undone !== applied) {
+      bubble('bot', `第 ${variant.index} 份导出成功，但只撤销了 ${undo.undone}/${applied} 步；请检查画布后手动撤销剩余部分。`);
+      break;
+    }
+    if (undo.restored === false) {
+      bubble('bot', `第 ${variant.index} 份已撤销 ${undo.undone} 步，但画布摘要与批量前不一致（可能有人同时改了画布）；已停止，请检查。`);
+      break;
+    }
+  }
+  if (!created.length) { line.textContent = '批量套版没有产出成品。'; return; }
+  const refs = created.map(item => item.assetRef).join(' ');
+  line.textContent = `批量套版完成：${created.length} 份 PNG 已入素材库（${created.map(item => item.name).join('、')}）。画布已恢复。说「插入图层」可把最近一份放上画布。`;
+  lastAssetRef = created[created.length - 1].assetRef;
+  const ref = document.createElement('span');
+  ref.className = 'ref';
+  ref.textContent = refs;
+  line.append(ref);
+}
+
 async function routeAssist(raw) {
   const text = String(raw || '').trim();
   if (!text) return;
@@ -1425,6 +1545,8 @@ async function routeAssist(raw) {
     await applyTemplateFlow(null, templateChoice[1] ? Number(templateChoice[1]) : null);
     return;
   }
+
+  if (/^批量套版$/.test(text)) { await runTemplateBatch(); return; }
 
 
   const remove = /^抠图(?:[:：]\s*(.+))?$/.exec(text);

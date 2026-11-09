@@ -170,6 +170,42 @@ test('/template/apply：一次上传即合成底图并规划，底图占满画�
   assert.equal(value.plan.skipped.filter(item => item.kind === 'image').length, 0, '装饰不再计入丢失');
 });
 
+test('/template/batch：一次上传合成一次底图，为多个商品各出一份规划', async t => {
+  if (!existsSync(APLUS)) return t.skip('缺少样例 aplus01.psd');
+  const { createAssetStore } = await import('../lib/assets.js');
+  const { createMediaRouter } = await import('../lib/http.js');
+  const assets = createAssetStore();
+  const token = 'batch-token';
+  const router = createMediaRouter({ relay: { request: async () => ({}) }, editorKind: 'image', prefix: '/media-image', token, publicDir: '.', assets });
+  const products = [{ assetRef: `asset:${'a'.repeat(48)}`, name: 'A' }, { assetRef: `asset:${'b'.repeat(48)}`, name: 'B' }];
+  const out = { status: 0, body: '' };
+  const res = { writeHead(status) { out.status = status; return res; }, end(chunk) { out.body = String(chunk ?? ''); } };
+  const req = {
+    method: 'POST', url: '/media-image/template/batch',
+    headers: {
+      host: 'localhost', origin: 'http://localhost', authorization: `Bearer ${token}`,
+      'x-dsh-media-relay': '1', 'x-dsh-media-asset': '1', 'content-type': 'application/octet-stream',
+      'x-psd-name': encodeURIComponent('aplus01.psd'),
+      'x-psd-background': '%23f4f5f7',
+      'x-psd-products': encodeURIComponent(JSON.stringify(products)),
+    },
+    async *[Symbol.asyncIterator]() { yield readFileSync(APLUS); },
+  };
+  await router(req, res);
+  assert.equal(out.status, 200, out.body.slice(0, 300));
+  const value = JSON.parse(out.body);
+  assert.ok(value.base?.assetRef, '必须返回底图');
+  assert.equal(value.variants.length, 2);
+  assert.equal(value.summary.variants, 2);
+  assert.equal(assets.list().length, 1, '底图只存一份，不按变体重复');
+  for (const variant of value.variants) {
+    const images = variant.plan.commands.filter(command => command.type === 'layer.add_image');
+    assert.equal(images[0].payload.sourceRef, value.base.assetRef, '每份都从同一底图开始');
+  }
+  assert.equal(value.variants[0].plan.commands.filter(c => c.type === 'layer.add_image')[1].payload.sourceRef, products[0].assetRef);
+  assert.equal(value.variants[1].plan.commands.filter(c => c.type === 'layer.add_image')[1].payload.sourceRef, products[1].assetRef);
+});
+
 test('非 RGB 或非 8bit 明确拒绝，不返回半成品', () => {
   const psd = buildPsd({ width: 4, height: 4, layers: [{ x: 0, y: 0, w: 4, h: 4, rgb: [1, 2, 3] }] });
   const cmyk = Buffer.from(psd);

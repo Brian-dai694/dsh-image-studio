@@ -317,6 +317,28 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('批量套版：一次确认、逐份导出入库、每份撤销回原状，失败即停', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.match(code, /\^批量套版\$/, '必须支持「批量套版」指令');
+  const start = code.indexOf('async function runTemplateBatch');
+  assert.ok(start > 0, '必须有批量套版执行函数');
+  const batch = code.slice(start, code.indexOf('async function routeAssist', start));
+  assert.equal((batch.match(/askConfirm\(/g) || []).length, 1, '批量只确认一次，符合用户已同意整批');
+  assert.match(batch, /\/media-image\/template\/batch/, '必须走批量规划接口');
+  assert.match(batch, /exportCanvasAsAsset/, '每份都要导出成品');
+  assert.match(batch, /undoApplied\(applied, startState\.contentDigest\)/, '每份完成后撤销并核对摘要');
+  assert.match(batch, /已撤销 \$\{undo\.undone\} 步/, '失败要如实报告撤销了几步');
+  assert.match(batch, /restored === false/, '摘要不一致必须报告，不能假装恢复');
+  assert.match(batch, /批量停止/, '失败即停，不继续写画布');
+  const exporter = code.slice(code.indexOf('async function exportCanvasAsAsset'), code.indexOf('async function undoApplied'));
+  assert.match(exporter, /editor\.export_start/, '导出走编辑器导出命令');
+  assert.match(exporter, /uploadImageAsset/, '导出的 PNG 要入库成素材');
+  const undo = code.slice(code.indexOf('async function undoApplied'), code.indexOf('async function fetchEditorState'));
+  assert.match(undo, /targetCommandId/, '撤销必须带精确凭据');
+  assert.match(undo, /afterDigest/, '撤销必须带摘要凭据');
+});
+
 test('套版先给预览（候选槽/文字/装饰），支持「套版：N」选槽', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

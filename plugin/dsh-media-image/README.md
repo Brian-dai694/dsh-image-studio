@@ -28,6 +28,17 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 已知边界：混合模式目前统一按 source-over 合成，特殊混合模式（如 multiply）会有色差；图层蒙版、剪贴蒙版、调整图层没有还原。
 
+## 批量套版
+
+同一个模板、同一个商品槽，换多个商品图各出一份成品：
+
+- `POST /media-image/template/batch`：一次上传 PSD，底图只合成一次（`assets` 里只有一份底图），返回 `variants[]`，每份是独立的 `plan`（`x-psd-products` 传 JSON 数组，1..20 个）。
+- 页面对已上传的每张商品素材各出一份：写入画布 → `editor.export_start` 导出 PNG → 上传入素材库 → 撤销回原状。整批只弹一次确认（确认文案写明会逐份写入并导出）。
+- 撤销策略：第一步用 `targetCommandId`/`afterDigest` 精确撤销证明栈顶就是刚写的命令；桥接在 undo 后会清掉这份凭据，后续走普通撤销。每份结束都用 `contentDigest` 与批量前比对，不一致就停止并如实报告，不假装恢复成功。
+- 中途失败：撤销已应用步骤、停止批量、报告已完成份数，画布留在可检查的已知状态。
+
+已知边界：批量固定使用同一商品槽与同一套文案（每份可用 `texts` 覆盖）；不同槽位的批量尚未支持。
+
 ## 局部重绘（ComfyUI inpaint workflow）
 
 局部重绘只对**显式声明**支持 image+mask 输入的 ComfyUI provider 开放。普通 text-to-image workflow（包括桌面 profile 当前的 `mock-comfy`）不支持局部重绘；助手会在提交前拒绝，不会把整图生图冒充 inpaint。

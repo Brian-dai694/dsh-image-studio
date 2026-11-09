@@ -41,6 +41,42 @@ export function solidColorDataUrl(hex = '#ffffff') {
 }
 
 /**
+ * 批量套版：同一模板、同一商品槽，换多个商品图，各出一份规划。
+ * 只做规划，不执行；调用方逐份确认并导出，避免一次写入无法回退。
+ * @param products [{assetRef, name?, texts?, slotId?}]，1..20 个
+ */
+export function planTemplateBatch(template, { baseAssetRef, background, products = [], texts = {}, textStyle = {} } = {}) {
+  if (!template || !template.canvas || !Array.isArray(template.slots)) throw Object.assign(new Error('模板缺少 canvas/slots'), { code: 'TEMPLATE_INVALID' });
+  if (!Array.isArray(products) || products.length === 0) throw Object.assign(new Error('批量套版至少需要一个商品素材'), { code: 'TEMPLATE_NO_PRODUCTS' });
+  if (products.length > 20) throw Object.assign(new Error('批量套版一次最多 20 个商品'), { code: 'TEMPLATE_TOO_MANY_VARIANTS' });
+  const variants = products.map((product, index) => {
+    const assetRef = String(product?.assetRef || '');
+    if (!/^asset:[a-f0-9]{48}$/.test(assetRef)) throw Object.assign(new Error(`第 ${index + 1} 个商品素材引用无效`), { code: 'TEMPLATE_BAD_ASSET' });
+    return {
+      index: index + 1,
+      name: product?.name || '',
+      productAssetRef: assetRef,
+      plan: planTemplateApply(template, {
+        baseAssetRef,
+        background,
+        product: { assetRef, ...(product?.name ? { name: product.name } : {}), ...(product?.slotId ? { slotId: product.slotId } : {}) },
+        texts: product?.texts || texts,
+        textStyle,
+      }),
+    };
+  });
+  return {
+    variants,
+    summary: {
+      variants: variants.length,
+      base: Boolean(baseAssetRef),
+      commandsPerVariant: variants[0]?.plan.commands.length ?? 0,
+      productSlot: variants[0]?.plan.summary.productSlot ?? null,
+    },
+  };
+}
+
+/**
  * 规划一次套版：模板槽位 + 填充内容 → 待确认命令列表。
  * @param template psdToTemplate() 的结果
  * @param options.background 背景色 #RRGGBB（可省略，省略则只留 PSD 里最底层图片槽当背景占位）

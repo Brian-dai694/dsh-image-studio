@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import { psdToTemplate } from '../lib/psd.js';
 import { createMediaRouter } from '../lib/http.js';
-import { planTemplateApply, solidColorDataUrl } from '../lib/template.js';
+import { planTemplateApply, planTemplateBatch, solidColorDataUrl } from '../lib/template.js';
 
 const APLUS = 'C:/Users/UEFR/.dsh/tools/kwiki-cli/samples/aplus01.psd';
 const ASSET = `asset:${'a'.repeat(48)}`;
@@ -151,6 +151,33 @@ function planSlotId(template, index) {
   return ordered[index - 1].id;
 }
 
+
+test('批量套版：每个商品各出一份规划，共用同一底图与商品槽', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const base = `asset:${'b'.repeat(48)}`;
+  const products = [{ assetRef: ASSET, name: 'A' }, { assetRef: `asset:${'c'.repeat(48)}`, name: 'B' }];
+  const batch = planTemplateBatch(template, { baseAssetRef: base, products, textStyle: { fill_color: '#15181f' } });
+  assert.equal(batch.summary.variants, 2);
+  assert.equal(batch.summary.base, true);
+  assert.equal(batch.variants[1].index, 2);
+  assert.equal(batch.variants[1].name, 'B');
+  for (const variant of batch.variants) {
+    const images = variant.plan.commands.filter(command => command.type === 'layer.add_image');
+    assert.equal(images[0].payload.sourceRef, base, '每份都先用同一张底图');
+    assert.equal(images[1].payload.sourceRef, variant.productAssetRef, '商品图各用各的');
+    assert.equal(variant.plan.summary.productSlot, batch.summary.productSlot, '批量必须固定同一个商品槽');
+  }
+});
+
+test('批量套版的边界：空列表、非法引用、超过 20 个都拒绝', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  assert.throws(() => planTemplateBatch(template, { products: [] }), error => error.code === 'TEMPLATE_NO_PRODUCTS');
+  assert.throws(() => planTemplateBatch(template, { products: [{ assetRef: 'asset:bad' }] }), error => error.code === 'TEMPLATE_BAD_ASSET');
+  const many = Array.from({ length: 21 }, () => ({ assetRef: ASSET }));
+  assert.throws(() => planTemplateBatch(template, { products: many }), error => error.code === 'TEMPLATE_TOO_MANY_VARIANTS');
+});
 
 test('模板没有图片槽时，商品图不放置且明确登记', () => {
   const template = { canvas: { width: 100, height: 100 }, slots: [{ id: 'slot-1', name: '标题', type: 'text', rect: { x: 0, y: 0, width: 50, height: 20 }, visible: true, text: 'hi' }] };
