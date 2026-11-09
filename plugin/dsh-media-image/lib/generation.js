@@ -10,19 +10,14 @@
 // 本轮只提供接口与适配器，不内置任何真实后端；未配置 provider 时返回 PROVIDER_UNAVAILABLE。
 
 import { randomUUID } from 'node:crypto';
+import { GenerationError } from './errors.js';
+import { createCommandProvider } from './inpaint-command.js';
+
+export { GenerationError };
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const JOB_TTL_MS = 30 * 60_000;
 const MAX_JOBS = 64;
-
-export class GenerationError extends Error {
-  constructor(code, message, details = {}) {
-    super(message);
-    this.name = 'GenerationError';
-    this.code = code;
-    Object.assign(this, details);
-  }
-}
 
 const isObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const trimSlash = value => String(value).replace(/\/+$/, '');
@@ -207,12 +202,13 @@ export function createHttpJsonProvider({ id, baseUrl, submitPath = '/generate', 
   };
 }
 
-export function buildProvider(definition, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export function buildProvider(definition, { fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS, spawnImpl } = {}) {
   if (!isObject(definition) || typeof definition.id !== 'string' || !definition.id) {
     throw new GenerationError('PROVIDER_INVALID', 'provider 需要一个非空 id');
   }
   if (definition.kind === 'comfyui') return createComfyUiProvider({ ...definition, fetchImpl, timeoutMs });
   if (definition.kind === 'http-json') return createHttpJsonProvider({ ...definition, fetchImpl, timeoutMs });
+  if (definition.kind === 'command') return createCommandProvider(definition, { spawnImpl, timeoutMs });
   throw new GenerationError('PROVIDER_INVALID', `未知的 provider kind: ${String(definition.kind)}`);
 }
 

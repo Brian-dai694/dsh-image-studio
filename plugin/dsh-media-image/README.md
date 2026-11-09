@@ -41,7 +41,28 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 ## 局部重绘（ComfyUI inpaint workflow）
 
-局部重绘只对**显式声明**支持 image+mask 输入的 ComfyUI provider 开放。普通 text-to-image workflow（包括桌面 profile 当前的 `mock-comfy`）不支持局部重绘；助手会在提交前拒绝，不会把整图生图冒充 inpaint。
+局部重绘只对**显式声明**支持 image+mask 输入的后端开放。普通 text-to-image workflow（包括桌面 profile 当前的 `mock-comfy`）不支持局部重绘；助手会在提交前拒绝，不会把整图生图冒充 inpaint。
+
+### 方式一：本地命令行后端（不用架服务）
+
+适配器 `kind: "command"` 会写两张临时 PNG 再执行操作者配置的命令，读回 `{output}` 的 PNG：
+
+```yaml
+generation:
+  providers:
+    - id: local-inpaint
+      kind: command
+      command: python            # 绝对路径更稳
+      args: ["C:/models/inpaint.py", "--image", "{image}", "--mask", "{mask}", "--out", "{output}"]
+      outputName: out.png        # 默认 out.png
+      timeoutMs: 180000
+```
+
+占位符：`{image}` `{mask}` `{output}` `{prompt}` `{width}` `{height}`。**不经过 shell**，所以路径里的空格和引号不会变成注入；命令本身是操作者写的，插件不内置也不下载任何模型。蒙版是白=要重画、黑=保留的 PNG，与源图同尺寸。
+
+失败有稳定码：`INPAINT_COMMAND_FAILED`（退出码非 0）、`INPAINT_TIMEOUT`、`INPAINT_OUTPUT_MISSING`（没写文件）、`INPAINT_OUTPUT_INVALID`（不是 PNG / 超过 64 MiB）。这类后端只提供局部重绘能力（`capabilities.inpaint=true`、`textToImage=false`），不会被文生图请求误用。
+
+### 方式二：ComfyUI inpaint workflow
 
 在对应 provider 配置中增加 `editImageNode`、`editMaskNode`（均为 `{ nodeId, field? }`，默认 field=`image`），并确保 API workflow 确实将图像节点接到 inpaint/latent noise mask 输入：
 
