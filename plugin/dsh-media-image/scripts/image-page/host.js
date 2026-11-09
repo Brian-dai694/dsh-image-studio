@@ -1433,6 +1433,9 @@ async function applyTemplateFlow(file, slotIndex = null) {
     if (applied.base) {
       rememberAsset({ id: applied.base.assetRef.slice(6), name: '模板底图', bytes: 0 });
       bubble('bot', `装饰层已合成进底图（${applied.base.composited} 层${applied.base.skipped ? `，${applied.base.skipped} 层跳过` : ''}）。`);
+      if (applied.base.approximated?.length) {
+        bubble('bot', `${applied.base.approximated.length} 处近似还原：${applied.base.approximated.slice(0, 3).map(item => item.reason).join('、')}`);
+      }
     } else if (applied.baseError) {
       bubble('bot', `底图合成失败（${applied.baseError.code}），改用纯色背景：PSD 装饰层不会还原。`);
     }

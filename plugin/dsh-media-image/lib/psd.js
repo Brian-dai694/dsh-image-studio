@@ -225,7 +225,8 @@ export function parsePsdLayers(buffer) {
     need(2); const channelCount = buffer.readUInt16BE(o); o += 2;
     o += channelCount * 6; // channel id + length，像素数据在后面的通道区，这里不需要
     need(12); const sig = buffer.toString('ascii', o, o + 4); o += 4;
-    const blendKey = buffer.toString('ascii', o, o + 4); o += 4;
+    // PSD 的混合模式键固定 4 字符、不足补空格（如 "mul "），必须 trim 才匹配得上映射表。
+    const blendKey = buffer.toString('ascii', o, o + 4).trim(); o += 4;
     const opacity = buffer[o]; const clipping = buffer[o + 1]; const flags = buffer[o + 2]; o += 4;
     need(4); const extraLen = buffer.readUInt32BE(o); o += 4;
     const extraStart = o;

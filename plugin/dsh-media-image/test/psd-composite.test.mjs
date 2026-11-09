@@ -22,10 +22,10 @@ function buildPsd({ width = 8, height = 8, layers }) {
   const records = [];
   const channelData = [];
   layers.forEach((layer, index) => {
-    const { x, y, w, h, rgb, alpha = 255, name } = layer;
+    const { x, y, w, h, rgb, alpha = 255, name, blend = 'norm', opacity = 255, mask = null } = layer;
     const head = Buffer.alloc(16);
     head.writeInt32BE(y, 0); head.writeInt32BE(x, 4); head.writeInt32BE(y + h, 8); head.writeInt32BE(x + w, 12);
-    const ids = [0, 1, 2, -1];
+    const ids = mask ? [0, 1, 2, -1, -2] : [0, 1, 2, -1];
     const chanHead = Buffer.alloc(2 + ids.length * 6);
     chanHead.writeUInt16BE(ids.length, 0);
     ids.forEach((chanId, i) => {
@@ -37,10 +37,13 @@ function buildPsd({ width = 8, height = 8, layers }) {
     const extraBody = Buffer.concat([Buffer.alloc(4), Buffer.alloc(4), pascalPadded]);
     const extraHead = Buffer.alloc(4);
     extraHead.writeUInt32BE(extraBody.length, 0);
-    records.push(Buffer.concat([head, chanHead, Buffer.from('8BIMnorm', 'ascii'), Buffer.from([255, 0, 0, 0]), extraHead, extraBody]));
+    const blendKey = String(blend).padEnd(4, ' ').slice(0, 4);
+    records.push(Buffer.concat([head, chanHead, Buffer.from(`8BIM${blendKey}`, 'ascii'), Buffer.from([opacity, 0, 0, 0]), extraHead, extraBody]));
     for (const chanId of ids) {
-      const value = chanId === -1 ? alpha : rgb[chanId];
-      const pixels = Buffer.alloc(w * h, value);
+      let pixels;
+      if (chanId === -1) pixels = Buffer.alloc(w * h, alpha);
+      else if (chanId === -2) pixels = Buffer.isBuffer(mask) ? mask : Buffer.alloc(w * h, mask ?? 255);
+      else pixels = Buffer.alloc(w * h, rgb[chanId]);
       const compression = Buffer.alloc(2);
       compression.writeUInt16BE(0, 0);
       channelData.push(Buffer.concat([compression, pixels]));
@@ -204,6 +207,67 @@ test('/template/batch：一次上传合成一次底图，为多个商品各出�
   }
   assert.equal(value.variants[0].plan.commands.filter(c => c.type === 'layer.add_image')[1].payload.sourceRef, products[0].assetRef);
   assert.equal(value.variants[1].plan.commands.filter(c => c.type === 'layer.add_image')[1].payload.sourceRef, products[1].assetRef);
+});
+
+test('混合模式：multiply / screen / darken 与手算一致', () => {
+  const pair = blend => buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 2, h: 2, rgb: [128, 128, 128], name: 'base' },
+      { x: 0, y: 0, w: 2, h: 2, rgb: [128, 128, 128], name: 'top', blend },
+    ],
+  });
+  const mul = decodePng(compositePsdLayers(pair('mul')).png);
+  // 0.502 × 0.502 ≈ 0.252 → 64
+  assert.equal(px(mul, 1, 1)[0], 64, `multiply 期望 64，实际 ${px(mul, 1, 1)[0]}`);
+  const scr = decodePng(compositePsdLayers(pair('scrn')).png);
+  // a + b − ab = 0.502 + 0.502 − 0.252 ≈ 0.752 → 192
+  assert.equal(px(scr, 1, 1)[0], 192, `screen 期望 192，实际 ${px(scr, 1, 1)[0]}`);
+  const dark = decodePng(compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 2, h: 2, rgb: [200, 200, 200] },
+      { x: 0, y: 0, w: 2, h: 2, rgb: [100, 100, 100], blend: 'dark' },
+    ],
+  })).png);
+  assert.equal(px(dark, 0, 0)[0], 100, 'darken 取较小值');
+});
+
+test('未实现的混合模式不猜：退回 source-over 并登记', () => {
+  const out = compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 2, h: 2, rgb: [0, 0, 0] },
+      { x: 0, y: 0, w: 2, h: 2, rgb: [255, 255, 255], blend: 'hue ' },
+    ],
+  }));
+  const image = decodePng(out.png);
+  assert.equal(px(image, 0, 0)[0], 255, '不支持的模式按 source-over 处理');
+  assert.ok(out.approximated.some(item => /BLEND_MODE/.test(item.reason)), JSON.stringify(out.approximated));
+});
+
+test('图层不透明度与图层蒙版都乘进 alpha', () => {
+  const halfOpacity = decodePng(compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 2, h: 2, rgb: [0, 0, 0] },
+      { x: 0, y: 0, w: 2, h: 2, rgb: [255, 255, 255], opacity: 128 },
+    ],
+  })).png);
+  const mid = px(halfOpacity, 0, 0)[0];
+  assert.ok(mid >= 120 && mid <= 136, `50% 不透明白叠黑应≈128，实际 ${mid}`);
+
+  // 2×2 行优先：第一行 [隐藏, 显示]，第二行 [隐藏, 显示]
+  const mask = Buffer.from([0, 255, 0, 255]);
+  const masked = decodePng(compositePsdLayers(buildPsd({
+    width: 2, height: 2,
+    layers: [
+      { x: 0, y: 0, w: 2, h: 2, rgb: [0, 0, 0] },
+      { x: 0, y: 0, w: 2, h: 2, rgb: [255, 255, 255], mask },
+    ],
+  })).png);
+  assert.equal(px(masked, 0, 0)[0], 0, '蒙版为 0 的像素应被隐藏');
+  assert.equal(px(masked, 1, 0)[0], 255, '蒙版为 255 的像素应显示');
 });
 
 test('非 RGB 或非 8bit 明确拒绝，不返回半成品', () => {

@@ -22,7 +22,10 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 执行是**合成式**（0.17 起）：`canvas.resize` → 逐层合成底图 → 商品图 → 文字，每条命令单独确认，可撤销。
 
-底图由 `lib/psd-composite.js` 生成：解析 PSD 各图层的像素通道（支持 raw/RLE 压缩），**排除文字层与选定的商品槽**，把其余可见图层按位置和 alpha 合成为一张整幅 PNG。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
+底图由 `lib/psd-composite.js` 生成：解析 PSD 各图层的像素通道（支持 raw/RLE 压缩），**排除文字层与选定的商品槽**，把其余可见图层按位置、alpha 与**混合模式**合成为一张整幅 PNG。
+
+已实现的混合模式：`norm` 正常、`mul` 正片叠底、`scrn` 滤色、`over` 叠加、`dark` 变暗、`lite` 变亮、`diff` 差值、`smud` 柔光、`hLit` 强光（按 W3C 分离通道公式）。**未实现的模式不猜**：退回正常模式并记进 `approximated`，页面会提示「N 处近似还原」。
+图层不透明度与**图层蒙版**（alpha 通道 -2）都会乘进该层的 alpha。因此 PSD 的渐变、描边、投影会真的出现在画布上，而不是被丢弃。单层解码失败只跳过该层并记录，不毁掉整张底图；整体不可解（CMYK、非 8bit、ZIP 压缩）时退回纯色背景，并在页面说明原因（`baseError`）。
 
 `POST /media-image/template/apply` 一次上传完成「解析 → 合成 → 规划」，请求头为 `x-psd-product-asset`（商品素材）、`x-psd-slot`（可选商品槽）、`x-psd-background`（降级背景色）、`x-psd-texts`（可选文案 JSON）。
 

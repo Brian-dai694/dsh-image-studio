@@ -29,7 +29,27 @@ function pngChunk(type, data) {
   return Buffer.concat([head, body, crc]);
 }
 
-/** RGBA 像素 → PNG 字节（filter=0 逐行）。 */
+/**
+ * 混合函数（PSD blend key → 通道混合）。只实现可逐像素核对的那几个；
+ * 未实现的模式**不猜**：退回 source-over 并记进 approximated，让调用方如实告知。
+ * 公式按 W3C/PDF 的分离通道定义，输入输出都是 0..1。
+ */
+// W3C soft-light 的 D(b)：小于 0.25 走三次多项式，否则取平方根。
+const softLightD = b => (b <= 0.25 ? ((16 * b - 12) * b + 4) * b : Math.sqrt(b));
+
+const BLEND_FUNCS = {
+  norm: (b, s) => s,
+  mul: (b, s) => b * s,
+  scrn: (b, s) => b + s - b * s,
+  over: (b, s) => (b <= 0.5 ? 2 * b * s : 1 - 2 * (1 - b) * (1 - s)),
+  dark: (b, s) => Math.min(b, s),
+  lite: (b, s) => Math.max(b, s),
+  diff: (b, s) => Math.abs(b - s),
+  smud: (b, s) => (s <= 0.5 ? b - (1 - 2 * s) * b * (1 - b) : b + (2 * s - 1) * (softLightD(b) - b)),
+  hLit: (b, s) => (s <= 0.5 ? 2 * b * s : 1 - 2 * (1 - b) * (1 - s)),
+};
+
+export const SUPPORTED_BLEND_KEYS = Object.keys(BLEND_FUNCS);
 export function encodePngRgba(rgba, width, height) {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
@@ -133,10 +153,13 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
       channels.push({ id, length });
       o += 6;
     }
-    o += 12; // signature + blend key + opacity + clipping + flags + filler
+    // signature(4) + blend key(4) + opacity(1) + clipping(1) + flags(1) + filler(1)
+    const blendKey = buffer.toString('ascii', o + 4, o + 8).trim();
+    const layerOpacity = buffer.readUInt8(o + 8);
+    o += 12;
     const extraLen = buffer.readUInt32BE(o); o += 4;
     o += extraLen;
-    records.push({ index, left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top), channels });
+    records.push({ index, left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top), channels, blendKey, layerOpacity });
   }
 
   // 通道数据紧跟在全部图层记录之后，按图层顺序、每层按通道顺序排列。
@@ -158,6 +181,12 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
       const planes = need.map(item => decodeChannel(buffer, item.offset, item.bytes, record.width, record.height));
       const alphaInfo = byId.get(-1);
       const alpha = alphaInfo ? decodeChannel(buffer, alphaInfo.offset, alphaInfo.bytes, record.width, record.height) : null;
+      // 图层蒙版（通道 -2）：按蒙版灰度乘进 alpha，这是 PSD 的标准语义。
+      const maskInfo = byId.get(-2);
+      const layerMask = maskInfo ? decodeChannel(buffer, maskInfo.offset, maskInfo.bytes, record.width, record.height) : null;
+      const blend = BLEND_FUNCS[record.blendKey] || BLEND_FUNCS.norm;
+      if (!BLEND_FUNCS[record.blendKey]) approximated.push({ layerIndex: record.index, reason: `BLEND_MODE_${String(record.blendKey).trim()}_AS_SOURCE_OVER` });
+      const opacity = Math.max(0, Math.min(255, record.layerOpacity === undefined ? 255 : record.layerOpacity));
       for (let y = 0; y < record.height; y += 1) {
         const cy = record.top + y;
         if (cy < 0 || cy >= height) continue;
@@ -165,14 +194,20 @@ export function compositePsdLayers(buffer, { excludeLayerIndices = [] } = {}) {
           const cx = record.left + x;
           if (cx < 0 || cx >= width) continue;
           const src = y * record.width + x;
-          const a = alpha ? alpha[src] : 255;
+          let a = alpha ? alpha[src] : 255;
+          if (layerMask) a = Math.round(a * (layerMask[src] / 255));
+          a = Math.round(a * (opacity / 255));
           if (a === 0) continue;
           const dst = (cy * width + cx) * 4;
           const sa = a / 255, da = canvas[dst + 3] / 255;
           const outA = sa + da * (1 - sa);
           if (outA === 0) continue;
           for (let c = 0; c < 3; c += 1) {
-            canvas[dst + c] = Math.round((planes[c][src] * sa + canvas[dst + c] * da * (1 - sa)) / outA);
+            const back = canvas[dst + c] / 255;
+            const srcUnit = planes[c][src] / 255;
+            // 分离通道混合公式：结果 = (1-da)·s + da·B(d, s)，再按 alpha 归一化。
+            const mixed = (1 - da) * srcUnit + da * blend(back, srcUnit);
+            canvas[dst + c] = Math.round(Math.max(0, Math.min(1, (mixed * sa + back * da * (1 - sa)) / outA)) * 255);
           }
           canvas[dst + 3] = Math.round(outA * 255);
         }
