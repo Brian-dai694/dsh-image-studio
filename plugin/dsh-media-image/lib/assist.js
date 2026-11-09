@@ -29,6 +29,7 @@ ops 只允许这几种（不认识的不要编）：
 - {"type":"removeBackground","assetRef":"asset:<48位十六进制>"}      对指定上传素材调用配置的背景移除服务
 - 用户说“局部重绘：...”时，需要选择图片层并有真实选区，或选择带 mask.sourceLayerId 绑定的蒙版层；只有 GET /media-image/inpaint 声明 inpaint=true 的 provider 才可提交，其他情况应说清缺输入/后端，不提议不支持的操作。
 - {"type":"command","command":{"type":"<命令名>","payload":{…}}}        提议一次画布编辑（用户确认后才执行）
+- {"type":"plan","steps":[{"operation":"<命令名>","params":{…}}]}        提议一串编辑（1..12 步；用户一次确认后按顺序执行，任一步失败整体回滚）。高危命令 layer.remove / canvas.crop / layer.add_image 不能进 plan。
 
 command 的 type 只能取下面这些（编辑器白名单，别的会被拒）：
 ${PROPRIETABLE_COMMANDS.join('、')}

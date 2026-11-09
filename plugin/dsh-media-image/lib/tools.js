@@ -53,6 +53,13 @@ const RESULT_SCHEMA = {
     hint: { type: 'string' },
     // 命令目录（media_image_list_commands）：每条命令的契约与当前就绪度。
     commands: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    // 批量执行：逐步结果与回滚情况。
+    steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    rolledBack: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { undone: { type: 'integer' }, restored: { type: 'boolean' } },
+    },
     context: { type: 'object', additionalProperties: true },
     counts: { type: 'object', additionalProperties: true },
     stateUnavailable: {
@@ -568,6 +575,104 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: listCommands('image', bridge),
     timeoutMs: 10_000,
+  }));
+
+  /**
+   * 回滚：把最近 n 步撤销回计划开始前。
+   * 第一步用精确凭据（证明栈顶就是我们刚写的），之后桥接会清掉 lastCommandId，只能走普通撤销；
+   * 最后用内容摘要核对是否真的回到原状——对不上就如实报"没完全恢复"，不假装成功。
+   */
+  const rollbackSteps = async (kind, bridge, { instanceId, projectId, count, startDigest, commandId }) => {
+    let undone = 0;
+    for (let index = 0; index < count; index += 1) {
+      const state = await bridge.readState({ instanceId, projectId });
+      const history = state?.history || {};
+      if (!history.canUndo) break;
+      const payload = (index === 0 && history.lastCommandId && history.afterDigest)
+        ? { targetCommandId: history.lastCommandId, afterDigest: history.afterDigest }
+        : {};
+      await bridge.applyCommand({
+        instanceId, projectId, expectedRevision: state.revision,
+        commandId: `${commandId}-undo-${index + 1}`,
+        command: { type: 'history.undo', payload },
+      });
+      undone += 1;
+    }
+    const after = await bridge.readState({ instanceId, projectId }).catch(() => null);
+    return { undone, restored: startDigest ? (after?.contentDigest || after?.stateDigest) === startDigest : null };
+  };
+
+  // 批量执行：一条调用按顺序跑完一串命令；任一步失败就把已执行的步骤撤销回原状。
+  // 高危命令（layer.remove / canvas.crop / layer.add_image）不能进计划——它们要单独确认。
+  const runPlan = (kind, bridge) => async (args, exec) => {
+    const commandId = args.commandId;
+    const steps = Array.isArray(args.steps) ? args.steps : [];
+    let applied = 0;
+    let startDigest = null;
+    let instanceId = args.instanceId;
+    let projectId = args.projectId;
+    try {
+      bindings.assert(exec, kind, args);
+      if (steps.length < 1 || steps.length > 12) throw new MediaBridgeError('INVALID_REQUEST', 'steps 必须是 1..12 条命令');
+      const risky = steps.filter(step => HIGH_RISK_OPERATIONS[kind]?.has(step?.operation)).map(step => step.operation);
+      if (risky.length) throw new MediaBridgeError('HIGH_RISK_IN_PLAN', `${risky.join('、')} 需要单独人工确认，不能放进批量计划`);
+      let state = await verify(kind, bridge, args, exec);
+      if (state.revision !== args.expectedRevision) {
+        return envelope(kind, { commandId, revision: state.revision, stateDigest: state.stateDigest, error: { code: 'REVISION_CONFLICT', message: `Project is at revision ${state.revision}; read_state again before writing.`, retryable: true } });
+      }
+      startDigest = state.contentDigest || state.stateDigest;
+      projectId = args.projectId ?? state.documentId;
+      const done = [];
+      for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index];
+        if (!step || typeof step.operation !== 'string' || !step.operation) {
+          throw new MediaBridgeError('INVALID_REQUEST', `step ${index + 1} 缺少 operation`);
+        }
+        const result = await bridge.applyCommand({
+          instanceId, projectId, expectedRevision: state.revision,
+          commandId: `${commandId}-${index + 1}`,
+          command: { type: step.operation, payload: step.params ?? {} },
+        });
+        applied += 1;
+        state = { ...state, revision: result.revision };
+        done.push({ step: index + 1, operation: step.operation, revision: result.revision });
+      }
+      const after = await bridge.readState({ instanceId, projectId }).catch(() => null);
+      return {
+        status: 'applied', commandId, editorKind: kind, projectId,
+        revision: state.revision,
+        ...(after?.stateDigest ? { stateDigest: after.stateDigest } : {}),
+        ...(after?.contentDigest ? { afterDigest: after.contentDigest } : {}),
+        steps: done,
+        auditRef: `audit-${commandId}`,
+      };
+    } catch (error) {
+      const rollback = applied
+        ? await rollbackSteps(kind, bridge, { instanceId, projectId, count: applied, startDigest, commandId }).catch(() => ({ undone: 0, restored: false }))
+        : { undone: 0, restored: true };
+      const failureValue = failure(kind, commandId, error);
+      return {
+        ...failureValue,
+        rolledBack: rollback,
+        ...(rollback.restored === false ? { hint: '回滚没有完全恢复到计划前状态：请读一次 state 并手动处理剩余改动。' } : {}),
+      };
+    }
+  };
+
+  register(defineTool({
+    name: 'media_image_run_plan',
+    description: 'Execute an ordered list of NON-high-risk image commands in one call (1..12 steps). Each step runs as its own idempotent command derived from commandId. If any step fails, the steps already applied are undone and the result reports how many were rolled back and whether the document content digest returned to its pre-plan value. High-risk operations (layer.remove, canvas.crop, layer.add_image) are rejected here: they need their own human approval via media_image_apply_command.',
+    parameters: {
+      editorKind: { type: 'string', required: true, enum: ['image'] },
+      projectId: { type: 'string', required: true, description: 'Explicit Host-bound project id.' },
+      instanceId: { type: 'string', required: true, description: 'Connected editor instance id.' },
+      commandId: { type: 'string', required: true, description: 'Idempotency key for the whole plan; per-step ids are derived from it.' },
+      expectedRevision: { type: 'integer', required: true, description: 'Revision from the latest read_state.' },
+      steps: { type: 'array', required: true, items: { type: 'object', additionalProperties: true }, description: 'Ordered [{operation, params}] steps; each operation must be in the allowlist and not high risk.' },
+    },
+    output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+    execute: runPlan('image', bridge),
+    timeoutMs: APPROVAL_BUDGET_MS,
   }));
 
   register(defineTool({

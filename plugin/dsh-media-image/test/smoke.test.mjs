@@ -32,10 +32,10 @@ test('plugin exports the Host contract', () => {
   assert.equal(typeof apply, 'function');
 });
 
-test('apply registers exactly the seven image tools and one /media-image route', () => {
+test('apply registers exactly the eight image tools and one /media-image route', () => {
   const { ctx, tools, guards, routes } = makeContext();
   apply(ctx, { dataDir: 'C:/tmp/image-studio' });
-  assert.equal(tools.size, 7);
+  assert.equal(tools.size, 8);
   assert.deepEqual([...tools.keys()].sort(), [
     'media_image_apply_command',
     'media_image_export_start',
@@ -44,6 +44,7 @@ test('apply registers exactly the seven image tools and one /media-image route',
     'media_image_get_command_result',
     'media_image_list_commands',
     'media_image_read_state',
+    'media_image_run_plan',
   ]);
   assert.equal(guards.length, 1);
   assert.deepEqual(routes.map(route => [route.kind, route.path]), [['prefix', '/media-image']]);

@@ -79,6 +79,7 @@ function argsFor(name, definition) {
   if (name.endsWith('apply_command')) return { editorKind: kind, projectId: 'p1', instanceId, commandId: 'c1', expectedRevision: revision, operation: kind === 'image' ? 'layer.update_text' : 'media.video.clip.move', params: {} };
   if (name.endsWith('export_start')) return { editorKind: kind, projectId: 'p1', instanceId, commandId: 'c2', expectedRevision: revision, format: kind === 'image' ? 'png' : 'webm' };
   if (name.endsWith('export_status')) return { editorKind: kind, projectId: 'p1', instanceId, exportId: 'exp-1' };
+  if (name.endsWith('run_plan')) return { editorKind: kind, projectId: 'p1', instanceId, commandId: 'c3', expectedRevision: revision, steps: [{ operation: kind === 'image' ? 'layer.add_text' : 'media.video.overlay.update', params: {} }] };
   return { projectId: 'p1', instanceId, commandId: 'c1' };
 }
 

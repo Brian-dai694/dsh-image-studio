@@ -33,7 +33,8 @@ test('unwired production registration fails closed; no tool reaches editor witho
   registerMediaTools({ tools: { register: d => tools.set(d.name, d) } }, { bridge: bridge, approvals: createApprovalStore() });
   for (const [name, tool] of tools) {
     const kind = name.includes('image') ? 'image' : 'video';
-    const args = { editorKind: kind, projectId: 'p1', instanceId: 'i1', commandId: 'c1', expectedRevision: 0, operation: kind === 'image' ? 'history.undo' : 'media.video.history.undo', params: {}, format: kind === 'image' ? 'png' : 'webm', exportId: 'x1' };
+    const args = { editorKind: kind, projectId: 'p1', instanceId: 'i1', commandId: 'c1', expectedRevision: 0, operation: kind === 'image' ? 'history.undo' : 'media.video.history.undo', params: {}, format: kind === 'image' ? 'png' : 'webm', exportId: 'x1',
+      steps: [{ operation: kind === 'image' ? 'layer.add_text' : 'media.video.overlay.update', params: {} }] };
     // 生成工具不碰工程，没有会话绑定可查；它的 fail-closed 是"没配后端就拒绝"，
     // 与编辑器工具的 SESSION_* 是两回事，分开断言而不是放宽循环。
     if (name === 'media_image_generate') {

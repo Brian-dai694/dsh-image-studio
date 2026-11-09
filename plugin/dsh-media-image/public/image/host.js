@@ -934,6 +934,29 @@ async function execOps(ops) {
     }
     if (op.type === 'status') { await routeAssist('状态'); continue; }
     if (op.type === 'fontList') { await routeAssist('字体列表'); continue; }
+    if (op.type === 'plan') {
+      // 一串步骤一次确认：人同意的是"这一整套"，不是逐条弹框；失败会整体回滚。
+      const steps = Array.isArray(op.steps) ? op.steps.filter(step => step && typeof step.operation === 'string') : [];
+      if (!steps.length) { bubble('bot', '模型给的计划是空的，没有执行。'); continue; }
+      const risky = steps.filter(step => ['layer.remove', 'canvas.crop', 'layer.add_image'].includes(step.operation));
+      if (risky.length) { bubble('bot', `计划里有需要单独确认的命令（${risky.map(step => step.operation).join('、')}），已拒绝整串执行。`); continue; }
+      const state = await fetchEditorState();
+      const answer = await askConfirm({
+        title: `模型计划（${steps.length} 步，一次确认）`,
+        details: [
+          ...steps.slice(0, 6).map((step, index) => `${index + 1}. ${step.operation}  ${JSON.stringify(step.params ?? {}).slice(0, 120)}`),
+          steps.length > 6 ? `… 还有 ${steps.length - 6} 步` : '',
+          `目标工程  ${state.documentId} · R${state.revision}`,
+          '任一步失败会撤销已执行的步骤；模型没有写任何东西，点击后才会生效',
+        ].filter(Boolean).join('\n'),
+        maskAvailable: false,
+      });
+      if (!answer.ok) { bubble('bot', '已取消，画布没有改动。'); continue; }
+      const outcome = await runPlanOnEditor(steps);
+      if (outcome.ok) bubble('bot', `计划已执行：${outcome.applied} 步全部完成。`);
+      else bubble('bot', `计划在第 ${outcome.applied + 1} 步失败（${outcome.error.code || 'PLAN_FAILED'}：${outcome.error.message}），已撤销 ${outcome.undo.undone} 步${outcome.undo.restored === false ? '，但画布未完全恢复，请检查' : ''}。`);
+      continue;
+    }
     if (op.type === 'command') {
       // 人机协作的关键闸门：模型只能**提议**，落地必须由人点确认。
       const command = op.command || {};
@@ -1546,6 +1569,30 @@ async function runTemplateBatch() {
   ref.className = 'ref';
   ref.textContent = refs;
   line.append(ref);
+}
+
+/** 按顺序执行一串命令；任一步失败就把已执行的步骤撤销，并回报是否回到原状。 */
+async function runPlanOnEditor(steps) {
+  const connection = await connect();
+  const readOnce = () => transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+  let state = await readOnce();
+  const startDigest = state.contentDigest;
+  let applied = 0;
+  try {
+    for (const step of steps) {
+      const result = await transport.request({
+        type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId,
+        documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(),
+        command: { type: step.operation, payload: step.params ?? {} },
+      }, { timeoutMs: 20000 });
+      applied += 1;
+      state = { ...state, revision: result.revision };
+    }
+    return { ok: true, applied };
+  } catch (error) {
+    const undo = applied ? await undoApplied(applied, startDigest) : { undone: 0, restored: true };
+    return { ok: false, error, applied, undo };
+  }
 }
 
 async function routeAssist(raw) {

@@ -10,9 +10,14 @@ description: Use when editing images inside the DSH image studio (miniPaint edit
 
 ## 先读后写（硬性）
 
+0. `media_image_list_commands` —— 先拿命令目录：每条命令的 `params`、`needs`、`highRisk`，以及**当前** `enabled` / `disabledReason`（如 `no-selected-layer`、`selected-layer-is-text-not-image`）。它只读、不写画布，用来避免"发一条注定失败的写"。
 1. `media_image_read_state` —— 拿 `projectId` / `revision` / `stateDigest` / 图层表 / `selection` / `assets`。
 2. 用读到的 `revision` 作为 `expectedRevision` 提交 `media_image_apply_command`。
 3. 回执里 `revision` 会 +1，`afterDigest` 是真回读出来的摘要。
+
+想一次做多步（比如"加文字 → 调外观 → 改名字"）用 `media_image_run_plan`：传 `steps: [{operation, params}]`（1..12 条），
+按顺序执行，**任一步失败会把已执行的步骤撤销**并回报 `rolledBack.undone` 与 `rolledBack.restored`。
+高危命令不能进计划，必须用 `media_image_apply_command` 单独确认。
 
 规则：
 

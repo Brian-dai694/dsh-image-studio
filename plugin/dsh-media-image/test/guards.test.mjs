@@ -103,6 +103,23 @@ test('插件背景跟随 DSH 主题：面板读宿主令牌、页面转发并校
   assert.match(css, /--background: var\(--dsh-bg\)/, '编辑器自己的令牌要被映射');
 });
 
+test('助手能执行计划：一次确认跑完整串，高危步骤整串拒绝，失败回滚并如实报告', () => {
+  const host = readFileSync(resolve(pluginRoot, 'public/image/host.js'), 'utf8');
+  const start = host.indexOf('async function runPlanOnEditor');
+  assert.ok(start > 0, '必须有批量执行函数');
+  const runner = host.slice(start, host.indexOf('async function routeAssist', start));
+  assert.match(runner, /expectedRevision: state\.revision/, '每一步都要用当时的 revision');
+  assert.match(runner, /undoApplied\(applied, startDigest\)/, '失败要撤销已执行步骤');
+  assert.match(runner, /restored/, '要回报是否回到原状');
+
+  const ops = host.slice(host.indexOf("if (op.type === 'plan')"), host.indexOf("if (op.type === 'command')"));
+  assert.equal((ops.match(/askConfirm\(/g) || []).length, 1, '整串只确认一次');
+  assert.match(ops, /layer\.remove.*canvas\.crop/, '高危命令要识别出来');
+  assert.match(ops, /已拒绝整串执行/, '高危步骤必须整串拒绝，不能跳过继续');
+  assert.match(ops, /runPlanOnEditor\(steps\)/, '确认后真的执行');
+  assert.match(ops, /计划在第 \$\{outcome\.applied \+ 1\} 步失败/, '失败要指明第几步');
+});
+
 test('套版文字命令带槽宽 meta，且 meta 不进入 payload（否则会被白名单拒）', async () => {
   const template = { canvas: { width: 400, height: 200 }, slots: [
     { id: 'slot-1', name: '标题', type: 'text', rect: { x: 10, y: 10, width: 120, height: 30 }, visible: true, text: '一个很长的标题文案', fontSize: 40 },
