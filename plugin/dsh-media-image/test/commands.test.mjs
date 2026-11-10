@@ -56,6 +56,45 @@ test('summarize 只抽可用性需要的事实，不外泄整份状态', () => {
   assert.equal(summary.selectedType, 'text');
 });
 
+test('POST /media-image/commands：给页面命令面板用的只读目录，鉴权且与 Agent 同源', async () => {
+  const { createMediaRouter } = await import('../lib/http.js');
+  const token = 'cmd-token';
+  const router = createMediaRouter({ relay: { request: async () => ({}) }, editorKind: 'image', prefix: '/media-image', token, publicDir: '.', assets: null });
+  const call = async ({ body, auth = token } = {}) => {
+    const payload = Buffer.from(JSON.stringify(body ?? {}));
+    const out = { status: 0, body: '' };
+    const res = { writeHead(status) { out.status = status; return res; }, end(chunk) { out.body = String(chunk ?? ''); } };
+    const req = { method: 'POST', url: '/media-image/commands', headers: { host: 'localhost', origin: 'http://localhost', ...(auth ? { authorization: `Bearer ${auth}` } : {}), 'content-type': 'application/json' }, async *[Symbol.asyncIterator]() { yield payload; } };
+    await router(req, res);
+    return { status: out.status, value: JSON.parse(out.body) };
+  };
+
+  const denied = await call({ body: {}, auth: 'nope' });
+  assert.equal(denied.status, 403);
+
+  // 不带状态：一律 enabled:null + state-unavailable，与 Agent 侧口径一致（不假装可用）
+  const noState = await call({ body: {} });
+  assert.equal(noState.status, 200);
+  assert.ok(noState.value.commands.length >= 27);
+  assert.equal(noState.value.counts.unknown, noState.value.commands.length);
+  assert.equal(noState.value.commands.every(item => item.disabledReason === 'state-unavailable'), true);
+  assert.equal(noState.value.context, undefined, '没状态就不要编一个 context');
+
+  // 带状态：就绪度按当前选择算出来，与 describeCommands 完全同源
+  const state = textState({ selectedLayerId: 'l-text', stateDigest: 'fnv1a64-1' });
+  const withState = await call({ body: { state } });
+  assert.equal(withState.status, 200);
+  const byId = Object.fromEntries(withState.value.commands.map(item => [item.id, item]));
+  assert.equal(byId['layer.update_text'].enabled, true);
+  assert.equal(byId['layer.feather'].enabled, false);
+  assert.equal(byId['layer.feather'].disabledReason, 'selected-layer-is-text-not-image');
+  assert.equal(withState.value.counts.total, withState.value.commands.length);
+  assert.equal(withState.value.counts.enabled + withState.value.counts.disabled + withState.value.counts.unknown, withState.value.counts.total);
+  assert.equal(withState.value.context.selectedType, 'text');
+  // 每条都带参数契约，面板据此预填字段骨架
+  assert.ok(withState.value.commands.every(item => typeof item.params === 'string'));
+});
+
 test('media_image_list_commands 已注册，并在能读到状态时给出就绪度', async () => {
   const { fixtureBindings } = await import('./host-fixture.mjs');
   const { createMediaBridge } = await import('../lib/bridge.js');

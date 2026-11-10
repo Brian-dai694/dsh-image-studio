@@ -1668,6 +1668,7 @@ async function runPlanOnEditor(steps) {
   return { ok: true, applied: steps.length, revision: result?.revision };
 }
 
+
 /**
  * 把命令里的图层 id 翻译成人能核对的内容（名字 · 类型 · 坐标尺寸）。
  * 确认框里只显示 {"layerId":"3"} 时，人没法判断会不会改错层。
@@ -2052,3 +2053,164 @@ $('assist-text')?.addEventListener('keydown', event => { if (event.key === 'Ente
 renderChips();
 
 window.addEventListener('pagehide', () => { if (batchTimer !== null) clearTimeout(batchTimer); stopPolling(); void relay?.stop(); });
+
+/**
+ * 命令面板（Ctrl/⌘+K）。
+ * 目录走 POST /media-image/commands —— 与 Agent 的 media_image_list_commands 同一个
+ * lib/commands.js，所以"这条现在能不能用、为什么不能"两处不会各说一套。
+ * 执行走与 Agent 完全相同的 apply_command 路径：一次确认、一步撤销。
+ */
+const palette = (() => {
+  const backdrop = $('palette-backdrop');
+  const panel = $('palette');
+  const query = $('palette-q');
+  const paletteList = $('palette-list');
+  const count = $('palette-count');
+  const params = $('palette-params');
+  const runButton = $('palette-run');
+  let commands = [];
+  let filtered = [];
+  let active = 0;
+  let selected = null;
+
+  const describeWhy = command => {
+    if (command.enabled === true) return '';
+    if (command.disabledReason === 'state-unavailable') return '读不到编辑器状态，先点「连接」';
+    if (command.disabledReason === 'no-document') return '还没有文档';
+    if (command.disabledReason === 'no-selected-layer') return '先在图层面板选中一个图层';
+    if (typeof command.disabledReason === 'string' && command.disabledReason.startsWith('selected-layer-is-')) {
+      return `选中的图层类型不对（${command.disabledReason.replace('selected-layer-is-', '').replace('-not-selected', '')}）`;
+    }
+    return command.disabledReason || '当前不可用';
+  };
+
+  const render = () => {
+    paletteList.replaceChildren();
+    if (!filtered.length) {
+      const empty = document.createElement('p');
+      empty.className = 'palette-hint';
+      empty.textContent = commands.length ? '没有匹配的命令' : '命令目录还没加载';
+      paletteList.append(empty);
+      count.textContent = '';
+      return;
+    }
+    filtered.forEach((command, index) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'palette-item';
+      item.dataset.active = index === active ? '1' : '0';
+      item.disabled = command.enabled === false;
+      const code = document.createElement('code');
+      code.textContent = command.id;
+      item.append(code);
+      const badge = document.createElement('span');
+      badge.className = 'palette-badge';
+      badge.textContent = command.highRisk ? '需单独确认' : command.needs;
+      item.append(badge);
+      const why = describeWhy(command);
+      if (why) {
+        const note = document.createElement('span');
+        note.className = 'palette-why';
+        note.textContent = why;
+        item.append(note);
+      }
+      item.addEventListener('click', () => { active = index; select(command); });
+      paletteList.append(item);
+    });
+    const enabled = filtered.filter(item => item.enabled !== false).length;
+    count.textContent = `${filtered.length} 条 · 可用 ${enabled}`;
+  };
+
+  const select = command => {
+    selected = command;
+    active = Math.max(0, filtered.findIndex(item => item.id === command.id));
+    // 参数框预填契约里的占位，省得人从头想字段名。
+    params.value = params.value && params.dataset.for === command.id ? params.value : defaultParams(command);
+    params.dataset.for = command.id;
+    render();
+  };
+
+  const defaultParams = command => {
+    // 只做"骨架"预填：从参数契约里挑出必填字段名，值留空由人填。不猜坐标/尺寸。
+    const text = String(command.params || '');
+    const names = [];
+    const re = /([a-zA-Z]+)(\??):/g;
+    let match;
+    while ((match = re.exec(text))) if (match[2] !== '?') names.push(`${match[1]}`);
+    if (!names.length) return '{}';
+    const skeleton = {};
+    for (const name of [...new Set(names)]) skeleton[name] = '';
+    return JSON.stringify(skeleton, null, 2);
+  };
+
+  const filter = () => {
+    const needle = query.value.trim().toLowerCase();
+    filtered = !needle ? commands.slice() : commands.filter(command =>
+      command.id.toLowerCase().includes(needle) || String(command.params || '').toLowerCase().includes(needle) || describeWhy(command).toLowerCase().includes(needle));
+    active = 0;
+    render();
+  };
+
+  const load = async () => {
+    const state = await fetchEditorState().catch(() => null);
+    const value = await api('/media-image/commands', { method: 'POST', body: { state } });
+    commands = Array.isArray(value.commands) ? value.commands : [];
+    filter();
+  };
+
+  const open = async () => {
+    panel.hidden = false;
+    backdrop.dataset.open = '1';
+    query.value = '';
+    params.value = '';
+    params.dataset.for = '';
+    selected = null;
+    render();
+    query.focus();
+    try { await load(); } catch (error) { count.textContent = `目录加载失败：${error.code || error.message}`; }
+  };
+  const close = () => { panel.hidden = true; backdrop.dataset.open = '0'; };
+
+  $('palette-open').addEventListener('click', open);
+  $('palette-close').addEventListener('click', close);
+  backdrop.addEventListener('click', close);
+  query.addEventListener('input', filter);
+  query.addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown') { event.preventDefault(); active = Math.min(filtered.length - 1, active + 1); render(); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); active = Math.max(0, active - 1); render(); }
+    else if (event.key === 'Enter' && filtered[active]) { event.preventDefault(); select(filtered[active]); }
+  });
+  // 全局快捷键：Ctrl/⌘+K 开、Esc 关。输入框里也生效（这是命令面板的通行做法）。
+  document.addEventListener('keydown', event => {
+    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'k') { event.preventDefault(); open(); }
+    else if (event.key === 'Escape' && !panel.hidden) { event.preventDefault(); close(); }
+  });
+
+  runButton.addEventListener('click', async () => {
+    if (!selected) { count.textContent = '先选一条命令'; return; }
+    let payload;
+    try { payload = params.value.trim() ? JSON.parse(params.value) : {}; }
+    catch { count.textContent = '参数不是合法 JSON'; return; }
+    const state = await fetchEditorState();
+    const answer = await askConfirm({
+      title: `执行命令：${selected.id}`,
+      details: [
+        commandTargetSummary(state, selected.id, payload) || `参数  ${JSON.stringify(payload).slice(0, 400)}`,
+        `目标工程  ${state.documentId} · R${state.revision}`,
+        selected.highRisk ? '这条属于高危命令：它会真的改/删数据，撤销只有一步。' : '会真实修改工程并进入撤销历史；取消不会产生任何命令。',
+      ].filter(Boolean).join('\n'),
+      maskAvailable: false,
+    });
+    if (!answer.ok) { count.textContent = '已取消，画布没有改动'; return; }
+    try {
+      const outcome = await runPlanOnEditor([{ operation: selected.id, params: payload }]);
+      close();
+      bubble('bot', `已执行 ${selected.id}（现在 R${outcome.revision}）。`);
+      await reportSelfCheck(selected.id);
+    } catch (error) {
+      count.textContent = `执行失败：${error.code || error.message}`;
+    }
+  });
+
+  return { open, close };
+})();

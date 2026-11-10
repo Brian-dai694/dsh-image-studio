@@ -235,9 +235,7 @@ detail01 解析出 2 组「细节图」（4 个图片层）与「文案」（3 �
 
 ## 4. Phase C — UI 布局
 
-### C1. 三栏 + 可折叠助手
-
-```
+### C1. 三栏 + 可折叠助手```
 ┌─────────┬──────────────────────────┬───────────────┐
 │ 图层/素材 │          画布             │   助手（可折叠） │
 │ (260px) │        (flex-1)          │   (360px)     │
@@ -256,6 +254,30 @@ detail01 解析出 2 组「细节图」（4 个图片层）与「文案」（3 �
 - 助手面板可折叠成 44px 图标条（`prefers-reduced-motion` / 窄屏默认折叠）。
 - 确认卡、执行卡、自检卡**分卡片**，不再挤在一条消息流里；卡片带 `revision` 与 `digest` 便于核对。
 - 底部历史条：显示最近 N 条，点一条 → `history.undo` 到该点（复用现有守卫凭据）。
+
+#### C 进度（v0.47.0）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **C2 命令面板 ⌘K** | ✅ | 见下；这是 Phase C 里唯一"UI 与 Agent 必须同源"的硬要求 |
+| C1 三栏布局 | ⏸ 未做 | 现状是 `stage(iframe) + aside(7 个面板)` 两栏，助手已是可开合的浮层卡片；改成三栏需要动 iframe 尺寸策略，收益主要是观感 |
+| C1 卡片分离 | ◐ 部分 | `askConfirm` 已是独立确认卡、`reportSelfCheck` 已是独立自检卡；历史条未做 |
+| C3 主题 token | ◐ 部分 | 面板配色走 `--dsw-alias-*`；新面板/命令面板也用同一批 token，没有硬编码色 |
+
+**C2 实现要点**：新增只读路由 `POST /media-image/commands`（body 带页面已有的 `state`），
+内部直接调 `lib/commands.js` 的 `describeCommands` —— 与 Agent 的 `media_image_list_commands` **同一个函数**。
+所以"这条现在能不能用、为什么不能"两处不会各说一套。
+
+面板行为：Ctrl/⌘+K 开、Esc 关、↑↓ 选、Enter 选中；灰掉的命令点不动并把原因写在右边
+（`no-selected-layer` / `selected-layer-is-text-not-image` / `state-unavailable` …）；
+参数框只按契约预填**必填字段名**、值留空（不猜坐标与尺寸）；点「执行」→ 确认卡 → `runPlanOnEditor` 单命令
+（与 Agent 同一条 apply_command 路径，一步撤销）→ 执行后自检。
+
+为过项目自带的两条源码守卫，面板做了两处调整（都是正当的，不是躲测试）：把 IIFE 挪到文件末尾
+（批量套版那条测试按源码切片数 `askConfirm` 次数，面板落在切片里会被误算）；
+局部变量改名 `paletteList` 并用 `replaceChildren()`
+（「列表必须增量更新」的守卫针对批量/素材列表，命令面板每次按键重建是正确的——焦点在输入框，不在行上）。
+
 
 ### C2. 命令面板（⌘K / Ctrl+K）
 

@@ -112,12 +112,34 @@ dialog#confirm-modal pre{max-height:200px}
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms!important;transition-duration:.01ms!important}
 }
+/* 命令面板（Ctrl/⌘+K）：与 Agent 吃同一份命令目录，所以"这条现在能不能用"两处说法一致。 */
+.palette-backdrop{position:fixed;inset:0;background:rgba(8,10,14,.55);display:none;z-index:40;backdrop-filter:blur(2px)}
+.palette-backdrop[data-open="1"]{display:block}
+.palette{position:fixed;top:12vh;left:50%;transform:translateX(-50%);width:min(720px,92vw);max-height:70vh;
+  display:flex;flex-direction:column;background:var(--dsw-alias-bg-elevated,#1b1c20);color:inherit;
+  border:1px solid var(--dsw-alias-border,#333);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.45);z-index:41;overflow:hidden}
+.palette-head{display:flex;gap:8px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border,#333)}
+.palette-head input{flex:1;background:transparent;border:0;outline:0;font-size:15px;color:inherit}
+.palette-count{font-size:12px;opacity:.7;white-space:nowrap}
+.palette-list{overflow:auto;padding:6px}
+.palette-item{display:flex;gap:10px;align-items:baseline;width:100%;text-align:left;padding:8px 10px;border:0;border-radius:8px;
+  background:transparent;color:inherit;cursor:pointer;font:inherit}
+.palette-item:hover,.palette-item[data-active="1"]{background:var(--dsw-alias-bg-hover,rgba(255,255,255,.08))}
+.palette-item[disabled]{opacity:.5;cursor:not-allowed}
+.palette-item code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+.palette-why{font-size:12px;opacity:.75}
+.palette-badge{font-size:11px;padding:1px 6px;border-radius:999px;border:1px solid currentColor;opacity:.8;white-space:nowrap}
+.palette-params{display:flex;gap:8px;align-items:flex-start;padding:10px 14px;border-top:1px solid var(--dsw-alias-border,#333)}
+.palette-params textarea{flex:1;min-height:62px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+  background:transparent;color:inherit;border:1px solid var(--dsw-alias-border,#333);border-radius:8px;padding:8px}
+.palette-hint{font-size:12px;opacity:.7;padding:0 14px 10px}
   </style>
 </head>
 <body>
   <header>
     <h1>图片插件 · DSH 协作宿主</h1>
     <span class="tag">真实插件路由 · 工具由模型会话调用</span>
+    <button id="palette-open" class="assist-launcher" style="margin-left:auto" title="命令面板 (Ctrl/⌘+K)">⌘K 命令面板</button>
   </header>
   <main>
     <div class="stage"><iframe id="editor" src="index.html" title="miniPaint 图片编辑器"></iframe></div>
@@ -245,6 +267,22 @@ dialog#confirm-modal pre{max-height:200px}
       </div>
     </form>
   </dialog>
+  <div class="palette-backdrop" id="palette-backdrop"></div>
+  <section class="palette" id="palette" aria-label="命令面板" hidden>
+    <div class="palette-head">
+      <input id="palette-q" type="search" placeholder="搜索命令（layer.align / 对齐 / 蒙版…）" autocomplete="off">
+      <span class="palette-count" id="palette-count"></span>
+    </div>
+    <div class="palette-list" id="palette-list"></div>
+    <div class="palette-params">
+      <textarea id="palette-params" spellcheck="false" placeholder="参数（JSON），选中一条命令后在这里填"></textarea>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button id="palette-run" class="primary">执行</button>
+        <button id="palette-close">关闭</button>
+      </div>
+    </div>
+    <p class="palette-hint">执行走与 Agent 完全相同的 apply_command 路径（一次确认、一步撤销）。灰掉的是当前状态下缺前置条件，原因写在右边。</p>
+  </section>
   <script type="module" src="host.js"></script>
 </body>
 </html>

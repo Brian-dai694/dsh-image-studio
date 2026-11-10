@@ -317,6 +317,50 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('命令面板：吃同一份命令目录、快捷键可用、执行走 Agent 同一条 apply_command 路径', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const page = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  // 目录必须来自插件路由（与 media_image_list_commands 同一个 lib/commands.js），
+  // 而不是页面里再造一份命令表 —— 否则"能不能用"会出现两套说法。
+  assert.match(code, /\/media-image\/commands/, '命令目录必须走插件路由');
+  assert.equal(/const COMMAND_NEEDS|const COMMANDS = new Set/.test(code), false, '页面不得自带命令表');
+
+  // 快捷键与元素
+  assert.match(code, /ctrlKey \|\| event\.metaKey/, '必须支持 Ctrl/⌘');
+  assert.match(code, /toLowerCase\(\) === 'k'/, '快捷键是 K');
+  assert.match(page, /id="palette-list"/);
+  assert.match(page, /id="palette-q"/);
+  assert.match(page, /id="palette-run"/);
+
+  // 不可用的命令点不动（把"为什么不能用"摆出来，而不是让人试一次失败）
+  assert.match(code, /item\.disabled = command\.enabled === false/);
+  assert.match(code, /disabledReason/, '必须把不可用原因显示出来');
+
+  // 执行路径：与 Agent 完全相同的单命令提交，不是页面私开一条写通道。
+  // 断言只针对面板自己那段代码：面板里不该出现任何 editor.apply_command 直调。
+  const paletteStart = code.indexOf('const palette = ');
+  assert.ok(paletteStart > 0, '必须能找到命令面板实现');
+  const paletteBlock = code.slice(paletteStart);
+  assert.match(paletteBlock, /runPlanOnEditor\(\[\{ operation: selected\.id, params: payload \}\]\)/, '面板必须走 runPlanOnEditor');
+  assert.equal(paletteBlock.includes('editor.apply_command'), false, '面板不得自己调 editor.apply_command');
+  assert.equal(paletteBlock.includes("command: { type:"), false, '面板不得自己拼 command 对象');
+  // 执行前必须过一次确认，且执行后自检
+  assert.match(code, /askConfirm\(\{[\s\S]{0,400}执行命令/, '执行前要确认');
+  assert.match(code, /reportSelfCheck\(selected\.id\)/, '执行后要自检');
+});
+
+test('命令面板：默认参数字骨架只填必填字段名，不猜坐标与尺寸', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const start = script.indexOf('const defaultParams = command =>');
+  assert.ok(start > 0, '必须有 defaultParams');
+  const block = script.slice(start, script.indexOf('const filter = () =>', start));
+  // 从参数契约里挑出"不带 ?"的字段名当骨架，值一律留空字符串
+  assert.match(block, /match\[2\] !== '\?'/, '只取必填字段');
+  assert.match(block, /skeleton\[name\] = ''/, '值必须留空由人填，不能编一个默认坐标');
+});
+
 test('批量套版：一次确认、逐份导出入库、每份撤销回原状，失败即停', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');

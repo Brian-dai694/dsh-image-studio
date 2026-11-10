@@ -8,6 +8,7 @@ import { MAX_FONT_BYTES } from './fonts.js';
 import { psdToTemplate } from './psd.js';
 import { compositePsdLayers } from './psd-composite.js';
 import { planTemplateApply, planTemplateBatch } from './template.js';
+import { describeCommands, summarize } from './commands.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -391,6 +392,38 @@ async function handleBackgroundRemoval(req, res, { backgroundRemoval, token, pre
   return true;
 }
 
+/**
+ * 命令目录（只读）：给页面里的命令面板用。
+ * 目录与就绪度的唯一事实源在 lib/commands.js（Agent 用的 media_image_list_commands 也是它），
+ * 所以面板里看到"这条现在能不能用、为什么不能用"与模型看到的完全一致，不会两套说法。
+ * 状态由页面带上来（客户端可信输入，但本路由只做纯计算、不写任何东西）。
+ */
+async function handleCommands(req, res, { token }) {
+  const rejection = authorizeSameOrigin(req, token, ['POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  try {
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const state = body && typeof body === 'object' && !Array.isArray(body) ? body.state : null;
+    const commands = describeCommands(state && typeof state === 'object' ? state : null);
+    const context = state && typeof state === 'object' ? summarize(state) : null;
+    send(res, 200, {
+      ok: true,
+      commands,
+      ...(context ? { context } : {}),
+      counts: {
+        total: commands.length,
+        enabled: commands.filter(item => item.enabled === true).length,
+        disabled: commands.filter(item => item.enabled === false).length,
+        unknown: commands.filter(item => item.enabled === null).length,
+      },
+    });
+  } catch (error) {
+    const code = error?.code || 'COMMANDS_FAILED';
+    send(res, code === 'PAYLOAD_TOO_LARGE' ? 413 : 400, { code, message: error.message });
+  }
+  return true;
+}
+
 async function handleTemplatePlan(req, res, { token, fonts = null }) {
   const rejection = authorizeSameOrigin(req, token, ['POST']);
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
@@ -621,6 +654,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/template/plan`) {
       return handleTemplatePlan(req, res, { token, fonts });
+    }
+    if (pathname === `${prefix}/commands`) {
+      return handleCommands(req, res, { token });
     }
     if (pathname === `${prefix}/template/apply`) {
       return handleTemplateApply(req, res, { token, assets, fonts });
