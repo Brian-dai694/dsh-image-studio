@@ -225,23 +225,35 @@ export function applyGrade(pixels, spec = {}, options = {}) {
       lumaPlane[p] = lumaOf(pixels[index], pixels[index + 1], pixels[index + 2]) / 255;
     }
   }
-  const unsharp = (amount, radius, label) => {
+  const unsharp = (amount, radius, label, cap) => {
     if (!amount) return null;
     if (!hasGeometry) { skipped.push(label); return null; }
     const low = boxBlurPlane(lumaPlane, width, height, Math.max(1, Math.round(radius)));
     const detail = new Float32Array(lumaPlane.length);
-    for (let p = 0; p < lumaPlane.length; p += 1) detail[p] = (lumaPlane[p] - low[p]) * (amount / 100);
+    const gain = amount / 100;
+    // 钳制每像素增量：不钳的话强值下亮边会被压出黑边（unsharp 的经典 halo），
+    // 对比图里表现为"清晰度反而把四周压暗"。
+    const limit = cap;
+    for (let p = 0; p < lumaPlane.length; p += 1) {
+      const delta = (lumaPlane[p] - low[p]) * gain;
+      detail[p] = delta > limit ? limit : delta < -limit ? -limit : delta;
+    }
     return detail;
   };
-  // 半径按画面尺寸缩放：清晰度是大半径（局部对比），纹理/锐化是小半径（细节/边缘）
-  const clarityDetail = unsharp(Number(spec.clarity) || 0, Math.max(4, (width + height) / 120), 'clarity');
-  const textureDetail = unsharp(Number(spec.texture) || 0, Math.max(2, (width + height) / 500), 'texture');
-  const sharpenDetail = unsharp(Number(spec.sharpen) || 0, 1.2, 'sharpen');
+  // 半径按画面尺寸缩放：清晰度是大半径（局部对比），纹理/锐化是小半径（细节/边缘）。
+  // 清晰度半径按 (w+h)/40：第一版用 /120，在 240×160 上只有 3px，和锐化几乎没区别，
+  // 对比图里看不出效果 —— 大半径才是"局部对比"该有的尺度。
+  const clarityDetail = unsharp(Number(spec.clarity) || 0, Math.max(6, (width + height) / 40), 'clarity', 0.06);
+  const textureDetail = unsharp(Number(spec.texture) || 0, Math.max(2, (width + height) / 300), 'texture', 0.05);
+  const sharpenDetail = unsharp(Number(spec.sharpen) || 0, 1.2, 'sharpen', 0.05);
   const dehazeAmount = Number(spec.dehaze) || 0;
   if (dehazeAmount && !hasGeometry) skipped.push('dehaze');
   const grainAmount = Number(spec.grain) || 0;
   const vignetteAmount = Number(spec.vignette) || 0;
   if (vignetteAmount && !hasGeometry) skipped.push('vignette');
+  // 去雾需要"大气光"估计：用大半径模糊当作雾幕。真正的去雾要估大气光并解透射率，
+  // 这里用同一份低频当作 A，做 J = A + (I - A)/t —— 方向正确：雾幕内部被拉开，不是整体提亮。
+  const airlight = dehazeAmount && hasGeometry ? boxBlurPlane(lumaPlane, width, height, Math.max(8, (width + height) / 16)) : null;
   const centerX = (width - 1) / 2, centerY = (height - 1) / 2;
   const maxDistance = Math.hypot(centerX, centerY) || 1;
 
@@ -300,22 +312,32 @@ export function applyGrade(pixels, spec = {}, options = {}) {
       if (sharpenDetail) delta += sharpenDetail[p];
       if (delta) { r += delta; g += delta; b += delta; }
 
-      // 去雾（近似）：抬对比 + 压暗部 + 加一点饱和。真正的去雾要估大气光，这里明确是近似。
-      if (dehazeAmount) {
+      // 去雾：J = A + (I - A)/t。A 是低频大气光估计，t<1 拉开雾幕内的层次。
+      // 第一版用"整体加对比 + 提饱和"，方向错了：亮雾区被继续提亮并裁切，雾没有减少。
+      if (airlight) {
         const strength = dehazeAmount / 100;
-        const lum = lumaOf(r, g, b);
-        const curved = clamp01((lum - 0.5) * (1 + strength * 0.5) + 0.5);
-        const gain = lum > 0.001 ? curved / lum : 1;
-        r = clamp01(r * gain * (1 + strength * 0.12));
-        g = clamp01(g * gain * (1 + strength * 0.12));
-        b = clamp01(b * gain * (1 + strength * 0.12));
+        // t 的下限 0.55：第一版放到 0.25，等于把对比拉 4 倍，整图直接压死（实测角落比掉到 0.22）
+        const t = Math.max(0.55, 1 - strength * 0.45);
+        const a = airlight[p];
+        r = a + (r - a) / t;
+        g = a + (g - a) / t;
+        b = a + (b - a) / t;
+        // 提一点饱和：去雾后色彩密度会回来
+        const mean = (r + g + b) / 3;
+        const boost = 1 + strength * 0.15;
+        r = mean + (r - mean) * boost;
+        g = mean + (g - mean) * boost;
+        b = mean + (b - mean) * boost;
       }
 
-      // 颗粒：确定性伪随机（按像素索引），保证同样输入得到同样输出。
+      // 颗粒：整数哈希（xorshift 风格）。用 Math.sin 会在规律图上出现对角条纹 ——
+      // 第一版的 "sin(x*a + y*b)*big" 就是周期函数，肉眼直接看到斜纹，不是噪声。
       if (grainAmount) {
         const x = p % width, y = (p - x) / width;
-        const hash = Math.sin((x * 12.9898 + y * 78.233) * 43758.5453);
-        const noise = (hash - Math.floor(hash) - 0.5) * (grainAmount / 100) * 0.18;
+        let h = (x * 374761393 + y * 668265263) | 0;
+        h = (h ^ (h >>> 13)) * 1274126177 | 0;
+        h = (h ^ (h >>> 16)) >>> 0;
+        const noise = (h / 4294967296 - 0.5) * (grainAmount / 100) * 0.18;
         r += noise; g += noise; b += noise;
       }
 

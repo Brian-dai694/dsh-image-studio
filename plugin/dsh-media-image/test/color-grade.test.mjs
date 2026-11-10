@@ -158,6 +158,38 @@ test('颗粒：增加像素方差，且确定性（同输入同输出）', () =>
   assert.deepEqual(Array.from(grained), Array.from(again), '颗粒必须确定性（同样输入同样输出）');
 });
 
+test('颗粒必须是白噪声，不能有周期性条纹（第一版用 sin 哈希，肉眼可见斜纹）', () => {
+  const W = 64, H = 64;
+  const data = new Uint8ClampedArray(W * H * 4);
+  for (let p = 0; p < W * H; p += 1) {
+    const at = p * 4;
+    data[at] = 128; data[at + 1] = 128; data[at + 2] = 128; data[at + 3] = 255;
+  }
+  applyGrade(data, { grain: 80 }, { width: W, height: H, dither: false });
+  const value = (x, y) => data[(y * W + x) * 4];
+
+  // 水平/垂直相邻差应该量级相当：条纹会让某个方向明显不同
+  let horizontal = 0, vertical = 0;
+  for (let y = 0; y < H; y += 1) for (let x = 0; x < W - 1; x += 1) horizontal += Math.abs(value(x + 1, y) - value(x, y));
+  for (let y = 0; y < H - 1; y += 1) for (let x = 0; x < W; x += 1) vertical += Math.abs(value(x, y + 1) - value(x, y));
+  horizontal /= H * (W - 1);
+  vertical /= W * (H - 1);
+  const ratio = horizontal / vertical;
+  assert.ok(ratio > 0.6 && ratio < 1.7, `相邻差水平/垂直比应在 1 附近，实际 ${ratio.toFixed(2)}（条纹会严重偏离）`);
+
+  // 拉格朗 1 自相关应接近 0（周期信号会有明显正相关）
+  const values = [];
+  for (let y = 0; y < H; y += 1) for (let x = 0; x < W - 1; x += 1) values.push(value(x, y));
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  let numerator = 0, denominator = 0;
+  for (let index = 0; index < values.length - 1; index += 1) {
+    numerator += (values[index] - mean) * (values[index + 1] - mean);
+    denominator += (values[index] - mean) ** 2;
+  }
+  const autocorrelation = numerator / denominator;
+  assert.ok(Math.abs(autocorrelation) < 0.35, `lag-1 自相关应接近 0，实际 ${autocorrelation.toFixed(2)}`);
+});
+
 test('暗角：角部被压得比中心多，负值反向', () => {
   const W = 21, H = 21;
   const make = () => {
