@@ -32,7 +32,7 @@ test('plugin exports the Host contract', () => {
   assert.equal(typeof apply, 'function');
 });
 
-test('apply registers exactly the eleven image tools and one /media-image route', () => {
+test('apply registers exactly the eleven default image tools and one /media-image route', () => {
   const { ctx, tools, guards, routes } = makeContext();
   apply(ctx, { dataDir: 'C:/tmp/image-studio' });
   assert.equal(tools.size, 11);
@@ -54,6 +54,14 @@ test('apply registers exactly the eleven image tools and one /media-image route'
   assert.equal(typeof routes[0].handler, 'function');
 });
 
+test('Photoshop tools are absent unless explicitly enabled', () => {
+  const { ctx, tools } = makeContext();
+  apply(ctx, { dataDir: 'C:/tmp/image-studio' });
+  assert.equal(tools.has('media_image_photoshop_action'), false, '未显式开启时不注册 Photoshop action 工具');
+  assert.equal(tools.has('media_image_assistant_photoshop_action'), false);
+  assert.equal(tools.has('media_image_photoshop_run_jsx'), false, 'Photoshop 关闭时（含任意 JSX 工具）一个都不注册');
+});
+
 test('every tool declares a four-state output schema and a parameter table', () => {
   const { ctx, tools } = makeContext();
   apply(ctx, { dataDir: 'C:/tmp/media-studio' });
@@ -68,15 +76,45 @@ test('every tool declares a four-state output schema and a parameter table', () 
   }
 });
 
-test('guard denies cross-kind operations and unauthorized autonomous writes, allows low risk', () => {
+test('guard denies cross-kind operations, still rejects unknown autonomous operations, allows low risk', () => {
   const { ctx, guards } = makeContext();
   apply(ctx, { dataDir: 'C:/tmp/media-image' });
   const guard = guards[0];
   assert.equal(guard({ name: 'unrelated_tool', arguments: {} }), undefined);
   assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'video' } }), /targets the image editor/);
   assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'media.video.clip.move' } }), /layer\.\* operations/);
-  assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'canvas.crop', mode: 'autonomous' } }), /not authorized/);
+  // 白名单外的命令名仍旧被拒（策略放开的是白名单内的命令，不是"任何字符串"）。
+  assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'layer.not_a_real_command', mode: 'autonomous' } }), /not authorized/);
+  assert.equal(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'canvas.crop', mode: 'autonomous' } }), undefined);
   assert.equal(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'layer.update_text', mode: 'autonomous' } }), undefined);
+  assert.equal(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'layer.remove', mode: 'assist' } }), undefined);
+});
+
+test('autonomous mode may run every allowlisted image command, and NEVER_AUTONOMOUS can still re-tighten one', async () => {
+  const { AUTONOMOUS_CAPABILITIES, NEVER_AUTONOMOUS, createGuard } = await import('../lib/gate.js');
+  const { ALLOWED_COMMANDS } = await import('../lib/bridge.js');
+  const guard = createGuard();
+  const run = operation => guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation, mode: 'autonomous' } });
+
+  // 本人已授权：命令白名单里的每一条都能在 autonomous 下执行，不能有"能执行但自主被拒"的命令。
+  for (const operation of ALLOWED_COMMANDS.image) {
+    assert.equal(run(operation), undefined, `${operation} 应在自主模式下允许`);
+    assert.equal(AUTONOMOUS_CAPABILITIES.image.has(operation), true, `${operation} 必须显式列在自主白名单里`);
+  }
+  // 点名授权但尚未实现的命令：策略已记录，等命令进白名单就能用。
+  for (const operation of ['layer.merge_down', 'layer.rasterize', 'layer.paint_stroke']) {
+    assert.equal(AUTONOMOUS_CAPABILITIES.image.has(operation), true, `${operation} 的授权必须已记录`);
+  }
+  // 黑名单仍然是"临时收紧"的旋钮，且优先级高于白名单。
+  assert.equal(NEVER_AUTONOMOUS.image.size, 0, '当前没有被单独收紧的命令');
+  NEVER_AUTONOMOUS.image.add('layer.remove');
+  try {
+    assert.match(run('layer.remove'), /explicitly re-blocked in NEVER_AUTONOMOUS/);
+    assert.equal(run('layer.remove_background'), undefined, '收紧一条不影响其他命令');
+  } finally {
+    NEVER_AUTONOMOUS.image.delete('layer.remove');
+  }
+  // assist 模式不受这份白名单影响：高危命令仍走逐次审批（由 tools 层处理）。
   assert.equal(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'layer.remove', mode: 'assist' } }), undefined);
 });
 

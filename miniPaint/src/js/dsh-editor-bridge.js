@@ -5,7 +5,13 @@ import zoomView from './libs/zoomView.js';
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
 const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
-const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'history.batch', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.align', 'layer.duplicate', 'layer.rasterize', 'layer.merge_down', 'layer.paint_stroke', 'layer.set_effect', 'layer.remove_effect', 'layer.update_mask', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'history.batch', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+// dshEffects 的词表与取值域。字符串的拼装归渲染器（base-layers.dsh_effect_filter）：
+// 回执里给出的 filter 必须是"渲染时真正用的那个"，不能是桥里另算一份。
+const DSH_EFFECT_RANGES = {
+  blur: [0, 50], brightness: [0, 3], contrast: [0, 3], saturate: [0, 3],
+  grayscale: [0, 1], sepia: [0, 1], invert: [0, 1], hueRotate: [-180, 180], opacity: [0, 1],
+};
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -42,6 +48,26 @@ export class DshEditorBridge {
     ctx.drawImage(layer.link, 0, 0, width, height);
     return ctx.getImageData(0, 0, width, height);
   }
+  /**
+   * 把单个图层按其自身帧渲染到离屏画布。
+   * 走编辑器自己的 render_object，所以文字/矢量/旋转/活蒙版都按真实渲染来 ——
+   * 我们不用在这里重写一遍合成规则（重写就会和画布看到的不一致）。
+   */
+  renderLayerFrame(layer, width, height) {
+    if (typeof app.Layers?.render_object !== 'function') throw this.error('EDITOR_ERROR', '编辑器缺少 render_object，无法栅格化');
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.min(16384, Math.round(width)));
+    canvas.height = Math.max(1, Math.min(16384, Math.round(height)));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法创建画布');
+    ctx.save();
+    // 图层坐标是画布坐标系，帧画布是局部的：平移负偏移即可让内容落进帧里。
+    ctx.translate(-Math.round(layer.x || 0), -Math.round(layer.y || 0));
+    app.Layers.render_object(ctx, layer);
+    ctx.restore();
+    return canvas;
+  }
+
   /** 把处理后的像素封装成原生动作：一步撤销、一个 revision。 */
   imageAction(image, layerId) {
     if (layerId === undefined || layerId === null || !config.layers.some(layer => String(layer.id) === String(layerId))) {
@@ -338,6 +364,55 @@ export class DshEditorBridge {
       }
     }
 
+    // 分区量：按每个可见图层的外框，在**同一张降采样合成图**上量它那一块的曝光与不透明占比。
+    // 这是"这个元素在画面上到底显不显"的证据，比整图均值有用得多。
+    // 只量面积最大的 24 个框：40 层全画布叠在一起时，逐层扫描总像素会失控。
+    const regionBoxes = [];
+    for (const layer of layers) {
+      if (layer.visible === false) continue;
+      const w = Number(layer.width) || 0, h = Number(layer.height) || 0;
+      if (w < 1 || h < 1) continue;
+      const x = Number(layer.x) || 0, y = Number(layer.y) || 0;
+      const x0 = Math.max(0, Math.round(x * scaleX));
+      const y0 = Math.max(0, Math.round(y * scaleY));
+      const x1 = Math.min(sw, Math.round((x + w) * scaleX));
+      const y1 = Math.min(sh, Math.round((y + h) * scaleY));
+      if (x1 <= x0 || y1 <= y0) {
+        // 完全落在画布外：如实给一个空区域，而不是悄悄跳过。
+        regionBoxes.push({ layer, x0: null, y0: null, x1: null, y1: null, area: 0 });
+        continue;
+      }
+      regionBoxes.push({ layer, x0, y0, x1, y1, area: (x1 - x0) * (y1 - y0) });
+    }
+    const REGION_LIMIT = 24;
+    const sortedRegions = regionBoxes.slice().sort((left, right) => right.area - left.area);
+    const regions = sortedRegions.slice(0, REGION_LIMIT).map(region => {
+      const { layer, x0, y0, x1, y1, area } = region;
+      if (x0 === null) {
+        return { layerId: String(layer.id), name: String(layer.name || ''), visible: true, inCanvas: false, sampledArea: 0 };
+      }
+      let opaque = 0, sum = 0, sumSq = 0;
+      for (let py = y0; py < y1; py += 1) {
+        for (let pxx = x0; pxx < x1; pxx += 1) {
+          const i = (py * sw + pxx) * 4;
+          if (data[i + 3] < 13) continue;
+          const luma = (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+          opaque += 1; sum += luma; sumSq += luma * luma;
+        }
+      }
+      const mean = opaque ? sum / opaque : 0;
+      const variance = opaque ? Math.max(0, sumSq / opaque - mean * mean) : 0;
+      return {
+        layerId: String(layer.id), name: String(layer.name || ''), visible: true, inCanvas: true,
+        sampledArea: area,
+        canvasShare: Number((area / (sw * sh)).toFixed(4)),
+        // 这一块里"有内容"的像素占比：接近 0 说明该层在画面上几乎看不见。
+        opaqueRatio: Number((opaque / Math.max(1, area)).toFixed(4)),
+        meanLuma: Number(mean.toFixed(4)),
+        lumaStdDev: Number(Math.sqrt(variance).toFixed(4)),
+      };
+    });
+
     return {
       width: W, height: H, sampledWidth: sw, sampledHeight: sh,
       luminance: { mean: Number((sum / denom / 255).toFixed(4)), histogram: histogram.map(value => Number((value / denom).toFixed(4))) },
@@ -348,6 +423,8 @@ export class DshEditorBridge {
       },
       sharpness: { laplacianVariance: Number(lapVariance.toFixed(2)) },
       layers: { total: layers.length, visible: layers.filter(layer => layer.visible !== false).length, offCanvas, zeroSize, textOverflow, textContrast, upscaled },
+      regions,
+      regionsTruncated: Math.max(0, sortedRegions.length - regions.length),
       opaqueRatio: Number((counted / (sw * sh)).toFixed(4)),
     };
   }
@@ -358,48 +435,101 @@ export class DshEditorBridge {
    */
   previewPng(request = {}) {
     const maxWidth = Number.isSafeInteger(request.maxWidth) ? Math.min(1024, Math.max(64, request.maxWidth)) : 640;
-    const full = this.compositeCanvas();
-    const scale = Math.min(1, maxWidth / Math.max(1, full.width));
-    const width = Math.max(1, Math.round(full.width * scale));
-    const height = Math.max(1, Math.round(full.height * scale));
+    // 只渲染单个图层：合成里其他层都不画。用来"看清这一层到底长什么样"，
+    // 也是排查"这层是不是被压住了"最直接的手段。
+    let full;
+    let singleLayerId = null;
+    if (request.layerId !== undefined) {
+      const layer = this.get_layer_for_preview(request.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      singleLayerId = String(layer.id);
+      full = document.createElement('canvas');
+      full.width = Math.max(1, Math.round(config.WIDTH || 1));
+      full.height = Math.max(1, Math.round(config.HEIGHT || 1));
+      const fullCtx = full.getContext('2d');
+      if (!fullCtx) throw this.error('EDITOR_ERROR', '当前环境无法生成预览');
+      app.Layers.convert_layers_to_canvas(fullCtx, layer.id, false);
+    } else {
+      full = this.compositeCanvas();
+    }
+    // 局部裁切：只截这一块再放大。越界部分夹到画布内，并把**实际使用**的矩形回给调用方，
+    // 不让人以为截的是自己写的那个框。
+    let region = { x: 0, y: 0, width: full.width, height: full.height };
+    if (request.crop !== undefined) {
+      const crop = request.crop;
+      if (!plain(crop) || !keysOnly(crop, ['x', 'y', 'width', 'height'])) throw this.error('INVALID_REQUEST', 'crop 必须是 {x,y,width,height}');
+      for (const key of ['x', 'y', 'width', 'height']) {
+        if (!Number.isSafeInteger(crop[key])) throw this.error('INVALID_REQUEST', `crop.${key} 必须是整数`);
+      }
+      if (crop.width < 1 || crop.height < 1) throw this.error('INVALID_REQUEST', 'crop 的宽高必须 ≥1');
+      const x0 = Math.max(0, crop.x);
+      const y0 = Math.max(0, crop.y);
+      const x1 = Math.min(full.width, crop.x + crop.width);
+      const y1 = Math.min(full.height, crop.y + crop.height);
+      if (x1 <= x0 || y1 <= y0) throw this.error('INVALID_REQUEST', 'crop 与画布没有交集');
+      region = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    }
+    const scale = Math.min(1, maxWidth / Math.max(1, region.width));
+    const width = Math.max(1, Math.round(region.width * scale));
+    const height = Math.max(1, Math.round(region.height * scale));
     const small = document.createElement('canvas');
     small.width = width; small.height = height;
     const ctx = small.getContext('2d');
     if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法生成预览');
-    ctx.drawImage(full, 0, 0, width, height);
+    ctx.drawImage(full, region.x, region.y, region.width, region.height, 0, 0, width, height);
     // 可选蒙版叠加：把"这次会改到哪块"画成半透明色块，避免改完才发现动错了地方。
-    const overlayInfo = this.previewOverlay(request.overlay, ctx, scale, width, height);
-    // 可选坐标网格：按源图像素每 100 画一条线并标注坐标，方便调用方把"位置"对上数字。
-    if (request.grid) {
-      const stepSource = 100;
-      const stepScaled = Math.max(8, Math.round(stepSource * scale));
+    // 裁切后坐标要减掉 region 偏移，否则叠加会画到别处。
+    const offset = { x: region.x, y: region.y };
+    const overlayInfo = this.previewOverlay(request.overlay, ctx, scale, width, height, offset);
+    // 可选坐标网格：按源图像素每 step 画一条线并标注**源图坐标**，方便把"位置"对上数字。
+    let gridStep = null;
+    const gridRequested = request.grid === true || request.gridStep !== undefined || typeof request.grid === 'number';
+    if (gridRequested) {
+      const rawStep = request.gridStep !== undefined ? request.gridStep : (typeof request.grid === 'number' ? request.grid : 100);
+      if (!Number.isSafeInteger(rawStep) || rawStep < 8 || rawStep > 2000) throw this.error('INVALID_REQUEST', 'gridStep 必须是 8..2000 的整数（源图像素）');
+      gridStep = rawStep;
+      const stepScaled = Math.max(8, Math.round(rawStep * scale));
       ctx.save();
       ctx.strokeStyle = 'rgba(255,0,0,0.55)';
       ctx.fillStyle = 'rgba(255,0,0,0.85)';
       ctx.lineWidth = 1;
       ctx.font = '9px monospace';
-      for (let gx = stepScaled; gx < width; gx += stepScaled) {
+      // 第一条线取 region 内第一个落在 step 整数倍上的源图坐标，这样裁切后标注的仍是真实坐标。
+      for (let sourceX = Math.ceil(offset.x / rawStep) * rawStep; sourceX <= offset.x + region.width; sourceX += rawStep) {
+        const gx = Math.round((sourceX - offset.x) * scale);
+        if (gx <= 0 || gx >= width) continue;
         ctx.beginPath(); ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, height); ctx.stroke();
-        ctx.fillText(String(Math.round(gx / scale)), gx + 2, 9);
+        ctx.fillText(String(sourceX), gx + 2, 9);
       }
-      for (let gy = stepScaled; gy < height; gy += stepScaled) {
+      for (let sourceY = Math.ceil(offset.y / rawStep) * rawStep; sourceY <= offset.y + region.height; sourceY += rawStep) {
+        const gy = Math.round((sourceY - offset.y) * scale);
+        if (gy <= 0 || gy >= height) continue;
         ctx.beginPath(); ctx.moveTo(0, gy + 0.5); ctx.lineTo(width, gy + 0.5); ctx.stroke();
-        ctx.fillText(String(Math.round(gy / scale)), 2, gy - 2);
+        ctx.fillText(String(sourceY), 2, gy - 2);
       }
       ctx.restore();
     }
     const dataUrl = small.toDataURL('image/png');
     const bytes = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
-    if (bytes > 256 * 1024) throw this.error('PREVIEW_TOO_LARGE', `预览 ${Math.round(bytes / 1024)} KB 超过 256 KB，请调低 maxWidth`);
-    return { dataUrl, width, height, bytes, ...(overlayInfo ? { overlay: overlayInfo } : {}) };
+    if (bytes > 256 * 1024) throw this.error('PREVIEW_TOO_LARGE', `预览 ${Math.round(bytes / 1024)} KB 超过 256 KB，请调低 maxWidth 或缩小 crop`);
+    return {
+      dataUrl, width, height, bytes,
+      ...(overlayInfo ? { overlay: overlayInfo } : {}),
+      // 回执里如实给出真正截的区域与缩放：调用方据此把预览上的位置换算回画布坐标。
+      crop: region, scale: Number(scale.toFixed(6)),
+      ...(singleLayerId ? { layerId: singleLayerId } : {}),
+      ...(gridStep ? { gridStep } : {}),
+    };
   }
 
   /**
    * 预览叠加层：把蒙版（或当前选区）画成半透明色块。
    * 只影响预览图，不改文档、不推进 revision——目的是让"改到哪块"在执行前就看得见。
    */
-  previewOverlay(overlay, ctx, scale, width, height) {
+  previewOverlay(overlay, ctx, scale, width, height, offset = { x: 0, y: 0 }) {
     if (!overlay) return null;
+    const shiftX = Number(offset.x) || 0;
+    const shiftY = Number(offset.y) || 0;
     const source = overlay.layerId !== undefined ? this.get_layer_for_preview(overlay.layerId) : null;
     const selection = !source && overlay.selection !== false ? this.readSelectionRect() : null;
     if (!source && !selection) return null;
@@ -411,10 +541,14 @@ export class DshEditorBridge {
     const sctx = scratch.getContext('2d');
     if (source && source.link) {
       const sw = Number(source.width) || 1, sh = Number(source.height) || 1;
-      sctx.drawImage(source.link_canvas != null ? source.link_canvas : source.link, Math.round((source.x || 0) * scale), Math.round((source.y || 0) * scale), Math.max(1, Math.round(sw * scale)), Math.max(1, Math.round(sh * scale)));
+      sctx.drawImage(
+        source.link_canvas != null ? source.link_canvas : source.link,
+        Math.round((source.x || 0) - shiftX) * scale, Math.round((source.y || 0) - shiftY) * scale,
+        Math.max(1, Math.round(sw * scale)), Math.max(1, Math.round(sh * scale)),
+      );
     } else if (selection) {
       sctx.fillStyle = '#ffffff';
-      sctx.fillRect(Math.round(selection.x * scale), Math.round(selection.y * scale), Math.max(1, Math.round(selection.width * scale)), Math.max(1, Math.round(selection.height * scale)));
+      sctx.fillRect(Math.round((selection.x - shiftX) * scale), Math.round((selection.y - shiftY) * scale), Math.max(1, Math.round(selection.width * scale)), Math.max(1, Math.round(selection.height * scale)));
     }
     // 用蒙版的 alpha 当形状：先把形状留下，再整体染成提示色。
     sctx.globalCompositeOperation = 'source-in';
@@ -750,17 +884,35 @@ export class DshEditorBridge {
   }
 
   readState() {
+    // bounds / coverage 是给"没看见画布"的调用方用的：有了它们就不必再猜一个图层占到哪里、
+    // 会不会压到边上。coverage 按**帧 ∩ 画布**算，所以放到画布外不会报出 >1 的比例。
+    const stateW = Math.max(1, Math.round(config.WIDTH || 1));
+    const stateH = Math.max(1, Math.round(config.HEIGHT || 1));
+    const canvasArea = stateW * stateH;
     const layers = app.Layers.get_sorted_layers().map(layer => {
       const applied = this.pixelApplied.get(String(layer.id)) || {};
+      const frameW = Number(layer.width) || 0;
+      const frameH = Number(layer.height) || 0;
+      const frameX = Number(layer.x) || 0;
+      const frameY = Number(layer.y) || 0;
+      const clippedW = Math.max(0, Math.min(frameX + frameW, stateW) - Math.max(frameX, 0));
+      const clippedH = Math.max(0, Math.min(frameY + frameH, stateH) - Math.max(frameY, 0));
+      const offCanvas = frameW > 0 && frameH > 0 && (frameX < 0 || frameY < 0 || frameX + frameW > stateW + 1 || frameY + frameH > stateH + 1);
       return { id: String(layer.id), name: String(layer.name || ''), type: String(layer.type || 'empty'),
         visible: layer.visible !== false, x: layer.x, y: layer.y, width: layer.width, height: layer.height,
-        ...(layer.params?.dshMask ? { mask: { sourceLayerId: String(layer.params.dshMask.sourceLayerId), editable: true } } : {}),
+        bounds: { x: frameX, y: frameY, width: frameW, height: frameH, right: frameX + frameW, bottom: frameY + frameH },
+        coverage: Number((canvasArea > 0 ? (clippedW * clippedH) / canvasArea : 0).toFixed(4)),
+        ...(offCanvas ? { offCanvas: true } : {}),
+        ...(layer.params?.dshMask ? { mask: { sourceLayerId: String(layer.params.dshMask.sourceLayerId), invert: layer.params.dshMask.invert === true, editable: true } } : {}),
         // 外观三元组要能被 read_state 看到，否则模型改完无法自我核对。
         opacity: layer.opacity ?? 100, blendMode: layer.composition || 'source-over',
         rotationDeg: layer.rotate || 0,
         // 只在真的应用过时出现；快照本身留在编辑器内部，模型看不到原始像素。
         ...(applied.feather ? { feather: applied.feather } : {}),
-        ...(applied.colorMatch ? { colorMatch: applied.colorMatch } : {}),        ...(layer.type === 'text' ? { text: textOf(layer) } : {}) };
+        ...(applied.colorMatch ? { colorMatch: applied.colorMatch } : {}),
+        // 非破坏效果栈：模型改完要能读回来核对，否则只能靠猜。
+        ...(layer.params?.dshEffects && Object.keys(layer.params.dshEffects).length ? { effects: { ...layer.params.dshEffects } } : {}),
+        ...(layer.type === 'text' ? { text: textOf(layer) } : {}) };
     });
     const selectedLayerId = config.layer ? String(config.layer.id) : null;
     const selectedLayer = layers.find(layer => layer.id === selectedLayerId) || null;
@@ -851,7 +1003,8 @@ export class DshEditorBridge {
       const afterDigest = this.contentDigestValue();
       this.lastAgentCommit = prepared.action ? { commandId: request.commandId, revision: this.revision, afterDigest, historyIndex: app.State.action_history_index, action: app.State.action_history[app.State.action_history_index - 1] } : null;
       const result = { editorKind: 'image', documentId: this.documentId, revision: this.revision, afterDigest, commandId: request.commandId,
-        changedObjectIds: prepared.ids(), stateSummary: { selectedLayerId: config.layer ? String(config.layer.id) : null } };
+        changedObjectIds: prepared.ids(), stateSummary: { selectedLayerId: config.layer ? String(config.layer.id) : null },
+        ...(typeof prepared.detail === 'function' ? { commandDetail: prepared.detail() } : {}) };
       this.commandResults.set(request.commandId, { status: 'applied', originalResult: result });
       return result;
     } catch (error) {
@@ -1338,6 +1491,288 @@ export class DshEditorBridge {
       const action = new app.Actions.Insert_layer_action(layer, false);
       // changedObjectIds 里带上新蒙版层 id，调用方据此拼 layer.add_image 的 maskRef。
       return { action, ids: () => [String(action.inserted_layer_id)] };
+    }
+    if (command.type === 'layer.align') {
+      // 对齐到画布边/中线：调用方给的是**意图**（左/中/右、上/中/下、边距），坐标由编辑器算。
+      // 没有这条命令时，模型只能拿 set_transform 反复试坐标，既慢又对不准。
+      if (!keysOnly(p, ['layerId', 'h', 'v', 'margin', 'to'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      const to = p.to === undefined ? 'canvas' : p.to;
+      if (to !== 'canvas') throw this.error('INVALID_REQUEST', 'to 目前只支持 canvas');
+      if (p.h === undefined && p.v === undefined) throw this.error('INVALID_REQUEST', 'h 与 v 至少要给一个');
+      if (p.h !== undefined && !['left', 'center', 'right'].includes(p.h)) throw this.error('INVALID_REQUEST');
+      if (p.v !== undefined && !['top', 'middle', 'bottom'].includes(p.v)) throw this.error('INVALID_REQUEST');
+      const margin = p.margin === undefined ? 0 : p.margin;
+      if (!Number.isSafeInteger(margin) || margin < 0 || margin > 4096) throw this.error('INVALID_REQUEST');
+      const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+      const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
+      const canvasW = config.WIDTH || 1;
+      const canvasH = config.HEIGHT || 1;
+      if (margin * 2 >= canvasW || margin * 2 >= canvasH) throw this.error('INVALID_REQUEST', 'margin 让可用区域变成 0 或负数');
+      let x = layer.x || 0;
+      let y = layer.y || 0;
+      if (p.h === 'left') x = margin;
+      else if (p.h === 'right') x = canvasW - margin - width;
+      else if (p.h === 'center') x = Math.round((canvasW - width) / 2);
+      if (p.v === 'top') y = margin;
+      else if (p.v === 'bottom') y = canvasH - margin - height;
+      else if (p.v === 'middle') y = Math.round((canvasH - height) / 2);
+      // 旋转过的图层：x/y 是未旋转框的左上角，实际包围盒更大 —— 如实标出来，不让调用方以为已经完美贴边。
+      const rotated = Number(layer.rotate || 0) !== 0;
+      const detail = {
+        aligned: {
+          layerId: String(layer.id), x, y, width, height,
+          h: p.h ?? null, v: p.v ?? null, margin, canvas: { width: canvasW, height: canvasH },
+          ...(rotated ? { rotated: true, note: '该图层有旋转；x/y 是未旋转框的左上角，实际包围盒更大。' } : {}),
+        },
+      };
+      return { action: new app.Actions.Update_layer_action(layer.id, { x, y }), ids: () => [String(layer.id)], detail: () => detail };
+    }
+    if (command.type === 'layer.duplicate') {
+      // 复制图层：做多槽位变体、同一元素第二份时不用"再插一次素材"。
+      if (!keysOnly(p, ['layerId', 'offsetX', 'offsetY', 'name'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      for (const key of ['offsetX', 'offsetY']) {
+        if (p[key] !== undefined && (!Number.isSafeInteger(p[key]) || Math.abs(p[key]) > 16384)) throw this.error('INVALID_REQUEST');
+      }
+      if (p.name !== undefined && (typeof p.name !== 'string' || !p.name.trim() || p.name.length > 120)) throw this.error('INVALID_REQUEST');
+      const dx = p.offsetX === undefined ? 0 : p.offsetX;
+      const dy = p.offsetY === undefined ? 0 : p.offsetY;
+      const width = layer.width || layer.width_original || null;
+      const height = layer.height || layer.height_original || null;
+      // 只搬"图层描述"，不搬 link（像素由 Insert_layer_action 按 data 重新解码）。
+      const copy = {
+        name: p.name ?? `${layer.name || '图层'} 副本`,
+        type: layer.type,
+        x: Math.round((layer.x || 0) + dx),
+        y: Math.round((layer.y || 0) + dy),
+        width, height,
+        width_original: layer.width_original ?? width,
+        height_original: layer.height_original ?? height,
+        visible: true,
+        opacity: layer.opacity ?? 100,
+        composition: layer.composition || 'source-over',
+        rotate: layer.rotate || 0,
+        is_vector: layer.is_vector === true,
+        data: layer.data ? JSON.parse(JSON.stringify(layer.data)) : null,
+        // 活蒙版配置要跟着走，否则复制出来的图层会"没被遮住"。
+        params: layer.params ? JSON.parse(JSON.stringify(layer.params)) : {},
+      };
+      const action = new app.Actions.Insert_layer_action(copy, false);
+      return { action, ids: () => [String(action.inserted_layer_id)] };
+    }
+    if (command.type === 'layer.rasterize') {
+      // 文字/矢量层转像素：替换/导出前拿到确定结果，之后不再依赖字体与渲染函数。
+      if (!keysOnly(p, ['layerId', 'name'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      if (layer.type === null || layer.type === undefined) throw this.error('EMPTY_LAYER', '空图层没有可栅格化的内容');
+      if (p.name !== undefined && (typeof p.name !== 'string' || !p.name.trim() || p.name.length > 120)) throw this.error('INVALID_REQUEST');
+      const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+      const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
+      if (width > 16384 || height > 16384) throw this.error('INVALID_REQUEST', '图层尺寸超出 16384 上限');
+      const canvas = this.renderLayerFrame(layer, width, height);
+      const params = {
+        name: p.name ?? `${layer.name || '图层'} (栅格化)`,
+        type: 'image',
+        data: canvas.toDataURL('image/png'),
+        x: Math.round(layer.x || 0), y: Math.round(layer.y || 0),
+        width, height, width_original: width, height_original: height,
+        opacity: layer.opacity ?? 100,
+        composition: layer.composition || 'source-over',
+        // 旋转与活蒙版都已经烤进这张画布，所以新层不再带 rotate/params，避免二次应用。
+        rotate: 0,
+        is_vector: false,
+        params: {},
+      };
+      const actions = [new app.Actions.Insert_layer_action(params, false), new app.Actions.Delete_layer_action(layer.id)];
+      const action = new app.Actions.Bundle_action('dsh_rasterize', '栅格化图层', actions);
+      // 回执要给出新层 id：切片在 do() 之后才被填上，所以这里惰性取。
+      return { action, ids: () => [String(actions[0].inserted_layer_id ?? '')].filter(Boolean) };
+    }
+    if (command.type === 'layer.merge_down') {
+      // 向下合并：把这一层和它下面一层合成一张图，层数减一，画面上看不出变化。
+      if (!keysOnly(p, ['layerId', 'name'])) throw this.error('INVALID_REQUEST');
+      const upper = config.layers.find(item => String(item.id) === p.layerId);
+      if (!upper) throw this.error('LAYER_NOT_FOUND');
+      if (typeof app.Layers?.find_previous !== 'function') throw this.error('EDITOR_ERROR', '编辑器缺少 find_previous，无法确定下层');
+      const lower = app.Layers.find_previous(upper.id);
+      if (!lower) throw this.error('NO_LAYER_BELOW', '这已经是最下层，没有可合并的层');
+      if (typeof app.Layers?.render_object !== 'function') throw this.error('EDITOR_ERROR', '编辑器缺少 render_object，无法合并');
+      const width = Math.max(1, Math.round(config.WIDTH || 1));
+      const height = Math.max(1, Math.round(config.HEIGHT || 1));
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法创建画布');
+      // 顺序必须是"先下后上"，否则叠放关系会反过来。
+      for (const item of [lower, upper]) {
+        ctx.save();
+        ctx.globalAlpha = (item.opacity ?? 100) / 100;
+        ctx.globalCompositeOperation = item.composition || 'source-over';
+        app.Layers.render_object(ctx, item);
+        ctx.restore();
+      }
+      const params = {
+        name: p.name ?? `${upper.name || '图层'} + 合并`,
+        type: 'image',
+        data: canvas.toDataURL('image/png'),
+        x: 0, y: 0, width, height, width_original: width, height_original: height,
+        // 合并结果已经含两层的外观，所以 opacity/composition 归位，避免再叠一次。
+        opacity: 100, composition: 'source-over', rotate: 0, is_vector: false,
+        order: upper.order,
+        params: {},
+      };
+      const actions = [
+        new app.Actions.Insert_layer_action(params, false),
+        new app.Actions.Delete_layer_action(upper.id),
+        new app.Actions.Delete_layer_action(lower.id),
+      ];
+      const action = new app.Actions.Bundle_action('dsh_merge_down', '向下合并图层', actions);
+      return { action, ids: () => [String(actions[0].inserted_layer_id ?? '')].filter(Boolean) };
+    }
+    if (command.type === 'layer.paint_stroke') {
+      // 画笔：把一串点连成一条线画进该图层像素里。坐标是**图层本地像素**。
+      if (!keysOnly(p, ['layerId', 'points', 'color', 'size', 'opacity'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      if (!Array.isArray(p.points) || p.points.length < 2 || p.points.length > 200) throw this.error('INVALID_REQUEST', 'points 必须是 2..200 个点');
+      const points = p.points.map((point, index) => {
+        const x = Array.isArray(point) ? point[0] : point?.x;
+        const y = Array.isArray(point) ? point[1] : point?.y;
+        if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 16384 || Math.abs(y) > 16384) {
+          throw this.error('INVALID_REQUEST', `points[${index}] 必须是 {x,y} 或 [x,y]，且绝对值不超过 16384`);
+        }
+        return { x, y };
+      });
+      if (p.color !== undefined && (typeof p.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(p.color))) throw this.error('INVALID_REQUEST', 'color 必须是 #rrggbb');
+      const size = p.size === undefined ? 8 : p.size;
+      if (!Number.isFinite(size) || size < 1 || size > 200) throw this.error('INVALID_REQUEST', 'size 必须是 1..200');
+      const opacity = p.opacity === undefined ? 1 : p.opacity;
+      if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) throw this.error('INVALID_REQUEST', 'opacity 必须是 0..1');
+      const width = Math.max(1, Math.round(layer.width || layer.width_original || 1));
+      const height = Math.max(1, Math.round(layer.height || layer.height_original || 1));
+      // 在现有像素上画，而不是替换：这样"再补一笔"是叠加。
+      const canvas = this.renderLayerFrame(layer, width, height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法创建画布');
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.strokeStyle = p.color ?? '#ffffff';
+      ctx.lineWidth = size;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.stroke();
+      ctx.restore();
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      pixels.layerId = layer.id;
+      return { action: this.imageAction(pixels, layer.id), ids: () => [String(layer.id)] };
+    }
+    if (command.type === 'layer.set_effect' || command.type === 'layer.remove_effect') {
+      // 非破坏效果栈：改的是 layer.params.dshEffects（渲染时翻译成 ctx.filter），
+      // 不动像素，所以撤销一步就回到原来的观感。
+      const isSet = command.type === 'layer.set_effect';
+      if (!keysOnly(p, isSet ? ['layerId', 'effect', 'value'] : ['layerId', 'effect'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      if (typeof app.Layers?.dsh_effect_filter !== 'function') throw this.error('EDITOR_ERROR', '编辑器缺少 dsh_effect_filter，无法确认效果字符串');
+      const current = { ...((layer.params && layer.params.dshEffects) || {}) };
+      const next = { ...current };
+      const assertEffect = () => {
+        if (typeof p.effect !== 'string' || !Object.prototype.hasOwnProperty.call(DSH_EFFECT_RANGES, p.effect)) {
+          throw this.error('INVALID_REQUEST', `effect 必须是 ${Object.keys(DSH_EFFECT_RANGES).join('/')} 之一`);
+        }
+      };
+      if (isSet) {
+        assertEffect();
+        if (p.value === null) {
+          // value:null 等价于删掉这一项，省一次命令往返。
+          delete next[p.effect];
+        } else {
+          const [min, max] = DSH_EFFECT_RANGES[p.effect];
+          if (typeof p.value !== 'number' || !Number.isFinite(p.value) || p.value < min || p.value > max) {
+            throw this.error('INVALID_REQUEST', `${p.effect} 的取值范围是 ${min}..${max}`);
+          }
+          next[p.effect] = p.value;
+        }
+      } else if (p.effect === undefined) {
+        // 不给 effect = 清空整叠。
+        for (const key of Object.keys(next)) delete next[key];
+      } else {
+        assertEffect();
+        delete next[p.effect];
+      }
+      const params = { ...(layer.params || {}) };
+      if (Object.keys(next).length) params.dshEffects = next;
+      else delete params.dshEffects;
+      const detail = {
+        effects: {
+          layerId: String(layer.id),
+          stack: next,
+          // 问渲染器要字符串：回执里这条就是画面上真正生效的那条。
+          filter: app.Layers.dsh_effect_filter({ params: { dshEffects: next } }),
+        },
+      };
+      // params 必须是新对象：Update_layer_action 会拿它跟旧值做撤销。
+      return { action: new app.Actions.Update_layer_action(layer.id, { params }), ids: () => [String(layer.id)], detail: () => detail };
+    }
+    if (command.type === 'layer.update_mask') {
+      // 活蒙版的**可编辑**部分：谁当蒙版层、要不要反相、要不要整块摘掉。
+      // 刻意不支持 mode/featherPx：render_object 的活蒙版分支只读 sourceLayerId 与 invert，
+      // 收下它们会让人以为改得动，而画面不变 —— 所以显式拒绝，不做静默接受。
+      if (!keysOnly(p, ['layerId', 'invert', 'sourceLayerId', 'remove'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      const existing = layer.params && layer.params.dshMask ? layer.params.dshMask : null;
+      if (p.invert !== undefined && typeof p.invert !== 'boolean') throw this.error('INVALID_REQUEST', 'invert 必须是布尔值');
+      if (p.remove !== undefined && typeof p.remove !== 'boolean') throw this.error('INVALID_REQUEST', 'remove 必须是布尔值');
+      if (p.remove === true && (p.invert !== undefined || p.sourceLayerId !== undefined)) {
+        throw this.error('INVALID_REQUEST', 'remove 不能和 invert/sourceLayerId 同时给');
+      }
+      if (p.invert === undefined && p.sourceLayerId === undefined && p.remove !== true) {
+        throw this.error('INVALID_REQUEST', '至少要给 invert、sourceLayerId 或 remove');
+      }
+      if (!existing && p.remove !== true && p.sourceLayerId === undefined) {
+        throw this.error('MASK_NOT_FOUND', '这一层没有活蒙版；给 sourceLayerId 建立，或 remove 移除');
+      }
+      let sourceLayerId = existing ? String(existing.sourceLayerId) : null;
+      if (p.sourceLayerId !== undefined) {
+        const source = config.layers.find(item => String(item.id) === p.sourceLayerId);
+        if (!source) throw this.error('LAYER_NOT_FOUND', '蒙版源层不存在');
+        // 成环会让渲染互相递归：沿着蒙版链走一遍，撞到自己就拒绝。
+        const seen = new Set([String(layer.id)]);
+        let cursor = source;
+        while (cursor) {
+          const id = String(cursor.id);
+          if (seen.has(id)) throw this.error('MASK_CYCLE', '这条蒙版链成环（或把图层自己当蒙版），会无限递归');
+          seen.add(id);
+          const next = cursor.params && cursor.params.dshMask ? String(cursor.params.dshMask.sourceLayerId) : null;
+          cursor = next ? config.layers.find(item => String(item.id) === next) : null;
+        }
+        sourceLayerId = String(source.id);
+      }
+      const params = { ...(layer.params || {}) };
+      if (p.remove === true) {
+        delete params.dshMask;
+      } else {
+        // mode 只影响"烤进像素"那条路，这里保留原值不动，免得悄悄改掉。
+        params.dshMask = {
+          mode: existing?.mode ?? 'alpha',
+          sourceLayerId,
+          invert: p.invert === undefined ? (existing ? existing.invert === true : false) : p.invert,
+        };
+      }
+      const detail = {
+        mask: params.dshMask
+          ? { layerId: String(layer.id), sourceLayerId: params.dshMask.sourceLayerId, invert: params.dshMask.invert === true }
+          : { layerId: String(layer.id), removed: true },
+      };
+      return { action: new app.Actions.Update_layer_action(layer.id, { params }), ids: () => [String(layer.id)], detail: () => detail };
     }
     if (command.type === 'layer.remove') {
       if (!keysOnly(p, ['layerId']) || typeof p.layerId !== 'string' || !config.layers.some(layer => String(layer.id) === p.layerId)) throw this.error('LAYER_NOT_FOUND');

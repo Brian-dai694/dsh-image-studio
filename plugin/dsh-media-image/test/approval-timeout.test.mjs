@@ -99,8 +99,39 @@ test('a denied high-risk approval never reaches the editor', async () => {
   assert.equal(writes, 0);
 });
 
-test('only calls that may wait for a human get the long budget; media calls stay short', () => {
+test('autonomous mode runs a high-risk command directly: no approval record, no wait, and the result is flagged', async () => {
+  let writes = 0;
+  let approvalsAsked = 0;
   const tools = new Map();
+  const bridge = {
+    getPage: () => ({ pageId: 'page1' }),
+    readState: async () => state,
+    applyCommand: async () => { writes += 1; return { revision: 1, afterDigest: 'd1' }; },
+  };
+  const bindings = createSessionBindings({ resolvePage: () => ({ pageId: 'page1' }) });
+  await bindings.authorize(exec(), { ...args, readState: async () => state, approve: async () => ({ allowed: true }) });
+  const ctx = { tools: { register: definition => tools.set(definition.name, definition) }, approval: { request: async () => { approvalsAsked += 1; return 'allowed-once'; } } };
+  registerMediaTools(ctx, { bridge, approvals: createApprovalStore(), bindings });
+  const apply = tools.get('media_image_apply_command');
+
+  // assist：仍然返回 pending + 等人工（这是没变的那一半）。
+  const pending = await apply.execute({ editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'assist-1', expectedRevision: 0, operation: 'layer.remove', params: { layerId: 'l1' } }, exec());
+  assert.equal(pending.status, 'pending');
+  assert.equal(writes, 0);
+
+  // autonomous：直接执行，不签发凭据、不等人，且在回执里如实标出来。
+  const autonomous = await apply.execute(
+    { editorKind: 'image', projectId: 'p1', instanceId: 'i1', commandId: 'auto-1', expectedRevision: 0, operation: 'layer.remove', params: { layerId: 'l1' }, mode: 'autonomous' },
+    { ...exec(), autonomous: true });
+  assert.equal(autonomous.status, 'applied', JSON.stringify(autonomous));
+  assert.equal(autonomous.approvalId, undefined, '不得凭空签发一个审批凭据');
+  assert.equal(autonomous.autonomous, true);
+  assert.match(autonomous.note, /autonomous/);
+  assert.equal(writes, 1);
+  assert.equal(approvalsAsked, 0, 'autonomous 不得发起人工审批');
+});
+
+test('only calls that may wait for a human get the long budget; media calls stay short', () => {  const tools = new Map();
   const bridge = { getPage: () => ({ pageId: 'page1' }), readState: async () => state, applyCommand: async () => ({ revision: 1 }), startExport: async () => ({ exportId: 'e1' }), getExportStatus: async () => ({ status: 'ready', exportId: 'e1' }) };
   registerMediaTools({ tools: { register: definition => tools.set(definition.name, definition) }, approval: { request: async () => 'rejected' } }, { bridge: bridge, approvals: createApprovalStore() });
   for (const name of ['media_image_read_state', 'media_image_apply_command']) {

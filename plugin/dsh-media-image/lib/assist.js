@@ -8,7 +8,7 @@
 
 import { ALLOWED_COMMANDS } from './bridge.js';
 
-export const OP_TYPES = ['generate', 'batch', 'import', 'insert', 'status', 'fontList', 'removeBackground', 'command'];
+export const OP_TYPES = ['generate', 'batch', 'import', 'insert', 'status', 'fontList', 'removeBackground', 'command', 'plan', 'photoshopAction'];
 
 /** 模型可以提议的编辑命令 —— 直接取编辑器白名单，避免两处各写一份而漂移。 */
 export const PROPRIETABLE_COMMANDS = [...ALLOWED_COMMANDS.image].sort();
@@ -27,6 +27,7 @@ ops 只允许这几种（不认识的不要编）：
 - {"type":"status"}                                                     读一次编辑器状态（版本/图层数/选区）
 - {"type":"fontList"}                                                   列出已登记字体
 - {"type":"removeBackground","assetRef":"asset:<48位十六进制>"}      对指定上传素材调用配置的背景移除服务
+- {"type":"photoshopAction","action":"<固定action>","arguments":{…}} 仅当上下文说 Photoshop COM 已启用、且 action 在给出的清单内时才可用；它改的是 Photoshop 独立活动文档，不是这张画布，也不共享撤销栈。不许编 action，不许给 JSX/脚本；每轮最多 1 个，且不能和上面任何 miniPaint op 混在同一轮。
 - 用户说“局部重绘：...”时，需要选择图片层并有真实选区，或选择带 mask.sourceLayerId 绑定的蒙版层；只有 GET /media-image/inpaint 声明 inpaint=true 的 provider 才可提交，其他情况应说清缺输入/后端，不提议不支持的操作。
 - {"type":"command","command":{"type":"<命令名>","payload":{…}}}        提议一次画布编辑（用户确认后才执行）
 - {"type":"plan","steps":[{"operation":"<命令名>","params":{…}}]}        提议一串编辑（1..12 步；用户一次确认后按顺序执行，任一步失败整体回滚）。高危命令 layer.remove / canvas.crop / layer.add_image 不能进 plan。
@@ -42,6 +43,14 @@ command 命令名必须属于编辑器白名单。参数契约：
 - layer.set_visibility: {layerId,visible:boolean}。
 - layer.set_transform: {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?}; 至少一项，scale 为正数。
 - layer.set_frame: {layerId,x?,y?,width?,height?,fit?,anchor?}; width/height 成对，至少给位置或尺寸。
+- layer.align: {layerId,h?:"left"|"center"|"right",v?:"top"|"middle"|"bottom",margin?:0..4096,to?:"canvas"}；h/v 至少给一个。坐标由编辑器算，套版时用它把元素对到槽位，不要靠反复 set_transform 试坐标。
+- layer.duplicate: {layerId,offsetX?,offsetY?,name?}；复制一层（活蒙版配置会跟着复制），做多槽位变体时用。
+- layer.rasterize: {layerId,name?}；文字/矢量层转像素并替换原层，旋转与活蒙版都烤进像素。替换/导出前用，之后不再依赖字体。
+- layer.merge_down: {layerId,name?}；与该层下方那一层合并，层数减一，画面上看不出变化。最下层没有可合并对象时会回 NO_LAYER_BELOW。
+- layer.paint_stroke: {layerId,points:[{x,y}|[x,y]] 2..200,color?:"#rrggbb",size? 1..200,opacity? 0..1}；把点连成一条线画进该层像素（图层本地坐标），一笔一步撤销。
+- layer.set_effect: {layerId,effect:"blur"|"brightness"|"contrast"|"saturate"|"grayscale"|"sepia"|"invert"|"hueRotate"|"opacity",value:number|null}；非破坏调色（改 params 不改像素，撤销一步回原观感）。value:null 等于删掉这一项。取值范围：blur 0..50、brightness/contrast/saturate 0..3、grayscale/sepia/invert/opacity 0..1、hueRotate -180..180。
+- layer.remove_effect: {layerId,effect?}；删一项，省略 effect 就清空整叠。
+- layer.update_mask: {layerId,invert?,sourceLayerId?,remove?}；只改**活蒙版**（add_image 时用 maskRef:"layer:<id>" 建的那种）：反相、换蒙版源层、或 remove:true 整块摘掉。至少给一项，remove 不能和别人同时给。mode/featherPx **不接受**——活蒙版渲染不读它们；要羽化的成品请重新走 layer.add_image + maskRef + featherPx 烤一次。成环（A 拿 B 当蒙版、B 又拿 A）会被 MASK_CYCLE 拒绝。
 - layer.reorder: {layerId,toIndex:非负整数}。只按图层顺序索引，不得虚构目标层。
 - layer.remove: {layerId}，高影响，说明会删除哪个真实图层。
 - layer.feather: {layerId,radiusPx:1..64}，仅羽化已有透明边缘。
@@ -127,25 +136,35 @@ export async function callModel(ctx, { system, user, maxTokens = 1200, signal, o
   }
 }
 
-/** op 的形状校验：命令类必须命中编辑器白名单且带 payload，其它类型只认已知字段。 */
-function validOp(op) {
+/** op 的形状校验：Photoshop 仅接受 runtime capability 允许的固定 action，不接受 script/JSX。 */
+function validOp(op, photoshop = { enabled: false, actions: [] }) {
+  if (!op || typeof op !== 'object' || Array.isArray(op) || typeof op.type !== 'string') return false;
   if (op.type === 'command') {
     const command = op.command;
-    if (!command || typeof command.type !== 'string') return false;
-    if (!ALLOWED_COMMANDS.image.has(command.type)) return false;
-    if (!command.payload || typeof command.payload !== 'object' || Array.isArray(command.payload)) return false;
-    return true;
+    return !!command && typeof command.type === 'string' && ALLOWED_COMMANDS.image.has(command.type)
+      && !!command.payload && typeof command.payload === 'object' && !Array.isArray(command.payload);
+  }
+  if (op.type === 'photoshopAction') {
+    return photoshop?.enabled === true && Array.isArray(photoshop.actions) && photoshop.actions.includes(op.action)
+      && Object.keys(op).every(key => ['type', 'action', 'arguments'].includes(key))
+      && !!op.arguments && typeof op.arguments === 'object' && !Array.isArray(op.arguments);
+  }
+  if (op.type === 'plan') {
+    if (!Array.isArray(op.steps) || op.steps.length < 1 || op.steps.length > 12) return false;
+    return op.steps.every(step => step && typeof step === 'object' && !Array.isArray(step)
+      && typeof step.operation === 'string' && ALLOWED_COMMANDS.image.has(step.operation)
+      && (step.params === undefined || (typeof step.params === 'object' && step.params !== null && !Array.isArray(step.params))));
   }
   if (op.type === 'generate') return typeof op.prompt === 'string' && op.prompt.trim().length > 0;
   if (op.type === 'batch') return Array.isArray(op.prompts) && op.prompts.length > 0;
   if (op.type === 'import') return typeof op.url === 'string' && /^https?:\/\//i.test(op.url);
   if (op.type === 'insert') return op.assetRef === undefined || (typeof op.assetRef === 'string' && /^asset:[a-f0-9]{48}$/.test(op.assetRef));
   if (op.type === 'removeBackground') return typeof op.assetRef === 'string' && /^asset:[a-f0-9]{48}$/.test(op.assetRef);
-  return true;
+  return op.type === 'status' || op.type === 'fontList';
 }
 
 /** 从模型文本里取出 JSON；取不到就把整段当 reply（不算失败）。 */
-export function parsePlan(text) {
+export function parsePlan(text, { photoshop = { enabled: false, actions: [] } } = {}) {
   const raw = String(text || '').trim();
   if (!raw) return { reply: '我没有听到内容，再说一次？', ops: [] };
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(raw);
@@ -155,12 +174,16 @@ export function parsePlan(text) {
   if (start !== -1 && end > start) {
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
-      const reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : '处理好了。';
-      const accepted = Array.isArray(parsed.ops) ? parsed.ops.filter(op => op && OP_TYPES.includes(op.type) && validOp(op)) : [];
-      // 每个画布写入都要人逐项确认，所以链路有上限：最多 3 个 command，其余连同不认识的都计入 droppedOps。
+      const reply = typeof parsed.reply === 'string' && parsed.reply.trim() ? parsed.reply.trim() : '已整理操作建议。';
+      const offered = Array.isArray(parsed.ops) ? parsed.ops : [];
+      const accepted = offered.filter(op => OP_TYPES.includes(op?.type) && validOp(op, photoshop));
+      const hasPhotoshop = accepted.some(op => op.type === 'photoshopAction');
+      const mixedApps = hasPhotoshop && accepted.some(op => op.type !== 'photoshopAction');
+      // Photoshop and miniPaint have separate documents and histories; never imply cross-app atomicity.
+      const selected = mixedApps ? [] : hasPhotoshop ? accepted.filter(op => op.type === 'photoshopAction').slice(0, 1) : accepted;
       let commands = 0;
       const ops = [];
-      for (const op of accepted) {
+      for (const op of selected) {
         if (op.type === 'command') {
           if (commands >= 3) continue;
           commands += 1;
@@ -168,10 +191,9 @@ export function parsePlan(text) {
         if (ops.length >= 8) break;
         ops.push(op);
       }
-      const droppedOps = (Array.isArray(parsed.ops) ? parsed.ops.length : 0) - ops.length;
-      return { reply, ops, droppedOps, commandCount: commands };
+      return { reply, ops, droppedOps: offered.length - ops.length, commandCount: commands };
     } catch {
-      // 落到下面的纯文本分支
+      // 落到下面的纯文本分支。
     }
   }
   return { reply: raw.slice(0, 1200), ops: [] };
@@ -181,7 +203,7 @@ export function parsePlan(text) {
  * 一轮对话：给定用户消息 + 可选上下文（画布摘要、最近对话），拿到 reply 与 ops。
  * 不落任何状态 —— 执行由页面负责，这样"提议"和"已执行"不会混为一谈。
  */
-export async function chatTurn(ctx, { message, history = [], context = null, timeoutMs = 90_000 } = {}) {
+export async function chatTurn(ctx, { message, history = [], context = null, photoshop = { enabled: false, actions: [] }, timeoutMs = 90_000 } = {}) {
   const text = String(message || '').trim();
   if (!text) throw new AssistError('ASSIST_INVALID', '消息为空');
   if (text.length > 4000) throw new AssistError('ASSIST_INVALID', '消息过长（上限 4000 字符）');
@@ -200,13 +222,16 @@ export async function chatTurn(ctx, { message, history = [], context = null, tim
   const historyLine = history.length
     ? `最近对话：${history.slice(-6).map(row => `${row.role === 'user' ? '用户' : '助手'}：${row.text}`).join(' / ')}`
     : '';
-  const user = `${contextLine}${historyLine ? `\n${historyLine}` : ''}\n用户说：${text}`;
+  const photoshopLine = photoshop?.enabled === true && Array.isArray(photoshop.actions) && photoshop.actions.length
+    ? `Photoshop COM 已启用（Windows）；可用固定 action：${photoshop.actions.join('、')}。它操作 Photoshop 独立活动文档。写操作由页面预览目标文档并确认，再经 DSH 原生审批。每轮只提议一个 Photoshop action，不与 miniPaint 命令混成事务。`
+    : 'Photoshop COM 未启用；不要提议 Photoshop action。';
+  const user = `${photoshopLine}\n${contextLine}${historyLine ? `\n${historyLine}` : ''}\n用户说：${text}`;
 
   const { text: answer, model } = await callModel(ctx, {
     system: `${SYSTEM}\n${JSON_HINT}`,
     user,
     signal: AbortSignal.timeout(timeoutMs),
   });
-  const plan = parsePlan(answer);
+  const plan = parsePlan(answer, { photoshop });
   return { reply: plan.reply, ops: plan.ops, droppedOps: plan.droppedOps || 0, engine: model, model: model, provider: info.provider };
 }

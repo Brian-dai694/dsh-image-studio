@@ -5,6 +5,30 @@ DSH Host plugin: shared image editing tools plus the packaged miniPaint page.
 独立包：只注册图片入口（`dsh-media-image`），路由前缀 `/media-image`，
 工具表只含 `media_image_*`。与另一个编辑器包互不依赖，可单独安装。
 
+## 可选 Photoshop COM / 任意 JSX（高风险）
+
+在本机 Windows desktop profile 中显式配置：
+
+```yaml
+photoshop:
+  enabled: true
+  timeoutMs: 60000
+  # 可选：Photoshop.Application / Photoshop.Application.2026 等
+  # progId: Photoshop.Application
+```
+
+开启后才注册 `media_image_photoshop_run_jsx`；默认未启用。每次调用必须传 `confirm:true` 并通过 DSH 原生审批。
+该工具会在**Photoshop 当前活动文档**执行 ExtendScript；JSX 可通过 `File` / `Folder` 读写本机文件，可能部分修改文档。
+它与 miniPaint 是不同编辑器、不同文档与 undo 栈：**不纳入 miniPaint revision，也无自动回滚**。
+
+- JSX 限 128,000 字符，拒绝 `#include`（避免加载审批时不可见的外部脚本）。
+- PowerShell bridge 固定为包内 `scripts/photoshop-bridge.ps1`，`shell:false`，JSX 用 stdin JSON 传递，不写 JSX 临时文件、不拼 shell 命令。
+- 超时 1–300 秒。超时后 Photoshop 结果可能未知；禁止自动重放，先检查文档/文件。
+- 仅 Windows + 已注册 Photoshop COM；**不模拟鼠标/不读屏**。未连接 Photoshop 时返回 bridge 错误。
+- 模型不能 autonomous 调用；`mode=autonomous` 在 gate 和执行层都拒绝。只有用户明确要求、审阅本次 JSX 并逐次批准才执行。
+
+不要在聊天、日志或仓库粘贴 API key、私密文件内容；任意 JSX 是执行权，不是普通图像命令。
+
 ## 原生面板
 
 DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里的原生 Conversation 默认隐藏，页面右下角悬浮助手保留。隐藏的只是对话子组件，不会移除侧栏插件入口、画布或本人授权入口。若要恢复红框对话，可设置 `globalThis.__DSH_MEDIA_IMAGE_CONVERSATION__ = true` 或 `localStorage.setItem('dsh-media-image-conversation', 'visible')` 并刷新；设为 `false` / `'hidden'` 可再次隐藏。旧开关 `__DSH_MEDIA_IMAGE_PANEL__` 不再控制插件侧栏，避免把整个插件误藏。
@@ -41,7 +65,7 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 
 `POST /media-image/template/apply` 一次上传完成「解析 → 合成 → 规划」，请求头为 `x-psd-product-asset`（商品素材）、`x-psd-slot`（可选商品槽）、`x-psd-background`（降级背景色）、`x-psd-texts`（可选文案 JSON）。
 
-已知边界：混合模式目前统一按 source-over 合成，特殊混合模式（如 multiply）会有色差；图层蒙版、剪贴蒙版、调整图层没有还原。
+已知边界：未实现的混合模式、剪贴组、调整图层和图层效果都在 `approximated` / `skipped` 明确登记；不会声称逐像素等同 Photoshop。
 
 ## 批量套版
 

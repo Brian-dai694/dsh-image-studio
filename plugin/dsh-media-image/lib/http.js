@@ -540,7 +540,7 @@ async function handlePsdSlots(req, res, { token, assets }) {
   return true;
 }
 
-async function handleAssist(req, res, { assist, ctx, token, prefix }) {
+async function handleAssist(req, res, { assist, ctx, token, prefix, photoshop = null }) {
   const rejection = authorizeSameOrigin(req, token, req.method === 'GET' ? ['GET'] : ['POST']);
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
   if (!assist) {
@@ -549,13 +549,13 @@ async function handleAssist(req, res, { assist, ctx, token, prefix }) {
   }
   if (req.method === 'GET') {
     // UI 用它决定标题显示模型名还是"本地指令"
-    send(res, 200, { ok: true, ...assist.status() });
+    send(res, 200, { ok: true, ...assist.status(), photoshop: photoshop?.describe?.() || { enabled: false, actions: [] } });
     return true;
   }
   const body = await readJsonBody(req).catch(() => null);
   if (!body || typeof body !== 'object') { send(res, 400, { code: 'ASSIST_INVALID', message: 'JSON body is required.' }); return true; }
   try {
-    const result = await assist.chat({ message: body.message, history: body.history, context: body.context });
+    const result = await assist.chat({ message: body.message, history: body.history, context: body.context, photoshop: photoshop?.describe?.() || { enabled: false, actions: [] } });
     send(res, 200, { ok: true, ...result });
   } catch (error) {
     const code = error?.code || 'ASSIST_FAILED';
@@ -585,7 +585,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, ctx = null, remoteFetch = undefined }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, photoshop = null, ctx = null, remoteFetch = undefined }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const assetsPrefix = `${prefix}/assets/`;
@@ -625,8 +625,22 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     if (pathname === `${prefix}/psd/slots`) {
       return handlePsdSlots(req, res, { token, assets });
     }
+    if (pathname === `${prefix}/photoshop/action` && req.method === 'POST') {
+      const rejection = authorizeSameOrigin(req, token, ['POST']);
+      if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+      if (!photoshop?.describe?.().enabled) { send(res, 501, { code: 'PHOTOSHOP_UNAVAILABLE', message: 'Photoshop COM 未在此部署启用。' }); return true; }
+      try {
+        const body = await readJsonBody(req, 256 * 1024);
+        const result = photoshop.runAction(body);
+        send(res, 200, { ok: true, result });
+      } catch (error) {
+        send(res, error.code === 'PAYLOAD_TOO_LARGE' ? 413 : error.code === 'PHOTOSHOP_ACTION_INVALID' || error.code === 'PHOTOSHOP_ARGUMENTS_INVALID' || error.code === 'PHOTOSHOP_PATH_INVALID' ? 400 : 500,
+          { ok: false, code: error.code || 'PHOTOSHOP_FAILED', message: error.message, outcomeUnknown: error.outcomeUnknown === true });
+      }
+      return true;
+    }
     if (pathname === `${prefix}/assist`) {
-      return handleAssist(req, res, { assist, ctx, token, prefix });
+      return handleAssist(req, res, { assist, ctx, token, prefix, photoshop });
     }
     if (pathname === `${prefix}/background-removal` || pathname.startsWith(`${prefix}/background-removal/`)) {
       return handleBackgroundRemoval(req, res, { backgroundRemoval, token, prefix, pathname });

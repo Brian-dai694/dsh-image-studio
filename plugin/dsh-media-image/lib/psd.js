@@ -152,8 +152,102 @@ function normalizePsdText(value) {
   return String(value).replace(/\u0000+$/g, '').replace(/\r\n?/g, '\n').replace(/\n+$/g, '');
 }
 
+/**
+ * 解析 TySh 里的 EngineData（Photoshop 文本引擎块）：
+ * 真实 PSD 的 TySh 描述符解析经常失败，但**引擎块本身是明文 ASCII 键值**，
+ * 形如 `/FontSize 50.0`、`/Justification 0`、`/Font 0`、`/FillColor << /Values [...]`。
+ * 这里按这些标记取值。一个文字图层可能有多段 run，取值口径是**第一段**，
+ * 并且在结果里用 sampled 标出来 —— 不假装它代表整层的每一段。
+ * @returns {{fontSize:number|null, justification:string|null, fontIndex:number|null, fontName:string|null, fillColor:string|null, leading:number|null, sampled:string|null}}
+ */
+function scanEngineText(data) {
+  const empty = { fontSize: null, justification: null, fontIndex: null, fontName: null, fillColor: null, leading: null, sampled: null };
+  // 全量 latin1 化：引擎块是逐字节 ASCII，用字符串正则比在 Buffer 上爬更可控。
+  const text = data.toString('latin1');
+  if (text.indexOf('/FontSize') === -1 && text.indexOf('/Justification') === -1) return empty;
+
+  const numberAfter = key => {
+    const match = new RegExp(`\\/${key}\\s+(-?[\\d.]+)`).exec(text);
+    if (!match) return null;
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? value : null;
+  };
+
+  const fontSize = numberAfter('FontSize');
+  const leadingRaw = numberAfter('Leading');
+  // /AutoLeading 是倍数（如 1.2）；/Leading 才是绝对行距。
+  const autoLeading = numberAfter('AutoLeading');
+  const leading = leadingRaw !== null ? Math.round(leadingRaw * 100) / 100
+    : (autoLeading !== null && fontSize !== null ? Math.round(autoLeading * fontSize * 100) / 100 : null);
+
+  const justifyRaw = numberAfter('Justification');
+  // Photoshop 引擎的枚举：0=左 1=右 2=居中 3=两端对齐。
+  const justification = justifyRaw === null || justifyRaw < 0 || justifyRaw > 3
+    ? null : ['left', 'right', 'center', 'justify'][justifyRaw];
+
+  const fontIndex = numberAfter('Font');
+  // /FontSet 段里按顺序列出可用字体；/Font 是其中的索引。
+  // 名字在括号里，且常见 UTF-16BE（前缀 FE FF，latin1 下表现为 "þÿ"）。
+  let fontName = null;
+  const fontSetAt = data.indexOf(Buffer.from('/FontSet', 'ascii'));
+  if (fontSetAt !== -1) {
+    const region = data.subarray(fontSetAt, Math.min(data.length, fontSetAt + 16_384));
+    const names = [];
+    for (let at = region.indexOf(Buffer.from('/Name', 'ascii')); at !== -1; at = region.indexOf(Buffer.from('/Name', 'ascii'), at + 5)) {
+      const paren = region.indexOf(0x28, at); // '('
+      if (paren === -1 || paren > at + 32) continue;
+      const close = region.indexOf(0x29, paren); // ')'
+      if (close === -1 || close - paren > 512) continue;
+      const body = region.subarray(paren + 1, close);
+      if (body.length >= 2 && body[0] === 0xfe && body[1] === 0xff) {
+        const units = Math.floor((body.length - 2) / 2);
+        names.push(readUtf16BE(body, 2, units));
+      } else {
+        names.push(body.toString('latin1'));
+      }
+    }
+    const usable = names.map(value => String(value).replace(/\u0000/g, '').trim()).filter(Boolean);
+    if (usable.length) fontName = usable[fontIndex !== null && fontIndex >= 0 && fontIndex < usable.length ? fontIndex : 0];
+  }
+
+  // FillColor 后面跟一段 << ... /Values [ v v v ]；Type 1 是 RGB。
+  let fillColor = null;
+  const colorAt = text.indexOf('/FillColor');
+  if (colorAt !== -1) {
+    const window = text.slice(colorAt, colorAt + 320);
+    const valuesMatch = /\/Values\s*\[([^\]]*)\]/.exec(window);
+    if (valuesMatch) {
+      const values = valuesMatch[1].trim().split(/\s+/).map(Number).filter(Number.isFinite);
+      // 有的导出会在前面多带一个标志位（1）：按长度判断，取最后三个当 RGB。
+      const rgb = values.length >= 4 ? values.slice(-3) : values.length === 3 ? values : null;
+      if (rgb) {
+        const channel = value => {
+          // 引擎里 RGB 是 0..1 浮点；偶见 0..255 整数，按量级判断。
+          const scaled = value > 1.5 ? value / 255 : value;
+          return Math.max(0, Math.min(255, Math.round(scaled * 255)));
+        };
+        fillColor = `#${rgb.map(value => channel(value).toString(16).padStart(2, '0')).join('')}`;
+      }
+    }
+  }
+
+  const sampled = [fontSize, justification, fontName, fillColor, leading].some(value => value !== null) ? 'first-run' : null;
+  return { fontSize, justification, fontIndex, fontName, fillColor, leading, sampled };
+}
+
 /** 解析 TySh（文字图层）：严格解析优先，失败按标记兜底；两者都拿不到就如实标记未解析。 */
 function parseTySh(data) {
+  const engine = scanEngineText(data);
+  const mergeEngine = base => ({
+    ...base,
+    // 描述符拿到的值更权威；缺的用引擎块补。两者都没有就是 null（不猜）。
+    fontSize: base.fontSize ?? engine.fontSize,
+    fontName: base.fontName ?? engine.fontName,
+    justification: base.justification ?? engine.justification,
+    fillColor: base.fillColor ?? engine.fillColor,
+    leading: base.leading ?? engine.leading,
+    textSampled: engine.sampled,
+  });
   try {
     let o = 0;
     const version = data.readUInt16BE(o); o += 2;
@@ -168,20 +262,20 @@ function parseTySh(data) {
     if (typeof text === 'string' && text.length) {
       const size = fields['Sz  '];
       const font = fields['Font']?.value;
-      return {
+      return mergeEngine({
         text: normalizePsdText(text),
         fontSize: size && size.type === 'unit' ? Math.round(size.value * 100) / 100 : null,
         fontName: typeof font === 'string' ? font : null,
         orientation: fields['Ornt']?.value || null,
         antiAlias: fields['AntA']?.value || null,
         source: 'descriptor',
-      };
+      });
     }
   } catch {
     // 落到标记兜底
   }
   const scanned = scanTyShFields(data);
-  if (typeof scanned.text === 'string') return { text: normalizePsdText(scanned.text), fontSize: scanned.fontSize, source: 'scan' };
+  if (typeof scanned.text === 'string') return mergeEngine({ text: normalizePsdText(scanned.text), fontSize: scanned.fontSize, source: 'scan-engine' });
   // 有文字块但内容为空：这是编辑器导出/文字被栅格化的常见情况，如实标记。
   return { text: null, unparsed: true };
 }
@@ -274,10 +368,66 @@ export function parsePsdLayers(buffer) {
       visible,
       blendMode: BLEND[blendKey] || 'source-over',
       kind,
-      ...(textBlock ? { text: textBlock.text, fontSize: textBlock.fontSize, fontName: textBlock.fontName, textUnparsed: !!textBlock.unparsed } : {}),
+      // lsct 的 sectionType：0=普通 1=展开的组 2=收起的组 3=组分隔符。
+      // 单独保留它，才能在不猜的前提下判断"谁属于哪个组"。
+      ...(sectionType === null ? {} : { sectionType }),
+      ...(textBlock ? {
+        text: textBlock.text,
+        fontSize: textBlock.fontSize,
+        fontName: textBlock.fontName,
+        justification: textBlock.justification ?? null,
+        fillColor: textBlock.fillColor ?? null,
+        leading: textBlock.leading ?? null,
+        textSource: textBlock.source ?? null,
+        // 一个文字层可能有多段 run；这些值是第一段的，如实标出来。
+        textSampled: textBlock.textSampled ?? null,
+        textUnparsed: !!textBlock.unparsed,
+      } : {}),
     });
   }
-  return { header, layers };
+  return { header, layers, ...buildGroups(layers) };
+}
+
+/**
+ * 从 lsct 的 sectionType 还原组结构。
+ * PSD 的图层记录按**从下往上**排：一个组在文件顺序里是「分隔符(type 3) → 组内图层 → 组结束标记(type 1/2)」。
+ * 我们只在两种标记能一一配对时才确认这个组；配不上就登记 warning，**不硬凑一棵树**——
+ * 错的分组比没有分组更糟，因为套版会按组去批量替换。
+ */
+export function buildGroups(layers) {  const groups = [];
+  const warnings = [];
+  let open = null;
+  for (const layer of layers) {
+    if (layer.sectionType === 3) {
+      if (open) {
+        warnings.push({ code: 'PSD_GROUP_UNBALANCED', at: layer.index, reason: '上一组的结束标记之前又出现分隔符，分组关系无法确定', pendingLayerIndexes: open.children.slice() });
+      }
+      open = { dividerIndex: layer.index, children: [] };
+      continue;
+    }
+    if (layer.sectionType === 1 || layer.sectionType === 2) {
+      if (!open) {
+        warnings.push({ code: 'PSD_GROUP_ORPHAN', at: layer.index, reason: '组结束标记没有对应的分隔符' });
+        continue;
+      }
+      groups.push({ id: `group-${groups.length + 1}`, name: layer.name, index: layer.index, dividerIndex: open.dividerIndex, layerIndexes: open.children.slice() });
+      open = null;
+      continue;
+    }
+    if (open) open.children.push(layer.index);
+  }
+  if (open) {
+    warnings.push({ code: 'PSD_GROUP_UNCLOSED', at: open.dividerIndex, reason: '分隔符之后没有组结束标记（结构异常或文件被截断），这些图层不归入任何组', pendingLayerIndexes: open.children.slice() });
+  }
+  // 把已确认的组写回图层，供槽位直接引用。
+  const byIndex = new Map(layers.map(layer => [layer.index, layer]));
+  for (const group of groups) {
+    for (const index of group.layerIndexes) {
+      const layer = byIndex.get(index);
+      if (layer) layer.group = { id: group.id, name: group.name };
+    }
+  }
+  return { groups, groupWarnings: warnings };
 }
 
 /** 诊断用：列出每个文字图层 TySh 描述符里实际存在的字段（排查"文字为空"用）。 */
@@ -346,7 +496,7 @@ export function debugTextLayers(buffer) {
  * 槽位只保留可见、有面积的图层；文字图层带原文与字号，图片图层就是待换图的槽。
  */
 export function psdToTemplate(buffer, { name = 'psd-template' } = {}) {
-  const { header, layers } = parsePsdLayers(buffer);
+  const { header, layers, groups = [], groupWarnings = [] } = parsePsdLayers(buffer);
   const slots = layers
     .filter(layer => layer.kind !== 'group' && layer.rect.width > 0 && layer.rect.height > 0)
     .map(layer => ({
@@ -357,7 +507,18 @@ export function psdToTemplate(buffer, { name = 'psd-template' } = {}) {
       visible: layer.visible,
       opacity: layer.opacity,
       blendMode: layer.blendMode,
-      ...(layer.kind === 'text' ? { text: layer.text ?? '', fontSize: layer.fontSize ?? null, fontName: layer.fontName ?? null } : {}),
+      // 所属组：只在 lsct 的两种标记能一一配对时才有值，配不上就是没有（不猜）。
+      ...(layer.group ? { group: layer.group } : {}),
+      ...(layer.kind === 'text' ? {
+        text: layer.text ?? '',
+        fontSize: layer.fontSize ?? null,
+        fontName: layer.fontName ?? null,
+        justification: layer.justification ?? null,
+        fillColor: layer.fillColor ?? null,
+        leading: layer.leading ?? null,
+        // 这些排版属性来自引擎块的**第一段 run**；多段文字层的其余段可能不同。
+        ...(layer.textSampled ? { textSampled: layer.textSampled } : {}),
+      } : {}),
     }));
   return {
     name,
@@ -365,11 +526,15 @@ export function psdToTemplate(buffer, { name = 'psd-template' } = {}) {
     colorMode: header.colorModeName,
     slotCount: slots.length,
     slots,
+    // 组结构：只在能配对时给出；配不上的情况在 groupWarnings 里如实登记。
+    groups,
+    groupWarnings,
     // 分层统计，便于上层判断模板质量（例如"这个模板没有文字槽"）。
     summary: {
       text: slots.filter(slot => slot.type === 'text').length,
       image: slots.filter(slot => slot.type === 'image').length,
       hidden: slots.filter(slot => !slot.visible).length,
+      groups: groups.length,
     },
   };
 }

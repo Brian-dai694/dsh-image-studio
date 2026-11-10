@@ -7,6 +7,7 @@ import { validateRecipeSteps, fillRecipeParams, recipeParamsOf } from './recipes
 import { reviewMeasurements, summarizeMeasurements } from './analyze.js';
 import {
   HIGH_RISK_OPERATIONS, digestOf, requestHumanApproval, createSessionBindings, trustedSessionId, APPROVAL_WAIT_MS,
+  AUTONOMOUS_CAPABILITIES, NEVER_AUTONOMOUS,
 } from './gate.js';
 
 // Host budget for a call that may wait for a human decision. It must sit above the
@@ -39,6 +40,8 @@ const RESULT_SCHEMA = {
     providers: { type: 'array', items: { type: 'object', additionalProperties: true } },
     changedObjectIds: { type: 'array', items: { type: 'string' } },
     objectKind: { type: 'string', enum: ['layer', 'clip', 'overlay', 'track'] },
+    // 编辑器算出来的结构化结果（当前用于 layer.align 的落点），供调用方核对而无需再读一次状态。
+    detail: { type: 'object', additionalProperties: true },
     // 本次调用实际使用的授权（binding 是 Host 侧事实，模型只能读不能改）。
     grant: {
       type: 'object',
@@ -103,7 +106,7 @@ const READ_PARAMS = {
 };
 
 const OPERATION_CONTRACT = {
-  image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic},fontUrl?} (fontUrl must be /media-image/fonts/<48-char id> from POST /media-image/fonts, and needs style.family; the editor fetches the bytes with its token and registers a FontFace); layer.update_text {layerId,text,fontUrl?}; layer.add_image {sourceRef,x?,y?,width?,height?,fit?:"stretch"|"contain"|"cover",name?,maskRef?,maskMode?:"luminance"|"alpha",maskInvert?,featherPx?} (approval; keeps alpha, width/height as a pair or omitted for source size). sourceRef supports layer:<layerId> (copy an existing layer), uploaded asset:<48-char-id>, or data:image/(png|jpeg|webp);base64,... up to 256 KB decoded; read_state lists only asset metadata. maskRef clips the new layer by a mask and uses the same three forms plus "selection:" (the live marquee of the editor; requires the selection tool to be active, otherwise NO_SELECTION). maskRect {x,y,width,height} clips by an explicit canvas-space rectangle and needs no tool state; maskRef and maskRect are mutually exclusive. maskMode defaults to alpha for layer:<id>/selection: and luminance for assets, maskInvert flips coverage, featherPx 0..64 softens the edge (pixel math in dsh-pixel-ops.applyMask). read_state.selection reports the live marquee bounds (null when absent) so callers can choose between selection: and maskRect. Typical cut-out: insert a generated background with maskRef=layer:<product> so the product area stays transparent. layer.set_frame {layerId,x?,y?,width?,height?,fit?,anchor?:"top-left"|"center"} (pixel frame; one side derives the other from the layer ratio; at least one field); layer.feather {layerId,radiusPx 1..64} (alpha edge only, recomputed from the editor-internal pre-edit snapshot, idempotent); layer.color_match {layerId,method:"reinhard",strength? 0..1,reference?:"canvas"|"below"|{x,y,width,height}} (idempotent from the same snapshot; read_state exposes only colorMatch{applied,strength,fromDigest} and feather{radiusPx,fromDigest}); layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_appearance {layerId,opacity?,blendMode?,name?} (at least one field; opacity 0..100, blendMode is a canvas globalCompositeOperation such as source-over/multiply/screen/overlay, name 1..120 chars; read_state echoes opacity and blendMode); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). read_state layers carry sourceRef/frame/hasAlpha/maskSource plus the derived feather/colorMatch fields. Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
+  image: 'layer.add_text {text,x?,y?,style?:{size,family,fill_color,bold,italic},fontUrl?} (fontUrl must be /media-image/fonts/<48-char id> from POST /media-image/fonts, and needs style.family; the editor fetches the bytes with its token and registers a FontFace); layer.update_text {layerId,text,fontUrl?}; layer.add_image {sourceRef,x?,y?,width?,height?,fit?:"stretch"|"contain"|"cover",name?,maskRef?,maskMode?:"luminance"|"alpha",maskInvert?,featherPx?} (approval; keeps alpha, width/height as a pair or omitted for source size). sourceRef supports layer:<layerId> (copy an existing layer), uploaded asset:<48-char-id>, or data:image/(png|jpeg|webp);base64,... up to 256 KB decoded; read_state lists only asset metadata. maskRef clips the new layer by a mask and uses the same three forms plus "selection:" (the live marquee of the editor; requires the selection tool to be active, otherwise NO_SELECTION). maskRect {x,y,width,height} clips by an explicit canvas-space rectangle and needs no tool state; maskRef and maskRect are mutually exclusive. maskMode defaults to alpha for layer:<id>/selection: and luminance for assets, maskInvert flips coverage, featherPx 0..64 softens the edge (pixel math in dsh-pixel-ops.applyMask). read_state.selection reports the live marquee bounds (null when absent) so callers can choose between selection: and maskRect. Typical cut-out: insert a generated background with maskRef=layer:<product> so the product area stays transparent. layer.set_frame {layerId,x?,y?,width?,height?,fit?,anchor?:"top-left"|"center"} (pixel frame; one side derives the other from the layer ratio; at least one field); layer.align {layerId,h?:"left"|"center"|"right",v?:"top"|"middle"|"bottom",margin? 0..4096,to?:"canvas"} (align the layer frame to the canvas edges or centre with an optional inset; at least one of h/v; the editor computes x/y, so this is how you snap an element to a slot instead of guessing coordinates; the applied x/y come back in the result detail.aligned, and rotated layers are flagged because their real bounding box is larger than the frame); layer.feather {layerId,radiusPx 1..64} (alpha edge only, recomputed from the editor-internal pre-edit snapshot, idempotent); layer.color_match {layerId,method:"reinhard",strength? 0..1,reference?:"canvas"|"below"|{x,y,width,height}} (idempotent from the same snapshot; read_state exposes only colorMatch{applied,strength,fromDigest} and feather{radiusPx,fromDigest}); layer.set_transform {layerId,x?,y?,scaleX?,scaleY?,rotationDeg?} (flat fields, positive scales); layer.set_appearance {layerId,opacity?,blendMode?,name?} (at least one field; opacity 0..100, blendMode is a canvas globalCompositeOperation such as source-over/multiply/screen/overlay, name 1..120 chars; read_state echoes opacity and blendMode); layer.set_visibility {layerId,visible}; layer.reorder {layerId,toIndex}; layer.remove {layerId} (approval); canvas.resize {width,height} changes canvas bounds without scaling layers; canvas.crop {x,y,width,height} (approval), integer pixels, dimensions 1..16384; history.undo {} for global undo, or {targetCommandId,afterDigest} for guarded last-command undo; history.redo {} (empty history returns HISTORY_EMPTY). read_state layers carry sourceRef/frame/hasAlpha/maskSource plus the derived feather/colorMatch fields. Query read_state for ids. Commands require matching editor implementation; unsupported commands are rejected.',
 };
 
 const WRITE_PARAMS = kind => ({
@@ -164,6 +167,8 @@ const renderSummary = (_args, value) => [{
     ...(value.exportId ? [`exportId ${value.exportId}`] : []),
     ...(value.artifactRef ? [`artifactRef ${value.artifactRef}`] : []),
     ...(value.jobId ? [`jobId ${value.jobId}${value.jobStatus ? ` (${value.jobStatus})` : ''}`] : []),
+    // 编辑器算出来的落点等结构化结果：模型只看得到这段文本，所以必须写进正文。
+    ...(value.detail && typeof value.detail === 'object' ? [`detail ${JSON.stringify(value.detail).slice(0, 2000)}`] : []),
     ...(value.error ? [value.error.code] : []),
   ].join(' · '),
 }];
@@ -308,7 +313,7 @@ export function toLosslessJson(value) {
 // 注册本包的全部模型工具（图片 5 个 / 视频 5 个）。
 // 每个 execute 先过 toLosslessJson 再做 schema 快照校验，避免 undefined 导致
 // "non-lossless JSON"；binding 校验与审批在各自 execute 内完成。
-export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null, recipes = null }) {
+export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null, recipes = null, photoshop = null }) {
   const appliedCommands = new Map();
   const verify = async (kind, bridge, args, exec) => {
     const binding = bindings.assert(exec, kind, args);
@@ -435,9 +440,12 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       const projectId = args.projectId ?? state.documentId;
       const paramsDigest = digestOf(args.params ?? null);
       const highRisk = HIGH_RISK_OPERATIONS[kind]?.has(operation) === true;
+      // 本人已授权 autonomous 模式执行全部内置命令（含破坏性/烤平/外部像素类），
+      // 因此自主模式下不再等人工审批；assist 模式保持原样（逐次审批）。
+      const autonomous = exec?.mode === 'autonomous' || exec?.autonomous === true;
       let approvalId;
 
-      if (highRisk) {
+      if (highRisk && !autonomous) {
         const agent = agentKey(exec);
         if (!args.approvalId) {
           const issued = approvals.issue({ agentId: agent, projectId, commandId, operation, paramsDigest, revision: state.revision, stateDigest: state.stateDigest });
@@ -490,7 +498,14 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
           : {}),
         ...(result.history?.canUndo !== undefined ? { canUndo: result.history.canUndo } : {}),
         ...(result.history?.canRedo !== undefined ? { canRedo: result.history.canRedo } : {}),
+        // 编辑器算出来的结果（如 layer.align 落点）如实带回，省一次 read_state，也让"对到哪"可核对。
+        ...(result.commandDetail && typeof result.commandDetail === 'object' ? { detail: result.commandDetail } : {}),
         ...(approvalId ? { approvalId } : {}),
+        // 自主模式执行了平时需要审批的命令：在回执里如实标注，别让人以为它走过人工确认。
+        ...(highRisk && autonomous ? {
+          autonomous: true,
+          note: `${operation} 通常需要人工确认，本次按本人授权在 autonomous 模式下直接执行；它在 miniPaint 里仍是一条可撤销的历史记录（不适用于 Photoshop）。`,
+        } : {}),
         auditRef: `audit-${commandId}`,
       };
       appliedCommands.set(key, { fingerprint, value });
@@ -592,6 +607,115 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     timeoutMs: 10_000,
   }));
 
+  if (photoshop?.describe?.().enabled === true) {
+    const photoshopDescription = photoshop.describe();
+    const photoshopWrites = new Set(photoshopDescription.writeActions || []);
+    const photoshopReads = new Set(photoshopDescription.readActions || ['status']);
+    const executePhotoshopAction = async (action, rawArguments, exec, { approved = false, confirm = false, timeoutMs, progId } = {}) => {
+      const commandId = `photoshop-${exec?.callId || globalThis.crypto.randomUUID()}`;
+      // 只把 action 自己声明的参数转过去；confirm/timeoutMs 走独立通道，
+      // 免得 validate() 把 confirm 当成不支持的参数拒绝掉整次调用。
+      const actionArguments = rawArguments && typeof rawArguments === 'object' && !Array.isArray(rawArguments)
+        ? { ...rawArguments } : {};
+      const { confirm: nestedConfirm, ...rest } = actionArguments;
+      // timeoutMs / progId 是每个 action 都支持的公共字段，但来自工具层而不是 action 参数体。
+      if (timeoutMs !== undefined) rest.timeoutMs = timeoutMs;
+      if (progId !== undefined) rest.progId = progId;
+      try {
+        trustedSessionId(exec);
+        const autonomous = exec?.mode === 'autonomous' || exec?.autonomous === true;
+        const writes = photoshopWrites.has(action);
+        const reads = photoshopReads.has(action);
+        if (!writes && !reads) throw new MediaBridgeError('PHOTOSHOP_ACTION_INVALID', `不支持的 Photoshop action: ${action}`);
+        const confirmed = confirm === true || nestedConfirm === true;
+        // 本人已授权 autonomous 模式执行任何内置 Photoshop action，因此自主模式不再等人工审批，
+        // 但 confirm 仍然要求：它是调用方对"这次会改外部应用"的显式声明，不是安全门。
+        if (writes && !approved && !confirmed) throw new MediaBridgeError('PHOTOSHOP_CONFIRM_REQUIRED', 'Photoshop 写操作必须在参数里显式 confirm:true。');
+        if (exec?.signal?.aborted) throw new MediaBridgeError('APPROVAL_CANCELLED', '请求已取消。');
+        if (writes && !approved && !autonomous) {
+          let currentDocument = null;
+          try { currentDocument = photoshop.runAction({ action: 'status', arguments: {} }).document; } catch { /* still approve with explicitly unknown target doc */ }
+          const activeName = currentDocument?.activeDocument?.name;
+          const summary = JSON.stringify({ action, arguments: rest }).slice(0, 4000);
+          const decision = await requestHumanApproval(ctx, {
+            agent: exec?.agent, toolName: 'media_image_photoshop_action', callId: commandId,
+            reason: `目标编辑器：Adobe Photoshop（独立于 miniPaint）。写操作 ${action} 将作用于 Photoshop 当前活动文档${activeName ? `「${activeName}」` : '（文档信息未知）'}，不会写入或共享 miniPaint 工程/撤销栈。请核对结构化 action 参数：${summary}`,
+            signal: exec?.signal,
+          });
+          if (!decision.allowed) throw new MediaBridgeError(decision.code || 'APPROVAL_DENIED', decision.message || 'Photoshop 操作未获批准。');
+        }
+        const result = photoshop.runAction({ action, arguments: rest, confirm: writes ? true : undefined });
+        return {
+          status: 'applied', commandId, editorKind: 'image',
+          photoshop: result,
+          ...(autonomous && writes ? { autonomous: true } : {}),
+          note: writes
+            ? (autonomous
+              ? `Photoshop ${action} 按本人授权在 autonomous 模式下直接执行；Photoshop 不在 miniPaint 的撤销栈里，回退要在 Photoshop 内手动做。`
+              : 'Photoshop action 完成；操作的是 Photoshop 活动文档及其历史记录，不修改 miniPaint revision。')
+            : 'Photoshop 状态查询完成；没有修改文档。',
+        };
+      } catch (error) {
+        const value = failure('image', commandId, error);
+        if (error?.outcomeUnknown) value.status = 'unknown';
+        return value;
+      }
+    };
+
+    register(defineTool({
+      name: 'media_image_photoshop_action',
+      description: 'Perform a fixed structured action in local Windows Photoshop through COM. Available to the same DSH assistant as miniPaint tools. Write actions need confirm:true; in assist mode they also require per-call DSH human approval, while autonomous mode runs them directly (the result is then flagged autonomous:true). Photoshop has its own active document/history, separate from miniPaint — actions here are NOT undoable through miniPaint history. Arbitrary JSX is not exposed.',
+      parameters: {
+        action: { type: 'string', required: true, enum: photoshopDescription.actions, description: 'Allowlisted Photoshop action.' },
+        arguments: { type: 'object', required: true, additionalProperties: true, description: 'Action-specific structured arguments.' },
+        confirm: { type: 'boolean', description: 'Required true for Photoshop write actions.' },
+        timeoutMs: { type: 'integer', description: '1000..300000 milliseconds.' },
+        progId: { type: 'string', description: 'Optional registered Photoshop COM ProgID.' },
+      },
+      output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+      execute: (args, exec) => executePhotoshopAction(args.action, args.arguments, exec, {
+        confirm: args.confirm === true,
+      }),
+      timeoutMs: APPROVAL_BUDGET_MS,
+    }));
+
+    // 任意 ExtendScript（本人明确要求暴露给 Agent）。
+    // 与固定 action 的区别只有一点：脚本内容由调用方给，不再受 action 枚举约束。
+    // 必须 confirm:true；assist 模式仍逐次人工审批，autonomous 模式按授权直接执行。
+    register(defineTool({
+      name: 'media_image_photoshop_run_jsx',
+      description: 'Run arbitrary Adobe ExtendScript (JSX) in the active Photoshop document through COM. The script is handed to Photoshop\'s own DoJavaScript engine verbatim, so it can do anything Photoshop scripting can do, including reading/writing local files and closing the app. There is no sandbox and no automatic rollback, and it is NOT covered by miniPaint history. Requires confirm:true; assist mode additionally requires per-call DSH human approval, autonomous mode runs it directly and flags the result. If the call times out the outcome is unknown: inspect Photoshop and never blindly replay.',
+      parameters: {
+        jsx: { type: 'string', required: true, description: 'ExtendScript source, 1..65536 bytes. Passed through verbatim; no templating.' },
+        confirm: { type: 'boolean', required: true, description: 'Must be true: this declares you intend to run a script with unrestricted Photoshop capabilities. A false value is rejected with PHOTOSHOP_CONFIRM_REQUIRED.' },
+        timeoutMs: { type: 'integer', description: '1000..300000 milliseconds.' },
+        progId: { type: 'string', description: 'Optional registered Photoshop COM ProgID.' },
+      },
+      output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+      execute: (args, exec) => executePhotoshopAction('run_jsx', { jsx: args.jsx }, exec, {
+        confirm: args.confirm === true,
+        timeoutMs: args.timeoutMs,
+        progId: args.progId,
+      }),
+      timeoutMs: APPROVAL_BUDGET_MS,
+    }));
+
+    // Shared assistant can route to Photoshop, but the model still emits only a fixed action enum + args.
+    // UI shows an action-level review card and calls the same approved tool path.
+    register(defineTool({
+      name: 'media_image_assistant_photoshop_action',
+      description: 'Internal shared-assistant Photoshop handoff. It runs one fixed structured action under the same policy as direct Photoshop writes (assist: human approval; autonomous: direct, flagged autonomous:true). Photoshop remains a separate document/history from miniPaint. Never accepts JSX.',
+      parameters: {
+        action: { type: 'string', required: true, enum: photoshopDescription.actions },
+        arguments: { type: 'object', required: true, additionalProperties: true },
+        confirm: { type: 'boolean', required: true, const: true },
+      },
+      output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+      execute: (args, exec) => executePhotoshopAction(args.action, args.arguments, exec, { confirm: true }),
+      timeoutMs: APPROVAL_BUDGET_MS,
+    }));
+  }
+
   // 批量执行 = 编辑器里的**一条**历史记录（history.batch → Bundle_action，自带"任一步失败就回滚已做的"）。
   // 所以工具层不再自己做 N 次写入 + N 次撤销：一次命令、一次 revision、一步撤销。
   const runPlan = (kind, bridge) => async (args, exec) => {
@@ -602,6 +726,18 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       if (steps.length < 1 || steps.length > 12) throw new MediaBridgeError('INVALID_REQUEST', 'steps 必须是 1..12 条命令');
       const risky = steps.filter(step => HIGH_RISK_COMMANDS.has(step?.operation)).map(step => step.operation);
       if (risky.length) throw new MediaBridgeError('HIGH_RISK_IN_PLAN', `${risky.join('、')} 需要单独人工确认，不能放进批量计划`);
+      // 自主模式下的批量：每一步都必须在可逆白名单内，且不在显式黑名单里。
+      // 否则模型就能把一条被 guard 拒掉的命令塞进 history.batch 里绕过去。
+      if (exec?.mode === 'autonomous' || exec?.autonomous === true) {
+        const allowed = AUTONOMOUS_CAPABILITIES[kind] || new Set();
+        const denied = NEVER_AUTONOMOUS[kind] || new Set();
+        const forbidden = steps
+          .map(step => step?.operation)
+          .filter(operation => denied.has(operation) || !allowed.has(operation));
+        if (forbidden.length) {
+          throw new MediaBridgeError('AUTONOMOUS_STEP_DENIED', `自主模式只能执行可逆属性编辑；这些步骤不在允许范围：${[...new Set(forbidden)].join('、')}。请改成人工确认后执行。`);
+        }
+      }
       const state = await verify(kind, bridge, args, exec);
       if (state.revision !== args.expectedRevision) {
         return envelope(kind, { commandId, revision: state.revision, stateDigest: state.stateDigest, error: { code: 'REVISION_CONFLICT', message: `Project is at revision ${state.revision}; read_state again before writing.`, retryable: true } });
@@ -628,7 +764,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
 
   register(defineTool({
     name: 'media_image_run_plan',
-    description: 'Execute an ordered list of NON-high-risk image commands in one call (1..12 steps). Each step runs as its own idempotent command derived from commandId. If any step fails, the steps already applied are undone and the result reports how many were rolled back and whether the document content digest returned to its pre-plan value. High-risk operations (layer.remove, canvas.crop, layer.add_image) are rejected here: they need their own human approval via media_image_apply_command.',
+    description: 'Execute an ordered list of NON-high-risk image commands in one call (1..12 steps). Each step runs as its own idempotent command derived from commandId. If any step fails, the steps already applied are undone and the result reports how many were rolled back and whether the document content digest returned to its pre-plan value. High-risk operations (layer.remove, canvas.crop, layer.add_image) are rejected here: they must go through media_image_apply_command one at a time, so a batch can never hide a destructive step. In autonomous mode every step must also be allowed by AUTONOMOUS_CAPABILITIES and not re-blocked in NEVER_AUTONOMOUS, otherwise the whole plan is rejected with AUTONOMOUS_STEP_DENIED before anything is sent.',
     parameters: {
       editorKind: { type: 'string', required: true, enum: ['image'] },
       projectId: { type: 'string', required: true, description: 'Explicit Host-bound project id.' },
@@ -682,12 +818,27 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     try {
       bindings.assert(exec, kind, args);
       const state = await verify(kind, bridge, args, exec);
-      const image = await bridge.preview({ instanceId: args.instanceId, ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }), ...(args.grid ? { grid: true } : {}), ...(args.overlayLayerId === undefined && args.overlaySelection !== true ? {} : { overlay: { ...(args.overlayLayerId === undefined ? {} : { layerId: args.overlayLayerId }), ...(args.overlaySelection === true ? { selection: true } : {}), ...(args.overlayColor === undefined ? {} : { color: args.overlayColor }), ...(args.overlayOpacity === undefined ? {} : { opacity: args.overlayOpacity }) } }) });
+      const image = await bridge.preview({
+        instanceId: args.instanceId,
+        ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }),
+        ...(args.grid === undefined ? {} : { grid: args.grid }),
+        ...(args.gridStep === undefined ? {} : { gridStep: args.gridStep }),
+        ...(args.layerId === undefined ? {} : { layerId: args.layerId }),
+        ...(args.crop === undefined ? {} : { crop: args.crop }),
+        ...(args.overlayLayerId === undefined && args.overlaySelection !== true ? {} : { overlay: { ...(args.overlayLayerId === undefined ? {} : { layerId: args.overlayLayerId }), ...(args.overlaySelection === true ? { selection: true } : {}), ...(args.overlayColor === undefined ? {} : { color: args.overlayColor }), ...(args.overlayOpacity === undefined ? {} : { opacity: args.overlayOpacity }) } }),
+      });
       return {
         status: 'applied', commandId: 'preview', editorKind: kind,
         projectId: state.documentId, revision: state.revision,
-        preview: { dataUrl: image.dataUrl, width: image.width, height: image.height, bytes: image.bytes, ...(image.overlay ? { overlay: image.overlay } : {}) },
-        note: '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。',
+        preview: {
+          dataUrl: image.dataUrl, width: image.width, height: image.height, bytes: image.bytes,
+          ...(image.overlay ? { overlay: image.overlay } : {}),
+          ...(image.crop ? { crop: image.crop } : {}),
+          ...(image.scale !== undefined ? { scale: image.scale } : {}),
+          ...(image.layerId ? { layerId: image.layerId } : {}),
+          ...(image.gridStep ? { gridStep: image.gridStep } : {}),
+        },
+        note: '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。crop/scale 是把预览上的位置换算回画布坐标的依据。',
       };
     } catch (error) {
       return failure(kind, 'preview', error);
@@ -696,11 +847,24 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
 
   register(defineTool({
     name: 'media_image_preview',
-    description: 'Return a downsampled PNG preview of the shared image as a data URL (long edge 64..1024, default 640, max 256 KB). Read-only: revision does not change. Whether the caller can actually see the picture depends on whether its host renders images carried in tool results; when it does not, this is just a thumbnail you can save.',
+    description: 'Return a downsampled PNG preview of the shared image as a data URL (long edge 64..1024, default 640, max 256 KB). Read-only: revision does not change. Whether the caller can actually see the picture depends on whether its host renders images carried in tool results; when it does not, this is just a thumbnail you can save. Use crop to zoom into one slot and layerId to see a single layer on its own; the returned crop/scale map preview positions back to canvas coordinates.',
     parameters: {
       ...READ_PARAMS,
       maxWidth: { type: 'integer', description: 'Long-edge pixel cap (64..1024, default 640). Larger means more detail and more bytes.' },
-      grid: { type: 'boolean', description: 'Draw a 100px coordinate grid with labels on the preview so positions can be checked numerically.' },
+      grid: { type: 'boolean', description: 'Draw a coordinate grid with source-pixel labels so positions can be checked numerically (default step 100px).' },
+      gridStep: { type: 'integer', description: 'Grid step in source pixels, 8..2000 (implies grid). Use a smaller step when zoomed into a slot.' },
+      layerId: { type: 'string', description: 'Render ONLY this layer (everything else transparent). The fastest way to see what one layer actually looks like, or to check whether it is being covered by a layer above it.' },
+      crop: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Render only this canvas-space rectangle, scaled up to maxWidth. Out-of-canvas parts are clamped and reported in the result crop; nothing is silently invented.',
+        properties: {
+          x: { type: 'integer', required: true },
+          y: { type: 'integer', required: true },
+          width: { type: 'integer', required: true },
+          height: { type: 'integer', required: true },
+        },
+      },
       overlayLayerId: { type: 'string', description: 'Tint this layer\'s alpha over the preview so the affected region is visible before/after an edit.' },
       overlaySelection: { type: 'boolean', description: 'Tint the current marquee selection over the preview (used when an edit is scoped to a selection).' },
       overlayColor: { type: 'string', description: 'Overlay tint as #rrggbb (default #ff00ff).' },

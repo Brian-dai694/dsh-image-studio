@@ -1,12 +1,15 @@
 // 命令行局部重绘后端：用一个真实的本地进程验证「插件 ← 文件契约 → 外部模型脚本」这条路。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssetStore } from '../lib/assets.js';
 import { createGenerationService } from '../lib/generation.js';
 import { fillPlaceholders } from '../lib/inpaint-command.js';
+import { createCommandProvider } from '../lib/inpaint-command.js';
+import { EventEmitter } from 'node:events';
 
 // 1×1 PNG（合法签名 + 尺寸），store 只做签名校验。
 function png(width = 16, height = 16) {
@@ -101,9 +104,86 @@ test('HTTP /inpaint 全链路：提交 → 轮询 → 结果进素材库（命�
   assert.equal(capabilities.value.providers[0].capabilities.inpaint, true);
 });
 
+
+test('outputName 只能是临时目录内的文件名，超时配置必须是有限正整数', () => {
+  const base = { id: 'validation', kind: 'command', command: process.execPath, args: [] };
+  for (const outputName of ['', '.', '..', '../escape.png', 'sub/out.png', 'C:\\temp\\out.png', '/tmp/out.png']) {
+    assert.throws(() => createCommandProvider({ ...base, outputName }), { code: 'PROVIDER_INVALID' }, outputName);
+  }
+  for (const timeoutMs of [0, -1, 1.5, Infinity, 900_001]) {
+    assert.throws(() => createCommandProvider({ ...base, timeoutMs }), { code: 'PROVIDER_INVALID' }, String(timeoutMs));
+  }
+  assert.doesNotThrow(() => createCommandProvider({ ...base, timeoutMs: 1 }));
+});
+
+test('spawn 同步抛错与异步 error 都变成稳定的启动错误码', async () => {
+  const base = { id: 'spawn-error', kind: 'command', command: process.execPath, args: [] };
+  const input = { imageName: { bytes: png() }, maskName: { bytes: png() } };
+
+  const syncProvider = createCommandProvider(base, { spawnImpl: () => { throw new Error('spawn exploded'); } });
+  await assert.rejects(syncProvider.startInpaint(input), error => error.code === 'INPAINT_COMMAND_FAILED' && /spawn exploded/.test(error.message));
+
+  const malformedProvider = createCommandProvider(base, { spawnImpl: () => ({}) });
+  await assert.rejects(malformedProvider.startInpaint(input), error => error.code === 'INPAINT_COMMAND_FAILED' && /没有返回有效的子进程/.test(error.message));
+
+  const asyncProvider = createCommandProvider(base, { spawnImpl: () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    child.kill = () => true;
+    queueMicrotask(() => child.emit('error', Object.assign(new Error('ENOENT'), { code: 'ENOENT' })));
+    return child;
+  } });
+  await assert.rejects(asyncProvider.startInpaint(input), error => error.code === 'INPAINT_COMMAND_FAILED' && /ENOENT/.test(error.message));
+});
+
+test('超时先终止并等待 close，再清理临时目录', async () => {
+  const events = [];
+  let spawnedCwd = null;
+  const provider = createCommandProvider({ id: 'timeout-wait', kind: 'command', command: 'fake', args: [], timeoutMs: 5 }, {
+    spawnImpl: (_command, _args, options) => {
+      spawnedCwd = options.cwd;
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.kill = signal => {
+        events.push(`kill:${signal}`);
+        if (signal === 'SIGTERM') setTimeout(() => { events.push('close'); child.emit('close', null); }, 25);
+        return true;
+      };
+      return child;
+    },
+  });
+  const started = Date.now();
+  await assert.rejects(provider.startInpaint({ imageName: { bytes: png() }, maskName: { bytes: png() } }), error => error.code === 'INPAINT_TIMEOUT' && /子进程已退出/.test(error.message));
+  assert.ok(Date.now() - started >= 20, 'timeout 不应在 close 前就返回');
+  assert.deepEqual(events, ['kill:SIGTERM', 'close']);
+  assert.equal(existsSync(spawnedCwd), false, '确认 close 之后才清理临时目录');
+});
+
+test('无法确认子进程退出时报告 termination_unknown 并保留临时目录', async () => {
+  let spawnedCwd = null;
+  const provider = createCommandProvider({ id: 'timeout-unknown', kind: 'command', command: 'fake', args: [], timeoutMs: 5 }, {
+    spawnImpl: (_command, _args, options) => {
+      spawnedCwd = options.cwd;
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.kill = () => true;
+      return child;
+    },
+  });
+  await assert.rejects(provider.startInpaint({ imageName: { bytes: png() }, maskName: { bytes: png() } }), error => {
+    assert.equal(error.code, 'INPAINT_TERMINATION_UNKNOWN');
+    assert.equal(error.preserveTempDir, true);
+    assert.equal(error.tempDir, spawnedCwd);
+    return true;
+  });
+  assert.equal(existsSync(spawnedCwd), true, '子进程状态未知时不能删除它可能仍在用的输入目录');
+  await rm(spawnedCwd, { recursive: true, force: true });
+});
+
 test('命令行 provider 不提供文生图能力，文本生图请求不会走到它', async () => {
   const { service, assets } = serviceWith(stubScript(COPY_SCRIPT));
   const job = await service.submit({ provider: 'local-cli', prompt: 'a cat', width: 512, height: 512 });
   assert.equal(job.status, 'failed', '没有 start() 的文生图请求必须失败而不是静默');
   assert.ok(assets.list().length === 0);
 });
+

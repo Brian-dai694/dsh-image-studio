@@ -79,3 +79,34 @@ test('步骤数与 revision 冲突都明确拒绝', async () => {
   assert.equal(stale.error.retryable, true);
   assert.equal(writes.length, 0, '前置校验失败不得触达编辑器');
 });
+
+test('自主模式的批量计划可以包含抠图这类命令，但 NEVER_AUTONOMOUS 收紧后就一条都不发', async () => {
+  const { tools, writes } = harness();
+  const exec = { agent: { id: 'a' }, mode: 'autonomous' };
+
+  // 本人已授权：需要审批的 remove_background 现在也能进自主批量。
+  const allowedPlan = await tools.get('media_image_run_plan').execute(
+    { editorKind: 'image', projectId: 'doc-1', instanceId: 'e1', commandId: 'auto-1', expectedRevision: 0,
+      steps: [
+        { operation: 'layer.set_appearance', params: { layerId: 'l1', opacity: 60 } },
+        { operation: 'layer.remove_background', params: { layerId: 'l1' } },
+        { operation: 'layer.magic_erase', params: { layerId: 'l1', x: 1, y: 1 } },
+      ] }, exec);
+  assert.equal(allowedPlan.status, 'applied', JSON.stringify(allowedPlan));
+  assert.equal(writes.length, 1);
+
+  // 黑名单仍然是"临时收紧"的旋钮：收紧 remove_background 后，含它的整串一条都不发。
+  const { NEVER_AUTONOMOUS } = await import('../lib/gate.js');
+  NEVER_AUTONOMOUS.image.add('layer.remove_background');
+  try {
+    const blocked = await tools.get('media_image_run_plan').execute(
+      { editorKind: 'image', projectId: 'doc-1', instanceId: 'e1', commandId: 'auto-2', expectedRevision: 1,
+        steps: [{ operation: 'layer.set_visibility', params: { layerId: 'l1', visible: true } }, { operation: 'layer.remove_background', params: { layerId: 'l1' } }] }, exec);
+    assert.equal(blocked.status, 'rejected');
+    assert.equal(blocked.error.code, 'AUTONOMOUS_STEP_DENIED');
+    assert.match(blocked.error.message, /layer\.remove_background/);
+  } finally {
+    NEVER_AUTONOMOUS.image.delete('layer.remove_background');
+  }
+  assert.equal(writes.length, 1, '被拒的自主计划一条都不能发出去');
+});

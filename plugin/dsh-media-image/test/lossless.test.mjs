@@ -81,6 +81,7 @@ function argsFor(name, definition) {
   if (name.endsWith('export_status')) return { editorKind: kind, projectId: 'p1', instanceId, exportId: 'exp-1' };
   if (name.endsWith('run_plan')) return { editorKind: kind, projectId: 'p1', instanceId, commandId: 'c3', expectedRevision: revision, steps: [{ operation: kind === 'image' ? 'layer.add_text' : 'media.video.overlay.update', params: {} }] };
   if (name.endsWith('recipe')) return { action: 'list' };
+  if (name.endsWith('photoshop_action')) return { action: 'status', arguments: {}, confirm: true, mode: 'assist' };
   return { projectId: 'p1', instanceId, commandId: 'c1' };
 }
 

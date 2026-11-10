@@ -97,6 +97,32 @@ test('摘要只报数值，不做好坏评价', () => {
   assert.ok(THRESHOLDS.clippingHigh > THRESHOLDS.clippingWarn);
 });
 
+test('分区量提示"这层几乎看不见"，并给出可执行的 reorder 建议', () => {
+  const measurement = base({
+    regions: [
+      // 占了 30% 画布却几乎没有可见像素 -> 该提示
+      { layerId: 'l1', name: '被压住的层', inCanvas: true, sampledArea: 4000, canvasShare: 0.3, opaqueRatio: 0.001, meanLuma: 0, lumaStdDev: 0 },
+      // 同样占比但内容正常 -> 不该提示
+      { layerId: 'l2', name: '正常层', inCanvas: true, sampledArea: 4000, canvasShare: 0.3, opaqueRatio: 0.9, meanLuma: 0.5, lumaStdDev: 0.1 },
+      // 面积太小的小图标 -> 不该提示（避免噪声）
+      { layerId: 'l3', name: '小图标', inCanvas: true, sampledArea: 20, canvasShare: 0.001, opaqueRatio: 0, meanLuma: 0, lumaStdDev: 0 },
+      // 画布外 -> 由 OFF_CANVAS 那条负责，这里不重复报
+      { layerId: 'l4', name: '画布外', inCanvas: false, sampledArea: 0 },
+    ],
+  });
+  const findings = reviewMeasurements(measurement).filter(item => item.code === 'REGION_NOT_VISIBLE');
+  assert.equal(findings.length, 1, JSON.stringify(findings));
+  assert.equal(findings[0].evidence.layerId, 'l1');
+  assert.equal(findings[0].suggestedCommand, 'layer.reorder');
+  assert.ok(ALLOWED_COMMANDS.image.has(findings[0].suggestedCommand), '建议必须是白名单命令');
+  assert.match(findings[0].message, /30\.0%/);
+
+  // 没有 regions（老编辑器）时也不能炸。
+  assert.equal(reviewMeasurements(base()).some(item => item.code === 'REGION_NOT_VISIBLE'), false);
+  // 摘要里带分区数量。
+  assert.match(summarizeMeasurements(base({ regions: [{ layerId: 'a', inCanvas: true }], regionsTruncated: 3 })), /分区 1 个（另有 3 个未量）/);
+});
+
 test('media_image_analyze 已注册且只读：回测量、findings 与摘要，revision 不变', async () => {
   const { fixtureBindings } = await import('./host-fixture.mjs');
   const { createMediaBridge } = await import('../lib/bridge.js');

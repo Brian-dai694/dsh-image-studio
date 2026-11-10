@@ -17,6 +17,7 @@ import { createBatchQueue } from './batch.js';
 import { createFontStore } from './fonts.js';
 import { chatTurn, modelInfo } from './assist.js';
 import { createBackgroundRemovalService } from './background-removal.js';
+import { createPhotoshopService } from './photoshop-com.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
 // 两者都没有就不注册任何 provider —— /generate 会如实返回 PROVIDER_UNAVAILABLE，而不是假装能生成。
@@ -81,6 +82,13 @@ export function apply(ctx, config = {}) {
     tickets,
   });
 
+  const photoshop = createPhotoshopService({
+    enabled: config.photoshop?.enabled === true,
+    timeoutMs: config.photoshop?.timeoutMs,
+    progId: config.photoshop?.progId,
+  });
+  if (config.photoshop?.enabled !== true) console.warn('[dsh-media-image] Photoshop COM/任意 JSX 工具默认关闭；需本人显式配置 photoshop.enabled=true 才注册');
+
   ctx.effect(() => () => { relay.close(); assets.clear(); fonts.clear(); }, 'dsh-media-image: relay and assets dispose');
 
   ctx.tools.guard(createGuard());
@@ -121,12 +129,13 @@ export function apply(ctx, config = {}) {
     batchQueue,
     assist: assistant,
     backgroundRemoval,
+    photoshop,
     ctx,
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,
   });
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/media-image', handler: router }), 'dsh-media-image: routes');
 
-  registerMediaTools(ctx, { bridge, approvals, bindings, assets, generation, recipes });
+  registerMediaTools(ctx, { bridge, approvals, bindings, assets, generation, recipes, photoshop });
   return { dispose() { relay.close(); assets.clear(); fonts.clear(); } };
 }

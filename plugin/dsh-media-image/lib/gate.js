@@ -184,9 +184,50 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
   };
 }
 
-// 自主执行白名单：只放行可逆的低风险编辑；其余必须走人工确认。
+// 自主执行白名单。
+//
+// 【2026-11 策略变更：本人明确授权】原本这里只放"撤销一步就回原样"的属性编辑，
+// 破坏性/烤平/外部像素类命令必须逐次人工审批。本人权衡后要求把这些也放开，
+// 理由是这些操作在本机 miniPaint 里依然各自**占一条原生历史记录**，撤销能回；
+// 真正不受我们撤销栈保护的是 Photoshop（见 NEVER_AUTONOMOUS 的说明）。
+// 这不是"护栏被误删"，是有记录的策略选择：要收紧，把命令挪回 NEVER_AUTONOMOUS 即可。
 export const AUTONOMOUS_CAPABILITIES = {
-  image: new Set(['layer.update_text']),
+  image: new Set([
+    'layer.add_text',
+    'layer.update_text',
+    'layer.set_appearance',
+    'layer.set_visibility',
+    'layer.set_transform',
+    'layer.set_frame',
+    'layer.align',
+    'layer.duplicate',
+    'layer.rasterize',
+    'layer.merge_down',
+    'layer.paint_stroke',
+    'layer.set_effect',
+    'layer.remove_effect',
+    'layer.update_mask',
+    'layer.reorder',
+    'layer.feather',
+    'layer.color_match',
+    'layer.remove',
+    'canvas.crop',
+    'canvas.resize',
+    'layer.add_image',
+    'layer.remove_background',
+    'layer.magic_erase',
+    'layer.add_mask_layer',
+    'history.undo',
+    'history.redo',
+    'history.batch',
+  ]),
+};
+
+// 显式黑名单：优先级高于白名单，用来"临时收紧某几条"而不必从白名单里删（删了会丢信息）。
+// 当前为空 —— 本人已授权全部内置命令在 autonomous 下执行。
+// 注意：Photoshop 不在这个表里管，它由 Photoshop 分支单独判定（见 createGuard）。
+export const NEVER_AUTONOMOUS = {
+  image: new Set([]),
 };
 
 // 高风险操作：导媒体、删数据、覆盖式导出等破坏性动作，必须逐次人工审批。
@@ -208,6 +249,9 @@ export const TOOL_KINDS = {
   media_image_export_start: 'image',
   media_image_export_status: 'image',
   media_image_generate: 'image',
+  media_image_photoshop_action: 'image',
+  media_image_photoshop_run_jsx: 'image',
+  media_image_assistant_photoshop_action: 'image',
 };
 
 export function digestOf(value) {
@@ -238,6 +282,14 @@ export function createGuard() {
     }
     if (args.mode === 'autonomous') {
       const allowed = AUTONOMOUS_CAPABILITIES[expectedKind];
+      const denied = NEVER_AUTONOMOUS[expectedKind];
+      // Photoshop（含任意 JSX）：本人已授权 autonomous 下执行，本轮不再拦。
+      // 这些工具的参数里没有 operation 字段，白名单/黑名单机制对它们不适用。
+      if (name.startsWith('media_image_photoshop') || name.startsWith('media_image_assistant_photoshop')) return undefined;
+      // 黑名单先判：它表示"临时收紧"，优先级高于白名单。
+      if (denied?.has(args.operation)) {
+        return `Autonomous execution is not authorized for ${String(args.operation)}: it was explicitly re-blocked in NEVER_AUTONOMOUS — per-call human approval is required.`;
+      }
       if (!allowed.has(args.operation)) return `Autonomous execution is not authorized for ${String(args.operation)}.`;
     }
     return undefined;

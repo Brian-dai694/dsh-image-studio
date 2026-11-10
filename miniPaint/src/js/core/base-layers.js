@@ -375,6 +375,8 @@ class Base_layers_class {
 			return;
 		}
 
+		const dsh_filter = this.dsh_effect_filter(object);
+
 		// dshMask：图层的活蒙版。先把这一层画到临时画布，再用蒙版层的 alpha 逐像素相乘，
 		// 最后合成到主画布——"改蒙版层 → 结果跟着变"，而不是把蒙版烤死在像素里。
 		if (object.params && object.params.dshMask && !object._dshMaskRendering) {
@@ -417,6 +419,7 @@ class Base_layers_class {
 				ctx.save();
 				ctx.globalCompositeOperation = object.composition || "source-over";
 				ctx.globalAlpha = (object.opacity ?? 100) / 100;
+				if (dsh_filter) ctx.filter = dsh_filter;
 				ctx.drawImage(layer_canvas, ox, oy);
 				ctx.restore();
 				return;
@@ -429,6 +432,7 @@ class Base_layers_class {
 		if (object.type == "image") {
 			//image - default behavior
 			ctx.save();
+			if (dsh_filter) ctx.filter = dsh_filter;
 
 			ctx.translate(object.x + object.width / 2, object.y + object.height / 2);
 			ctx.rotate((object.rotate * Math.PI) / 180);
@@ -451,9 +455,17 @@ class Base_layers_class {
 				typeof this.Base_gui.GUI_tools.tools_modules[render_class] !=
 				"undefined"
 			) {
-				this.Base_gui.GUI_tools.tools_modules[render_class].object[
-					render_function
-				](ctx, object, is_preview);
+				// 文字/矢量走外部渲染函数：用 save/restore 把 filter 限定在这一层，
+				// 否则它会泄漏到后面所有图层（ctx 状态是共享的）。
+				ctx.save();
+				if (dsh_filter) ctx.filter = dsh_filter;
+				try {
+					this.Base_gui.GUI_tools.tools_modules[render_class].object[
+						render_function
+					](ctx, object, is_preview);
+				} finally {
+					ctx.restore();
+				}
 			} else {
 				this.render_success = false;
 				console.log("Error: unknown layer type: " + object.type);
@@ -461,6 +473,28 @@ class Base_layers_class {
 		}
 
 		this.after_render_object(ctx, object);
+	}
+
+	/**
+	 * dshEffects：DSH 侧的非破坏效果栈，存成 {类别: 数值}，渲染时翻译成 canvas 的 ctx.filter。
+	 * 用 CSS filter 语义而不是各 effect 模块的私有参数，是因为它同时适用于图片层和文字层，
+	 * 且模型不需要知道某个模块的参数长什么样。**顺序是固定的**（见 DSH_EFFECT_ORDER），
+	 * 因为 CSS filter 的先后会改变结果 —— 固定它，回执与画面才是同一件事。
+	 * @param {object} object
+	 * @returns {string} 供 ctx.filter 使用的字符串；没有效果时返回空串
+	 */
+	dsh_effect_filter(object) {
+		const stack = object && object.params && object.params.dshEffects;
+		if (!stack || typeof stack !== 'object') return '';
+		const parts = [];
+		for (const key of ['blur', 'brightness', 'contrast', 'saturate', 'grayscale', 'sepia', 'invert', 'hueRotate', 'opacity']) {
+			const value = stack[key];
+			if (value === undefined || value === null || Number.isNaN(Number(value))) continue;
+			if (key === 'blur') parts.push(`blur(${Number(value)}px)`);
+			else if (key === 'hueRotate') parts.push(`hue-rotate(${Number(value)}deg)`);
+			else parts.push(`${key}(${Number(value)})`);
+		}
+		return parts.join(' ');
 	}
 
 	/**

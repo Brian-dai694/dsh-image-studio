@@ -22,13 +22,36 @@ function load(file, symbol, injected = {}) {
   return vm.runInContext(`${code}\n;${symbol}`, context);
 }
 context.Base_action = load('actions/base.js', 'Base_action');
-for (const [file, symbol] of [['insert-layer','Insert_layer_action'], ['update-layer','Update_layer_action'], ['reorder-layer','Reorder_layer_action'], ['toggle-layer-visibility','Toggle_layer_visibility_action'], ['bundle','Bundle_action']]) app.Actions[symbol] = load(`actions/${file}.js`, symbol);
+for (const [file, symbol] of [['insert-layer','Insert_layer_action'], ['update-layer','Update_layer_action'], ['reorder-layer','Reorder_layer_action'], ['toggle-layer-visibility','Toggle_layer_visibility_action'], ['delete-layer','Delete_layer_action'], ['bundle','Bundle_action']]) app.Actions[symbol] = load(`actions/${file}.js`, symbol);
 app.Layers = {auto_increment: 1, render() {}, get_layer(id) { return config.layers.find(layer => layer.id == id); },
   // 合成桩：画一块灰，够 analyze/preview 走通即可（像素精度由浏览器验收）。
   convert_layers_to_canvas(ctx) { ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, 8, 8); },
   get_sorted_layers() {return config.layers.slice().sort((a,b) => b.order-a.order);},
   find_previous(id) {const layers = this.get_sorted_layers(); return layers[layers.findIndex(l => l.id == id)+1];},
-  find_next(id) {const layers = this.get_sorted_layers(); return layers[layers.findIndex(l => l.id == id)-1];}};
+  find_next(id) {const layers = this.get_sorted_layers(); return layers[layers.findIndex(l => l.id == id)-1];},
+  // 单层渲染桩：栅格化/向下合并走编辑器自己的 render_object，这里只按 alpha 画一块，
+  // 够验证"新层产生了、层数变化、撤销复原"这些结构事实（真实像素由浏览器验收）。
+  render_object(ctx, layer) {
+    if (!layer || layer.visible === false) return;
+    const alpha = (layer.opacity ?? 100) / 100;
+    ctx.globalAlpha = alpha;
+    ctx.fillRect(0, 0, 8, 8);
+  },
+  // 镜像 core/base-layers.js 的 dsh_effect_filter：桥会根据它生成回执里的 filter 字符串。
+  // 顺序必须与那边一致（CSS filter 的先后会改变结果）。
+  dsh_effect_filter(object) {
+    const stack = object && object.params && object.params.dshEffects;
+    if (!stack || typeof stack !== 'object') return '';
+    const parts = [];
+    for (const key of ['blur', 'brightness', 'contrast', 'saturate', 'grayscale', 'sepia', 'invert', 'hueRotate', 'opacity']) {
+      const value = stack[key];
+      if (value === undefined || value === null || Number.isNaN(Number(value))) continue;
+      if (key === 'blur') parts.push(`blur(${Number(value)}px)`);
+      else if (key === 'hueRotate') parts.push(`hue-rotate(${Number(value)}deg)`);
+      else parts.push(`${key}(${Number(value)})`);
+    }
+    return parts.join(' ');
+  }};
 // Native state uses DOM constructors; use its exact history methods with narrow constructor stubs.
 context.Base_layers_class = function () {return app.Layers;};
 context.Base_gui_class = function () {return app.GUI;};
@@ -68,6 +91,9 @@ function makeCanvas(w = 8, h = 8, content = 1) {
         },
         // 网格绘制用的路径 API：桩里不真的画线，只要调用不炸。
         save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillText() {},
+        // 图层帧渲染（栅格化/合并）与画笔会用到这些变换与描边属性：桩里不产生像素效果。
+        translate() {}, rotate() {}, scale() {},
+        lineWidth: 1, strokeStyle: '#000', lineCap: 'butt', lineJoin: 'miter', globalCompositeOperation: 'source-over',
       };
       return ctx;
     },
@@ -79,6 +105,14 @@ function makeCanvas(w = 8, h = 8, content = 1) {
 // 蒙版路径必须重编码、透传路径不该重编码：用调用次数作为可核对的证据。
 let toDataUrlCalls = 0;
 context.document = Object.assign(context.document || {}, { createElement: () => makeCanvas() });
+// 原生 Insert_layer_action 对 type:'image' + data 字符串会 `new Image()` 解码。
+// 复制/栅格化/合并都会走到 insert，所以这里给一个全局桩（个别用例还会临时覆盖再还原）。
+if (typeof context.Image !== 'function') {
+  context.Image = class {
+    constructor() { this.width = 1; this.height = 1; this.naturalWidth = 1; this.naturalHeight = 1; }
+    set src(value) { this._src = value; queueMicrotask(() => this.onload?.()); }
+  };
+}
 // 与原生 Update_layer_image_action 同形的桩：只做 link/尺寸写回，验证历史与状态同步。
 app.Actions.Update_layer_image_action = class {
   constructor(canvas, layer_id) { this.canvas = canvas; this.layer_id = layer_id; this.action_id = 'update_layer_image'; this.action_description = 'Update Layer Image'; }
@@ -994,6 +1028,499 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     assert.equal(app.State.action_history.length, historyBefore, '推送不产生历史');
     assert.equal(bridge.revision, revisionBefore, '推送不 bump revision');
     bridge.port = null;
+  });
+  await test('layer.align computes x/y inside the editor and returns the landing box as detail', async () => {
+    // 造一个已知尺寸的图片层，画布与尺寸都由本用例控制，避免依赖前面的用例留下的状态。
+    config.WIDTH = 1000; config.HEIGHT = 800;
+    const aligned = { id: 'align-1', name: '对齐测试', type: 'image', link: makeCanvas(100, 50, 9), x: 111, y: 222, width: 300, height: 150, order: 90, visible: true };
+    config.layers.push(aligned);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+
+    // 右下角 + 24px 内缩：x = 1000-24-300 = 676，y = 800-24-150 = 626
+    const rightBottom = await send({ type: 'layer.align', payload: { layerId: 'align-1', h: 'right', v: 'bottom', margin: 24 } });
+    assert.equal(rightBottom.ok, true, JSON.stringify(rightBottom));
+    assert.equal(aligned.x, 676);
+    assert.equal(aligned.y, 626);
+    // 编辑器在 vm 里跑，返回对象来自另一个 realm：用 JSON 归一后再比较，避免原型不同导致的假失败。
+    assert.deepEqual(JSON.parse(JSON.stringify(rightBottom.result.commandDetail.aligned)),
+      { layerId: 'align-1', x: 676, y: 626, width: 300, height: 150, h: 'right', v: 'bottom', margin: 24, canvas: { width: 1000, height: 800 } });
+
+    // 居中：x = round((1000-300)/2) = 350，y = round((800-150)/2) = 325 —— v 不动时保留原 y
+    const centred = await send({ type: 'layer.align', payload: { layerId: 'align-1', h: 'center' } });
+    assert.equal(centred.ok, true, JSON.stringify(centred));
+    assert.equal(aligned.x, 350);
+    assert.equal(aligned.y, 626, '没给 v 时不能顺手改 y');
+    assert.equal(centred.result.commandDetail.aligned.v, null);
+
+    // 左上角：margin 缺省为 0
+    const topLeft = await send({ type: 'layer.align', payload: { layerId: 'align-1', h: 'left', v: 'top' } });
+    assert.equal(topLeft.ok, true, JSON.stringify(topLeft));
+    assert.equal(aligned.x, 0);
+    assert.equal(aligned.y, 0);
+    assert.equal(topLeft.result.commandDetail.aligned.margin, 0);
+
+    // 整条命令只占一步历史：撤销一次就回到对齐之前的位置。
+    const undo = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undo.ok, true);
+    assert.equal(aligned.x, 350, '撤销一次应回到上一次对齐的落点');
+    assert.equal(aligned.y, 626);
+    config.layers = config.layers.filter(layer => layer.id !== 'align-1');
+  });
+  await test('layer.align rejects missing intent, out-of-range margin and unknown targets', async () => {
+    const target = { id: 'align-2', name: '边界', type: 'image', link: makeCanvas(10, 10, 3), x: 0, y: 0, width: 100, height: 100, order: 91, visible: true };
+    config.layers.push(target);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const bad = [
+      { layerId: 'align-2' },                                        // h/v 都没给
+      { layerId: 'align-2', h: 'middle' },                           // h 用了 v 的取值
+      { layerId: 'align-2', v: 'center' },                           // v 用了 h 的取值
+      { layerId: 'align-2', h: 'left', margin: -1 },
+      { layerId: 'align-2', h: 'left', margin: 1.5 },
+      { layerId: 'align-2', h: 'left', margin: 99999 },
+      { layerId: 'align-2', h: 'left', to: 'selection' },
+      { layerId: 'missing', h: 'left' },
+    ];
+    for (const payload of bad) {
+      const response = await send({ type: 'layer.align', payload });
+      assert.equal(response.ok, false, JSON.stringify(payload));
+      assert.ok(['INVALID_REQUEST', 'LAYER_NOT_FOUND'].includes(response.error.code), `${JSON.stringify(payload)} -> ${response.error.code}`);
+    }
+    // margin 大到可用区域变负：明确拒绝，而不是算出一个负数坐标。
+    const tooMuch = await send({ type: 'layer.align', payload: { layerId: 'align-2', h: 'left', margin: Math.floor(config.WIDTH / 2) } });
+    assert.equal(tooMuch.ok, false, JSON.stringify(tooMuch));
+    assert.equal(tooMuch.error.code, 'INVALID_REQUEST');
+    assert.equal(target.x, 0, '被拒绝的命令不能改动图层');
+    config.layers = config.layers.filter(layer => layer.id !== 'align-2');
+  });
+  await test('layer.duplicate copies the layer one step up, offsets it, and is a single undo', async () => {
+    const source = { id: 'dup-src', name: '商品', type: 'image', data: 'data:image/png;base64,dup', link: makeCanvas(40, 20, 5), x: 100, y: 60, width: 40, height: 20, width_original: 40, height_original: 20, opacity: 80, rotate: 0, order: 70, visible: true, params: { dshMask: { sourceLayerId: 'mask-1', mode: 'alpha' } } };
+    config.layers.push(source);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const before = config.layers.length;
+
+    const duplicated = await send({ type: 'layer.duplicate', payload: { layerId: 'dup-src', offsetX: 12, offsetY: -8 } });
+    assert.equal(duplicated.ok, true, JSON.stringify(duplicated));
+    assert.equal(config.layers.length, before + 1, '复制必须新增一层');
+    const copy = config.layers.find(layer => String(layer.id) === String(duplicated.result.changedObjectIds[0]));
+    assert.ok(copy, '回执里的 changedObjectIds 必须是新层 id');
+    assert.equal(copy.x, 112); assert.equal(copy.y, 52);
+    assert.equal(copy.width, 40); assert.equal(copy.height, 20);
+    assert.equal(copy.opacity, 80);
+    assert.notEqual(copy.id, source.id);
+    assert.deepEqual(JSON.parse(JSON.stringify(copy.params)), { dshMask: { sourceLayerId: 'mask-1', mode: 'alpha' } }, '活蒙版配置必须跟着复制');
+    assert.match(copy.name, /副本$/);
+
+    const undo = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undo.ok, true);
+    assert.equal(config.layers.length, before, '撤销一次必须把副本拿掉');
+  });
+  await test('layer.duplicate rejects unknown keys, bad offsets and missing layers', async () => {
+    for (const payload of [
+      { layerId: 'dup-src', offsetX: 1.5 },
+      { layerId: 'dup-src', offsetX: 99999 },
+      { layerId: 'dup-src', scaleX: 2 },
+      { layerId: 'dup-src', name: '' },
+      { layerId: 'nope' },
+    ]) {
+      const response = await send({ type: 'layer.duplicate', payload });
+      assert.equal(response.ok, false, JSON.stringify(payload));
+      assert.ok(['INVALID_REQUEST', 'LAYER_NOT_FOUND'].includes(response.error.code), `${JSON.stringify(payload)} -> ${response.error.code}`);
+    }
+    config.layers = config.layers.filter(layer => layer.id !== 'dup-src');
+  });
+
+  await test('layer.rasterize replaces a layer with a pixel copy in one history entry', async () => {
+    // 真实图层 id 是整数（Delete_layer_action 会 parseInt），所以用例也用数字 id。
+    const textLayer = { id: 9001, name: '标题', type: 'text', data: [[{ text: 'HAND WEAVING' }]], x: 30, y: 40, width: 200, height: 60, opacity: 70, rotate: 15, order: 71, visible: true, is_vector: false };
+    config.layers.push(textLayer);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const before = config.layers.length;
+
+    const result = await send({ type: 'layer.rasterize', payload: { layerId: '9001' } });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(config.layers.length, before, '栅格化是替换，不是新增');
+    assert.equal(config.layers.some(layer => String(layer.id) === '9001'), false, '原文字层必须被移除');
+    const produced = config.layers.find(layer => String(layer.id) === String(result.result.changedObjectIds[0]));
+    assert.ok(produced, '回执里的 changedObjectIds 必须是新层 id');
+    assert.equal(produced.type, 'image', '结果必须是图片层');
+    assert.equal(produced.x, 30); assert.equal(produced.y, 40);
+    assert.equal(produced.width, 200); assert.equal(produced.height, 60);
+    assert.equal(produced.opacity, 70);
+    assert.equal(produced.rotate, 0, '旋转已烤进像素，新层不能带 rotate');
+    assert.deepEqual(JSON.parse(JSON.stringify(produced.params)), {}, '活蒙版也已烤进像素，新层不能带 params');
+
+    const undo = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undo.ok, true);
+    assert.equal(config.layers.some(layer => String(layer.id) === '9001'), true, '撤销必须把原文字层还回来');
+    config.layers = config.layers.filter(layer => String(layer.id) !== '9001' && String(layer.id) !== String(produced.id));
+  });
+  await test('layer.rasterize refuses empty layers and unknown layer ids', async () => {
+    const empty = { id: 9002, name: '空', type: null, x: 0, y: 0, width: 10, height: 10, order: 72, visible: true };
+    config.layers.push(empty);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const refused = await send({ type: 'layer.rasterize', payload: { layerId: '9002' } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, 'EMPTY_LAYER');
+    const missing = await send({ type: 'layer.rasterize', payload: { layerId: 'no-such-layer' } });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.error.code, 'LAYER_NOT_FOUND');
+    config.layers = config.layers.filter(layer => layer.id !== 9002);
+  });
+
+  await test('layer.merge_down folds two layers into one and a single undo brings both back', async () => {
+    config.WIDTH = 120; config.HEIGHT = 90;
+    const lower = { id: 9003, name: '底', type: 'image', link: makeCanvas(20, 20, 3), x: 0, y: 0, width: 20, height: 20, order: 80, visible: true, opacity: 100, composition: 'source-over' };
+    const upper = { id: 9004, name: '上', type: 'image', link: makeCanvas(20, 20, 4), x: 10, y: 10, width: 20, height: 20, order: 81, visible: true, opacity: 60, composition: 'multiply' };
+    config.layers.push(lower, upper);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const before = config.layers.length;
+
+    const merged = await send({ type: 'layer.merge_down', payload: { layerId: '9004' } });
+    assert.equal(merged.ok, true, JSON.stringify(merged));
+    assert.equal(config.layers.length, before - 1, '合并后层数必须减一');
+    assert.equal(config.layers.some(layer => [9003, 9004].includes(layer.id)), false, '两层都必须被移除');
+    const result = config.layers.find(layer => String(layer.id) === String(merged.result.changedObjectIds[0]));
+    assert.ok(result);
+    assert.equal(result.type, 'image');
+    assert.equal(result.width, 120); assert.equal(result.height, 90, '合并结果覆盖整块画布');
+    assert.equal(result.opacity, 100, '外观已烤进像素，新层不能重复叠加');
+    assert.equal(result.composition, 'source-over');
+
+    const undo = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undo.ok, true);
+    assert.equal(config.layers.length, before, '撤销必须把两层都还回来');
+    assert.ok(config.layers.some(layer => layer.id === 9004));
+    assert.ok(config.layers.some(layer => layer.id === 9003));
+    config.layers = config.layers.filter(layer => ![9003, 9004].includes(layer.id) && String(layer.id) !== String(result.id));
+  });
+  await test('layer.merge_down reports NO_LAYER_BELOW instead of silently doing nothing', async () => {
+    const only = { id: 9005, name: '唯一', type: 'image', link: makeCanvas(10, 10, 1), x: 0, y: 0, width: 10, height: 10, order: 82, visible: true };
+    // 只留这一层，确保它下面没有任何层。
+    const saved = config.layers.slice();
+    config.layers = [only];
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const response = await send({ type: 'layer.merge_down', payload: { layerId: '9005' } });
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, 'NO_LAYER_BELOW');
+    config.layers = saved;
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+  });
+
+  await test('layer.paint_stroke draws onto the layer pixels as one undoable step', async () => {
+    const target = { id: 9006, name: '画布层', type: 'image', link: makeCanvas(40, 40, 9), x: 0, y: 0, width: 40, height: 40, width_original: 40, height_original: 40, order: 83, visible: true };
+    config.layers.push(target);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const revisionBefore = bridge.revision;
+    const layersBefore = config.layers.length;
+
+    const drawn = await send({ type: 'layer.paint_stroke', payload: { layerId: '9006', points: [{ x: 2, y: 2 }, { x: 20, y: 20 }, { x: 38, y: 5 }], color: '#ff0000', size: 6, opacity: 0.8 } });
+    assert.equal(drawn.ok, true, JSON.stringify(drawn));
+    // vm 里返回的数组来自另一个 realm：JSON 归一后再比，避免原型不同导致的假失败。
+    assert.deepEqual(JSON.parse(JSON.stringify(drawn.result.changedObjectIds)), ['9006'], '画笔只改目标层，不新增层');
+    assert.equal(bridge.revision, revisionBefore + 1, '一笔就是一步 revision');
+    assert.equal(config.layers.length, layersBefore, '画笔不改变层数');
+
+    const undo = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undo.ok, true);
+    // 这里不断言"撤销把 revision +1"：桩版 Update_layer_image_action 的 undo 不触碰 pixelMutation，
+    // revision 是否前进取决于真实原生动作。可断言的是撤销成功且 revision 不倒退。
+    assert.ok(bridge.revision >= revisionBefore + 1, '撤销不能把 revision 倒退');
+    config.layers = config.layers.filter(layer => layer.id !== 9006);
+  });
+  await test('layer.paint_stroke validates points, colour, size and opacity before touching pixels', async () => {
+    const target = { id: 9007, name: '目标', type: 'image', link: makeCanvas(10, 10, 2), x: 0, y: 0, width: 10, height: 10, order: 84, visible: true };
+    config.layers.push(target);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const bad = [
+      { layerId: '9007', points: [{ x: 1, y: 1 }] },                                  // 少于 2 点
+      { layerId: '9007', points: Array.from({ length: 201 }, () => ({ x: 1, y: 1 })) }, // 超过 200 点
+      { layerId: '9007', points: [{ x: 'a', y: 1 }, { x: 2, y: 2 }] },                 // 非数字
+      { layerId: '9007', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }], color: 'red' },
+      { layerId: '9007', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }], size: 0 },
+      { layerId: '9007', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }], size: 201 },
+      { layerId: '9007', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }], opacity: 1.5 },
+      { layerId: '9007', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }], hardness: 0.5 },     // 未知键
+      { layerId: 'missing', points: [{ x: 1, y: 1 }, { x: 2, y: 2 }] },
+    ];
+    for (const payload of bad) {
+      const response = await send({ type: 'layer.paint_stroke', payload });
+      assert.equal(response.ok, false, JSON.stringify(payload).slice(0, 160));
+      assert.ok(['INVALID_REQUEST', 'LAYER_NOT_FOUND'].includes(response.error.code), `${JSON.stringify(payload).slice(0, 80)} -> ${response.error.code}`);
+    }
+    config.layers = config.layers.filter(layer => layer.id !== 9007);
+  });
+  await test('layer.set_effect builds a non-destructive stack that read_state reports and undo reverts', async () => {
+    const layer = { id: 9101, name: '效果层', type: 'image', link: makeCanvas(20, 20, 6), x: 0, y: 0, width: 20, height: 20, order: 90, visible: true, opacity: 100 };
+    config.layers.push(layer);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    config.layer = layer;
+
+    const first = await send({ type: 'layer.set_effect', payload: { layerId: '9101', effect: 'brightness', value: 1.4 } });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(first.result.commandDetail.effects.filter, 'brightness(1.4)', '回执里的 filter 必须是渲染时真正用的那条');
+    const second = await send({ type: 'layer.set_effect', payload: { layerId: '9101', effect: 'blur', value: 3 } });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    // 顺序固定：blur 在 brightness 之前，和 dsh_effect_filter 的遍历顺序一致。
+    assert.equal(second.result.commandDetail.effects.filter, 'blur(3px) brightness(1.4)');
+    assert.equal(bridge.readState().layers.find(item => String(item.id) === '9101').effects.blur, 3, 'read_state 必须能看到效果栈');
+
+    const undone = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undone.ok, true);
+    const afterUndo = bridge.readState().layers.find(item => String(item.id) === '9101').effects;
+    assert.equal(afterUndo.blur, undefined, '撤销一次应退回只加 brightness 的状态');
+    assert.equal(afterUndo.brightness, 1.4);
+
+    // value:null 等价于删掉这一项。
+    const cleared = await send({ type: 'layer.set_effect', payload: { layerId: '9101', effect: 'brightness', value: null } });
+    assert.equal(cleared.ok, true, JSON.stringify(cleared));
+    assert.equal(cleared.result.commandDetail.effects.filter, '');
+    assert.equal(bridge.readState().layers.find(item => String(item.id) === '9101').effects, undefined, '栈空了就不该留空对象');
+    config.layers = config.layers.filter(item => item.id !== 9101);
+  });
+  await test('layer.remove_effect drops one entry, or clears the whole stack when effect is omitted', async () => {
+    const layer = { id: 9102, name: '效果层2', type: 'image', link: makeCanvas(20, 20, 7), x: 0, y: 0, width: 20, height: 20, order: 91, visible: true, opacity: 100 };
+    config.layers.push(layer);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    for (const [effect, value] of [['brightness', 1.2], ['saturate', 0.5], ['grayscale', 1]]) {
+      const response = await send({ type: 'layer.set_effect', payload: { layerId: '9102', effect, value } });
+      assert.equal(response.ok, true, JSON.stringify(response));
+    }
+    const one = await send({ type: 'layer.remove_effect', payload: { layerId: '9102', effect: 'saturate' } });
+    assert.equal(one.ok, true, JSON.stringify(one));
+    assert.equal(one.result.commandDetail.effects.filter, 'brightness(1.2) grayscale(1)');
+    const all = await send({ type: 'layer.remove_effect', payload: { layerId: '9102' } });
+    assert.equal(all.ok, true, JSON.stringify(all));
+    assert.equal(all.result.commandDetail.effects.filter, '');
+    config.layers = config.layers.filter(item => item.id !== 9102);
+  });
+  await test('effect commands reject unknown vocabulary, out-of-range values and extra keys', async () => {
+    const layer = { id: 9103, name: '效果层3', type: 'image', link: makeCanvas(10, 10, 1), x: 0, y: 0, width: 10, height: 10, order: 92, visible: true };
+    config.layers.push(layer);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    const bad = [
+      { layerId: '9103', effect: 'sharpen', value: 1 },       // 词表之外
+      { layerId: '9103', effect: 'brightness', value: 5 },    // 超出 0..3
+      { layerId: '9103', effect: 'brightness', value: -1 },
+      { layerId: '9103', effect: 'blur', value: 51 },
+      { layerId: '9103', effect: 'hueRotate', value: 400 },
+      { layerId: '9103', effect: 'grayscale', value: '1' },   // 字符串
+      { layerId: '9103', value: 1 },                          // 缺 effect
+      { layerId: '9103', effect: 'brightness', value: 1, extra: true },
+      { layerId: 'missing', effect: 'brightness', value: 1 },
+    ];
+    for (const payload of bad) {
+      const response = await send({ type: 'layer.set_effect', payload });
+      assert.equal(response.ok, false, JSON.stringify(payload));
+      assert.ok(['INVALID_REQUEST', 'LAYER_NOT_FOUND'].includes(response.error.code), `${JSON.stringify(payload)} -> ${response.error.code}`);
+    }
+    const clearBad = await send({ type: 'layer.remove_effect', payload: { layerId: '9103' } });
+    assert.equal(clearBad.ok, true, '空栈上清空是幂等的，不该报错');
+    config.layers = config.layers.filter(item => item.id !== 9103);
+  });
+  await test('layer.update_mask flips invert, rebinds the mask source, and undo restores the previous mask', async () => {
+    const maskA = { id: 9201, name: '蒙版A', type: 'image', link: makeCanvas(20, 20, 3), x: 0, y: 0, width: 20, height: 20, order: 93, visible: true };
+    const maskB = { id: 9202, name: '蒙版B', type: 'image', link: makeCanvas(20, 20, 4), x: 0, y: 0, width: 20, height: 20, order: 94, visible: true };
+    const target = { id: 9203, name: '被遮罩层', type: 'image', link: makeCanvas(20, 20, 5), x: 0, y: 0, width: 20, height: 20, order: 95, visible: true,
+      params: { dshMask: { sourceLayerId: '9201', mode: 'alpha', invert: false } } };
+    config.layers.push(maskA, maskB, target);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    // 手工加图层后要先算完摘要，否则 readState 会（正确地）抛 DIGEST_TIMEOUT。
+    await bridge.prepareDigest();
+
+    // read_state 必须能看到 invert，否则改完无法自证。
+    const before = bridge.readState().layers.find(item => String(item.id) === '9203');
+    assert.equal(before.mask.sourceLayerId, '9201');
+    assert.equal(before.mask.invert, false);
+
+    const flipped = await send({ type: 'layer.update_mask', payload: { layerId: '9203', invert: true } });
+    assert.equal(flipped.ok, true, JSON.stringify(flipped));
+    assert.deepEqual(JSON.parse(JSON.stringify(flipped.result.commandDetail.mask)), { layerId: '9203', sourceLayerId: '9201', invert: true });
+    assert.equal(bridge.readState().layers.find(item => String(item.id) === '9203').mask.invert, true);
+
+    const rebound = await send({ type: 'layer.update_mask', payload: { layerId: '9203', sourceLayerId: '9202' } });
+    assert.equal(rebound.ok, true, JSON.stringify(rebound));
+    assert.equal(rebound.result.commandDetail.mask.sourceLayerId, '9202');
+    assert.equal(rebound.result.commandDetail.mask.invert, true, '换蒙版源不该顺手把 invert 重置');
+
+    const undone = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undone.ok, true);
+    assert.equal(bridge.readState().layers.find(item => String(item.id) === '9203').mask.sourceLayerId, '9201', '撤销一次退回上一个蒙版源');
+
+    // remove 整块摘掉活蒙版。
+    const removed = await send({ type: 'layer.update_mask', payload: { layerId: '9203', remove: true } });
+    assert.equal(removed.ok, true, JSON.stringify(removed));
+    assert.equal(removed.result.commandDetail.mask.removed, true);
+    assert.equal(bridge.readState().layers.find(item => String(item.id) === '9203').mask, undefined, '摘掉后 read_state 不该再有 mask');
+    config.layers = config.layers.filter(item => ![9201, 9202, 9203].includes(item.id));
+  });
+  await test('layer.update_mask refuses cycles, unknown sources, and params the live renderer ignores', async () => {
+    const a = { id: 9211, name: 'A', type: 'image', link: makeCanvas(10, 10, 1), x: 0, y: 0, width: 10, height: 10, order: 96, visible: true };
+    const b = { id: 9212, name: 'B', type: 'image', link: makeCanvas(10, 10, 2), x: 0, y: 0, width: 10, height: 10, order: 97, visible: true,
+      params: { dshMask: { sourceLayerId: '9211', mode: 'alpha', invert: false } } };
+    const plain = { id: 9213, name: '无蒙版', type: 'image', link: makeCanvas(10, 10, 3), x: 0, y: 0, width: 10, height: 10, order: 98, visible: true };
+    config.layers.push(a, b, plain);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+
+    // A 以 B 为蒙版会让 A→B→A 成环。
+    const cycle = await send({ type: 'layer.update_mask', payload: { layerId: '9211', sourceLayerId: '9212' } });
+    assert.equal(cycle.ok, false);
+    assert.equal(cycle.error.code, 'MASK_CYCLE');
+
+    const self = await send({ type: 'layer.update_mask', payload: { layerId: '9211', sourceLayerId: '9211' } });
+    assert.equal(self.ok, false);
+    assert.equal(self.error.code, 'MASK_CYCLE');
+
+    const missingSource = await send({ type: 'layer.update_mask', payload: { layerId: '9211', sourceLayerId: 'nope' } });
+    assert.equal(missingSource.ok, false);
+    assert.equal(missingSource.error.code, 'LAYER_NOT_FOUND');
+
+    // 这一层本来没有活蒙版、又想只改 invert：如实说没有蒙版，而不是造一个空的。
+    const noMask = await send({ type: 'layer.update_mask', payload: { layerId: '9213', invert: true } });
+    assert.equal(noMask.ok, false);
+    assert.equal(noMask.error.code, 'MASK_NOT_FOUND');
+
+    // mode/featherPx 活蒙版渲染不读，收下就是骗人 —— 必须拒绝。
+    for (const payload of [
+      { layerId: '9212', featherPx: 4 },
+      { layerId: '9212', mode: 'luminance' },
+      { layerId: '9212' },                                   // 什么都没给
+      { layerId: '9212', invert: 'yes' },                    // 类型错
+      { layerId: '9212', remove: true, invert: true },       // 互斥
+    ]) {
+      const response = await send({ type: 'layer.update_mask', payload });
+      assert.equal(response.ok, false, JSON.stringify(payload));
+      assert.equal(response.error.code, 'INVALID_REQUEST', JSON.stringify(payload));
+    }
+    config.layers = config.layers.filter(item => ![9211, 9212, 9213].includes(item.id));
+  });
+  await test('read_state reports bounds and canvas-clipped coverage so callers stop guessing coordinates', async () => {
+    config.WIDTH = 400; config.HEIGHT = 200;
+    const inside = { id: 9301, name: '内部', type: 'image', link: makeCanvas(100, 50, 5), x: 100, y: 50, width: 200, height: 100, order: 99, visible: true };
+    const straddling = { id: 9302, name: '出血', type: 'image', link: makeCanvas(100, 50, 6), x: 300, y: 150, width: 200, height: 100, order: 100, visible: true };
+    config.layers.push(inside, straddling);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    await bridge.prepareDigest();
+    const state = bridge.readState();
+    const read = id => state.layers.find(item => String(item.id) === id);
+
+    const a = read('9301');
+    assert.deepEqual(JSON.parse(JSON.stringify(a.bounds)), { x: 100, y: 50, width: 200, height: 100, right: 300, bottom: 150 });
+    // 200×100 / (400×200) = 0.25
+    assert.equal(a.coverage, 0.25);
+    assert.equal(a.offCanvas, undefined, '完全在画布内不该标 offCanvas');
+
+    // 右侧/下侧各溢出 100：可见部分只有 100×50，占画布 100*50/80000 = 0.0625。
+    const b = read('9302');
+    assert.deepEqual(JSON.parse(JSON.stringify(b.bounds)), { x: 300, y: 150, width: 200, height: 100, right: 500, bottom: 250 });
+    assert.equal(b.coverage, 0.0625, 'coverage 按帧∩画布算，溢出部分不计');
+    assert.equal(b.offCanvas, true);
+
+    // 完全落在画布外的图层：coverage 必须是 0，不能出现负数或 >1。
+    const outside = { id: 9303, name: '外面', type: 'image', link: makeCanvas(10, 10, 1), x: -500, y: -500, width: 10, height: 10, order: 101, visible: true };
+    config.layers.push(outside);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    await bridge.prepareDigest();
+    const c = bridge.readState().layers.find(item => String(item.id) === '9303');
+    assert.equal(c.coverage, 0);
+    assert.equal(c.offCanvas, true);
+    config.layers = config.layers.filter(item => ![9301, 9302, 9303].includes(item.id));
+  });
+  await test('analyze reports per-region measurements and flags layers that fall outside the canvas', async () => {
+    config.WIDTH = 400; config.HEIGHT = 200;
+    const inside = { id: 9311, name: '主体', type: 'image', link: makeCanvas(100, 50, 5), x: 0, y: 0, width: 400, height: 200, order: 102, visible: true };
+    const outside = { id: 9312, name: '画布外', type: 'image', link: makeCanvas(10, 10, 1), x: 900, y: 900, width: 10, height: 10, order: 103, visible: true };
+    config.layers.push(inside, outside);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    await bridge.prepareDigest();
+
+    const analysis = bridge.analyzeDocument({ maxSide: 200 });
+    assert.ok(Array.isArray(analysis.regions), 'analyze 必须给出 regions');
+    const full = analysis.regions.find(item => item.layerId === '9311');
+    assert.equal(full.inCanvas, true);
+    assert.ok(full.canvasShare > 0.9, `整幅图层应占满采样画布，实际 ${full.canvasShare}`);
+    assert.ok(full.opaqueRatio > 0.9, '合成桩铺满不透明像素，占比应接近 1');
+    assert.equal(typeof full.meanLuma, 'number');
+    assert.equal(typeof full.lumaStdDev, 'number');
+
+    const gone = analysis.regions.find(item => item.layerId === '9312');
+    assert.equal(gone.inCanvas, false, '画布外的图层要如实标 inCanvas:false');
+    assert.equal(gone.sampledArea, 0);
+    assert.equal(analysis.regionsTruncated, 0);
+    config.layers = config.layers.filter(item => ![9311, 9312].includes(item.id));
+  });
+  await test('preview crop renders only the requested region, clamps it, and reports what it actually used', async () => {
+    config.WIDTH = 400; config.HEIGHT = 200;
+    const full = bridge.previewPng({ maxWidth: 640 });
+    assert.deepEqual(JSON.parse(JSON.stringify(full.crop)), { x: 0, y: 0, width: 400, height: 200 }, '不裁切时 crop 就是整幅');
+    assert.equal(full.width, 400);
+
+    // 只截 200×100：maxWidth 640 大于区域宽，所以不缩放。
+    const cropped = bridge.previewPng({ maxWidth: 640, crop: { x: 100, y: 50, width: 200, height: 100 } });
+    assert.deepEqual(JSON.parse(JSON.stringify(cropped.crop)), { x: 100, y: 50, width: 200, height: 100 });
+    assert.equal(cropped.width, 200);
+    assert.equal(cropped.height, 100);
+    assert.equal(cropped.scale, 1);
+
+    // 越界部分被夹到画布内，并且如实回报夹过的矩形（不假装截了我们写的那个框）。
+    const clamped = bridge.previewPng({ maxWidth: 640, crop: { x: 350, y: 150, width: 200, height: 200 } });
+    assert.deepEqual(JSON.parse(JSON.stringify(clamped.crop)), { x: 350, y: 150, width: 50, height: 50 });
+    assert.equal(clamped.width, 50);
+
+    // 区域放大到 maxWidth：宽 200 的区域被压到 100，scale 0.5。
+    const scaled = bridge.previewPng({ maxWidth: 100, crop: { x: 0, y: 0, width: 200, height: 100 } });
+    assert.equal(scaled.width, 100);
+    assert.equal(scaled.scale, 0.5);
+  });
+  await test('preview validates crop shape and rejects an empty intersection', async () => {
+    for (const crop of [
+      { x: 0, y: 0, width: 10 },                                  // 缺字段
+      { x: 0, y: 0, width: 0, height: 10 },                        // 宽为 0
+      { x: 1.5, y: 0, width: 10, height: 10 },                     // 非整数
+      { x: 0, y: 0, width: 10, height: 10, extra: 1 },             // 多余字段
+      { x: 900, y: 900, width: 10, height: 10 },                   // 与画布无交集
+    ]) {
+      assert.throws(() => bridge.previewPng({ crop }), error => error.code === 'INVALID_REQUEST', JSON.stringify(crop));
+    }
+  });
+  await test('preview layerId renders one layer only, and gridStep is validated and echoed', async () => {
+    config.WIDTH = 400; config.HEIGHT = 200;
+    const layer = { id: 9401, name: '单层', type: 'image', link: makeCanvas(50, 40, 3), x: 10, y: 10, width: 50, height: 40, order: 104, visible: true };
+    config.layers.push(layer);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+
+    const single = bridge.previewPng({ layerId: '9401', maxWidth: 200 });
+    assert.equal(single.layerId, '9401');
+    assert.equal(single.crop.width, 400, '单层预览仍按整幅画布坐标系返回');
+
+    assert.throws(() => bridge.previewPng({ layerId: 'nope' }), error => error.code === 'LAYER_NOT_FOUND');
+
+    // 网格步长：布尔 true = 默认 100；数字 = 源图像素步长；越界/非整数拒绝。
+    assert.equal(bridge.previewPng({ grid: true }).gridStep, 100);
+    assert.equal(bridge.previewPng({ gridStep: 50 }).gridStep, 50);
+    assert.equal(bridge.previewPng({ grid: 200 }).gridStep, 200);
+    for (const step of [7, 2001, 1.5]) {
+      assert.throws(() => bridge.previewPng({ gridStep: step }), error => error.code === 'INVALID_REQUEST', `step ${step}`);
+    }
+    config.layers = config.layers.filter(item => item.id !== 9401);
   });
   console.log(JSON.stringify({passed:count,scope:'real bridge + real native action/state methods; DOM/rendering stubbed, not browser acceptance'}));
 })().catch(error => { console.error(error); process.exitCode=1; });

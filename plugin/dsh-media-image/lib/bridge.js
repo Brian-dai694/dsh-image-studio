@@ -25,7 +25,22 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo', 'history.batch']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.align', 'layer.duplicate', 'layer.rasterize', 'layer.merge_down', 'layer.paint_stroke', 'layer.set_effect', 'layer.remove_effect', 'layer.update_mask', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo', 'history.batch']);
+
+// dshEffects 的非破坏效果词表与取值域。**必须与编辑器 dsh-editor-bridge.js 的
+// DSH_EFFECT_RANGES 完全一致**（顺序也一致，因为 CSS filter 的先后会改变结果）——
+// 有测试逐项比对两边，任何一边改了另一边没跟上会当场失败。
+export const DSH_EFFECT_RANGES = {
+  blur: [0, 50],
+  brightness: [0, 3],
+  contrast: [0, 3],
+  saturate: [0, 3],
+  grayscale: [0, 1],
+  sepia: [0, 1],
+  invert: [0, 1],
+  hueRotate: [-180, 180],
+  opacity: [0, 1],
+};
 
 // 与编辑器 modules/layer/composition.js 同源：Canvas globalCompositeOperation 全集。
 export const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
@@ -55,6 +70,14 @@ function validateImageCommand(command) {
     'layer.set_appearance': ['layerId', 'opacity', 'blendMode', 'name'],
     'layer.add_image': ['sourceRef', 'x', 'y', 'width', 'height', 'fit', 'name', 'maskRef', 'maskRect', 'maskMode', 'maskInvert', 'featherPx'],
     'layer.set_frame': ['layerId', 'x', 'y', 'width', 'height', 'fit', 'anchor'],
+    'layer.align': ['layerId', 'h', 'v', 'margin', 'to'],
+    'layer.duplicate': ['layerId', 'offsetX', 'offsetY', 'name'],
+    'layer.rasterize': ['layerId', 'name'],
+    'layer.merge_down': ['layerId', 'name'],
+    'layer.paint_stroke': ['layerId', 'points', 'color', 'size', 'opacity'],
+    'layer.set_effect': ['layerId', 'effect', 'value'],
+    'layer.remove_effect': ['layerId', 'effect'],
+    'layer.update_mask': ['layerId', 'invert', 'sourceLayerId', 'remove'],
     'layer.feather': ['layerId', 'radiusPx'],
     'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
     'layer.remove_background': ['layerId', 'tolerance', 'featherPx'],
@@ -155,6 +178,12 @@ function validateImageCommand(command) {
     if (!Number.isSafeInteger(p[key]) || p[key] < -16384 || p[key] > 16384) throw new MediaBridgeError('INVALID_REQUEST', `${key} must be an integer between -16384 and 16384 pixels.`);
   };
   const FRAME_FITS = ['stretch', 'contain', 'cover'];
+  // 新层名：可省略；给了就必须是非空、≤120 字符的字符串。
+  const assertOptionalName = (name) => {
+    if (name !== undefined && (typeof name !== 'string' || !name.trim() || name.length > 120)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'name must be a non-empty string up to 120 characters.');
+    }
+  };
   if (command.type === 'layer.add_image') {
     // 仅支持复制已有图层或受限内联图 data:image/(png|jpeg|webp);base64,...（解码后 ≤256 KB）。
     // asset:<id> 暂保留为格式兼容，但当前编辑器没有 asset 注册表，运行时会明确返回 ASSET_NOT_FOUND。
@@ -196,6 +225,89 @@ function validateImageCommand(command) {
     for (const key of ['x', 'y']) if (p[key] !== undefined) pixelPos(key);
     if (p.fit !== undefined && !FRAME_FITS.includes(p.fit)) throw new MediaBridgeError('INVALID_REQUEST', `fit must be one of ${FRAME_FITS.join(', ')}.`);
     if (p.anchor !== undefined && !['top-left', 'center'].includes(p.anchor)) throw new MediaBridgeError('INVALID_REQUEST', 'anchor must be top-left or center.');
+  }
+  if (command.type === 'layer.align') {
+    // 对齐到画布：调用方表达意图（边/中线 + 边距），坐标由编辑器算。
+    // 至少给 h 或 v 之一；margin 是可用区域的内缩，必须小于画布一半才有意义（由编辑器按真实尺寸判）。
+    opaqueId(p.layerId, 'layerId');
+    if (p.h === undefined && p.v === undefined) throw new MediaBridgeError('INVALID_REQUEST', 'Provide h, v, or both.');
+    if (p.h !== undefined && !['left', 'center', 'right'].includes(p.h)) throw new MediaBridgeError('INVALID_REQUEST', 'h must be left, center or right.');
+    if (p.v !== undefined && !['top', 'middle', 'bottom'].includes(p.v)) throw new MediaBridgeError('INVALID_REQUEST', 'v must be top, middle or bottom.');
+    if (p.margin !== undefined && (!Number.isSafeInteger(p.margin) || p.margin < 0 || p.margin > 4096)) throw new MediaBridgeError('INVALID_REQUEST', 'margin must be an integer between 0 and 4096 pixels.');
+    if (p.to !== undefined && p.to !== 'canvas') throw new MediaBridgeError('INVALID_REQUEST', 'to currently supports only "canvas".');
+  }
+  if (command.type === 'layer.duplicate') {
+    // 复制图层：偏移量是"相对原层的位置"，不是绝对坐标，避免调用方读一次状态只为算新坐标。
+    opaqueId(p.layerId, 'layerId');
+    for (const key of ['offsetX', 'offsetY']) {
+      if (p[key] !== undefined && (!Number.isSafeInteger(p[key]) || Math.abs(p[key]) > 16384)) {
+        throw new MediaBridgeError('INVALID_REQUEST', `${key} must be an integer between -16384 and 16384.`);
+      }
+    }
+    assertOptionalName(p.name);
+  }
+  if (command.type === 'layer.rasterize' || command.type === 'layer.merge_down') {
+    // 两条都是"替换/合并"型：只接受目标层与可选的新层名，避免夹带不知名参数。
+    opaqueId(p.layerId, 'layerId');
+    assertOptionalName(p.name);
+  }
+  if (command.type === 'layer.paint_stroke') {
+    // 画笔：坐标是图层本地像素；点数、颜色、粗细、不透明度都有确定取值域。
+    opaqueId(p.layerId, 'layerId');
+    if (!Array.isArray(p.points) || p.points.length < 2 || p.points.length > 200) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'points must contain 2..200 stroke points.');
+    }
+    for (const [index, point] of p.points.entries()) {
+      const x = Array.isArray(point) ? point[0] : point?.x;
+      const y = Array.isArray(point) ? point[1] : point?.y;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 16384 || Math.abs(y) > 16384) {
+        throw new MediaBridgeError('INVALID_REQUEST', `points[${index}] must be {x,y} or [x,y] with coordinates within ±16384.`);
+      }
+      if (Array.isArray(point) ? point.length !== 2 : Object.keys(point).some(key => !['x', 'y'].includes(key))) {
+        throw new MediaBridgeError('INVALID_REQUEST', `points[${index}] must only carry x and y.`);
+      }
+    }
+    if (p.color !== undefined && (typeof p.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(p.color))) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'color must be #rrggbb.');
+    }
+    if (p.size !== undefined) finite(p.size, 'size', { min: 1, max: 200 });
+    if (p.opacity !== undefined) finite(p.opacity, 'opacity', { min: 0, max: 1 });
+  }
+  if (command.type === 'layer.set_effect' || command.type === 'layer.remove_effect') {
+    // 非破坏效果栈：只改 layer.params.dshEffects，不动像素。词表与取值域在这里就挡住，
+    // 不把注定失败的效果发给编辑器。
+    opaqueId(p.layerId, 'layerId');
+    const assertEffect = () => {
+      if (typeof p.effect !== 'string' || !Object.prototype.hasOwnProperty.call(DSH_EFFECT_RANGES, p.effect)) {
+        throw new MediaBridgeError('INVALID_REQUEST', `effect must be one of ${Object.keys(DSH_EFFECT_RANGES).join(', ')}.`);
+      }
+    };
+    if (command.type === 'layer.set_effect') {
+      assertEffect();
+      if (p.value !== null) {
+        const [min, max] = DSH_EFFECT_RANGES[p.effect];
+        if (typeof p.value !== 'number' || !Number.isFinite(p.value) || p.value < min || p.value > max) {
+          throw new MediaBridgeError('INVALID_REQUEST', `${p.effect} must be a number between ${min} and ${max}, or null to remove it.`);
+        }
+      }
+    } else if (p.effect !== undefined) {
+      // 省略 effect = 清空整叠；给了就必须是词表里的一个。
+      assertEffect();
+    }
+  }
+  if (command.type === 'layer.update_mask') {
+    // 活蒙版的可编辑面：谁当蒙版、是否反相、是否整块摘掉。
+    // mode/featherPx 不在契约里，因为活蒙版渲染不读它们 —— 由 fieldsOnly 直接拒绝多余字段。
+    opaqueId(p.layerId, 'layerId');
+    if (p.invert !== undefined && typeof p.invert !== 'boolean') throw new MediaBridgeError('INVALID_REQUEST', 'invert must be boolean.');
+    if (p.remove !== undefined && typeof p.remove !== 'boolean') throw new MediaBridgeError('INVALID_REQUEST', 'remove must be boolean.');
+    if (p.sourceLayerId !== undefined) opaqueId(p.sourceLayerId, 'sourceLayerId');
+    if (p.remove === true && (p.invert !== undefined || p.sourceLayerId !== undefined)) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'remove cannot be combined with invert or sourceLayerId.');
+    }
+    if (p.invert === undefined && p.sourceLayerId === undefined && p.remove !== true) {
+      throw new MediaBridgeError('INVALID_REQUEST', 'Provide invert, sourceLayerId, or remove:true.');
+    }
   }
   if (command.type === 'layer.feather') {
     // 只改该图层的 alpha 边缘，不新建图层，也不改像素颜色；同样按首次快照幂等重算。
@@ -365,7 +477,12 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
     // 缩略预览：只读，返回 data URL；超 256 KB 明确报错而不是截断。
     async preview(input) {
       opaqueId(input?.instanceId, 'instanceId');
-      const result = await request('editor.preview_png', { editorInstanceId: input.instanceId, ...(input.maxWidth === undefined ? {} : { maxWidth: input.maxWidth }), ...(input.grid ? { grid: true } : {}), ...(input.overlay === undefined ? {} : { overlay: input.overlay }) });
+      // 只透传调用方真的给了的键：全传 undefined 会被编辑器当成"给了个空值"。
+      const payload = { editorInstanceId: input.instanceId };
+      for (const key of ['maxWidth', 'grid', 'gridStep', 'layerId', 'crop', 'overlay']) {
+        if (input[key] !== undefined) payload[key] = input[key];
+      }
+      const result = await request('editor.preview_png', payload);
       if (!isObject(result) || typeof result.dataUrl !== 'string' || !result.dataUrl.startsWith('data:image/png;base64,')) {
         throw new MediaBridgeError('EDITOR_ERROR', 'Editor returned an invalid preview.');
       }

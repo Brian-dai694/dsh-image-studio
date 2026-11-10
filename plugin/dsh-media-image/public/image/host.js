@@ -852,6 +852,10 @@ async function refreshEngineLabel() {
 
 // ops 由页面执行：只认白名单，逐个跑并回报结果。
 async function execOps(ops) {
+  const runPhotoshopAction = async (action, args) => api('/media-image/photoshop/action', {
+    method: 'POST',
+    body: { action, arguments: args || {} },
+  });
   for (const op of ops || []) {
     if (op.type === 'generate') {
       const provider = assistProvider();
@@ -934,6 +938,51 @@ async function execOps(ops) {
     }
     if (op.type === 'status') { await routeAssist('状态'); continue; }
     if (op.type === 'fontList') { await routeAssist('字体列表'); continue; }
+    if (op.type === 'photoshopAction') {
+      const action = String(op.action || '');
+      const args = op.arguments && typeof op.arguments === 'object' && !Array.isArray(op.arguments) ? op.arguments : {};
+      const readOnly = action === 'status';
+      const summary = JSON.stringify(args);
+      const capabilities = await api('/media-image/assist');
+      if (!capabilities.photoshop?.enabled || !capabilities.photoshop.actions?.includes(action)) {
+        bubble('bot', 'Photoshop action 不可用或不在本机允许列表中；没有执行。');
+        continue;
+      }
+      // 先读目标 Photoshop 文档状态，避免把动作施加到错误应用或错误文档。
+      let photoshopStatus = null;
+      try {
+        const statusResult = await runPhotoshopAction('status', {});
+        if (statusResult.ok) photoshopStatus = statusResult.result;
+      } catch { /* 状态未知时确认卡明确显示 unknown */ }
+      const editorContext = await fetchEditorState().catch(() => null);
+      const photoshopDoc = photoshopStatus?.document?.activeDocument;
+      const answer = await askConfirm({
+        title: readOnly ? `Photoshop 查询：${action}` : `Photoshop 写操作：${action}`,
+        details: [
+          `目标 Photoshop  ${photoshopStatus?.progId || '未连接'}`,
+          photoshopDoc ? `活动文档  ${photoshopDoc.name} · ${photoshopDoc.widthPx}×${photoshopDoc.heightPx} · ${photoshopDoc.mode}` : '活动文档  未知（执行器将再次检查）',
+          editorContext ? `当前 miniPaint  ${editorContext.documentId} · R${editorContext.revision}（不是 Photoshop 的目标文档）` : '',
+          `Action  ${action}`,
+          `参数  ${summary.slice(0, 1800)}`,
+          readOnly ? '只读查询，不修改 Photoshop 文档。' : '会修改 Photoshop 活动文档；这不是 miniPaint 工程，也不能用 miniPaint 撤销。确认卡通过后仍须 DSH 原生审批。',
+        ].filter(Boolean).join('\n'),
+        maskAvailable: false,
+      });
+      if (!answer.ok) { bubble('bot', `已取消 Photoshop ${action}，没有执行。`); return; }
+      try {
+        // 写操作把 confirm 一并传过去：宿主路由据此再校验一次写 action 需人工确认。
+        const outcome = await runPhotoshopAction(action, args, { confirm: !readOnly });
+        const doc = outcome.document?.activeDocument;
+        const detail = doc ? ` · ${doc.name} ${doc.widthPx}×${doc.heightPx}` : '';
+        bubble('bot', readOnly
+          ? `Photoshop 状态：${outcome.progId || '未连接'}${detail}。没有修改任何文档。`
+          : `Photoshop ${action} 已执行${detail}。Photoshop 与 miniPaint 是两个独立文档，不能用 miniPaint 撤销。`);
+      } catch (error) {
+        bubble('bot', `Photoshop ${action} 失败（${error.code || 'PHOTOSHOP_FAILED'}）：${error.message}。请检查 Photoshop 后再决定是否重试。`);
+        return;
+      }
+      continue;
+    }
     if (op.type === 'plan') {
       // 一串步骤一次确认：人同意的是"这一整套"，不是逐条弹框；失败会整体回滚。
       const steps = Array.isArray(op.steps) ? op.steps.filter(step => step && typeof step.operation === 'string') : [];
@@ -1503,6 +1552,19 @@ async function undoApplied(count, startDigest) {
 async function fetchEditorState() {
   const connection = await connect();
   return transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
+}
+
+/**
+ * Photoshop 固定 action：读/写都走同一个已审计的宿主路由（同源 + token + action 白名单）。
+ * 模型永远给不出 JSX；这里也只转发结构化 action + 参数。
+ * 返回 { ok, action, progId, attached, result, document }，失败由 api() 抛 code/message。
+ */
+async function runPhotoshopAction(action, args, { confirm = false } = {}) {
+  const value = await api('/media-image/photoshop/action', {
+    method: 'POST',
+    body: { action, arguments: args && typeof args === 'object' && !Array.isArray(args) ? args : {}, ...(confirm ? { confirm: true } : {}) },
+  });
+  return { ok: true, ...value.result };
 }
 
 async function applyEditorCommand(state, command) {

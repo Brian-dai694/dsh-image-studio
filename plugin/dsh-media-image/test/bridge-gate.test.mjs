@@ -120,7 +120,9 @@ test('approval store expires and rejects unknown ids', () => {
 test('guard is synchronous and only denies', () => {
   const guard = createGuard();
   assert.equal(guard({ name: 'media_image_read_state', arguments: { editorKind: 'image' } }), undefined);
-  assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'canvas.crop', mode: 'autonomous' } }), /not authorized/);
+  // 白名单外的命令名被拒；白名单内的（含 canvas.crop）在 autonomous 下已获授权。
+  assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'canvas.not_a_command', mode: 'autonomous' } }), /not authorized/);
+  assert.equal(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'canvas.crop', mode: 'autonomous' } }), undefined);
   assert.equal(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'layer.update_text', mode: 'autonomous' } }), undefined);
   assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'video' } }), /targets the image editor/);
   assert.match(guard({ name: 'media_image_apply_command', arguments: { editorKind: 'image', operation: 'media.video.clip.move' } }), /layer.* operations/);

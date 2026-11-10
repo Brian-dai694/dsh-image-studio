@@ -13,6 +13,9 @@ export const THRESHOLDS = {
   colorSpreadWarn: 12,
   sharpnessWarn: 80,
   opaqueRatioWarn: 0.02,
+  // 分区量：图层至少要占画布这么大才值得提示"它看不见"，避免为一个小图标刷噪声。
+  regionShareWarn: 0.02,
+  regionOpaqueWarn: 0.02,
 };
 
 const severityOf = (value, warn, high) => (value >= high ? 'high' : value >= warn ? 'warn' : 'info');
@@ -93,6 +96,25 @@ export function reviewMeasurements(measurement) {
     findings.push({ code: 'UPSCALED_IMAGE', severity: 'info', message: `图层 ${item.id} 被放大到 ${item.scaled}px（原图 ${item.natural}px），会发虚`, suggestedCommand: null, evidence: { layerId: item.id, ...item } });
   }
 
+  // 分区量：按每个可见图层的外框量它那一块。只挑一种真正可操作的结论 ——
+  // "这层明明可见、也占了不小面积，但那块几乎没有内容"。多半是被上面不透明的层压住了，
+  // 或者它本身就是透明的；两种都能靠 reorder / preview 一步查清，所以给 reorder 建议。
+  const regions = Array.isArray(m.regions) ? m.regions : [];
+  for (const region of regions) {
+    if (region?.inCanvas !== true) continue;
+    const share = Number(region.canvasShare);
+    const opaque = Number(region.opaqueRatio);
+    if (!Number.isFinite(share) || !Number.isFinite(opaque)) continue;
+    if (share < THRESHOLDS.regionShareWarn) continue;
+    if (opaque >= THRESHOLDS.regionOpaqueWarn) continue;
+    findings.push({
+      code: 'REGION_NOT_VISIBLE', severity: 'warn',
+      message: `图层 ${region.layerId} 占画布 ${(share * 100).toFixed(1)}%，但那一块几乎没有内容（可见像素 ${(opaque * 100).toFixed(1)}%）—— 可能被上层压住了`,
+      suggestedCommand: suggest('layer.reorder'),
+      evidence: { layerId: region.layerId, name: region.name, canvasShare: share, opaqueRatio: opaque, meanLuma: region.meanLuma },
+    });
+  }
+
   return findings;
 }
 
@@ -106,5 +128,7 @@ export function summarizeMeasurements(measurement) {
   if (Number.isFinite(luma)) parts.push(`平均亮度 ${luma}`);
   if (Number.isFinite(hi)) parts.push(`高光裁切 ${(hi * 100).toFixed(1)}%`);
   if (Number.isFinite(lo)) parts.push(`暗部裁切 ${(lo * 100).toFixed(1)}%`);
+  const regions = Array.isArray(m.regions) ? m.regions : [];
+  if (regions.length) parts.push(`分区 ${regions.length} 个${Number(m.regionsTruncated) > 0 ? `（另有 ${m.regionsTruncated} 个未量）` : ''}`);
   return parts.join(' · ');
 }
