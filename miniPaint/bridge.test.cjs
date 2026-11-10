@@ -284,6 +284,35 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     }
   });
 
+  await test('editor.preview_png can tint a mask overlay so the affected region is visible', async () => {
+    const originalComposite = bridge.compositeCanvas.bind(bridge);
+    bridge.compositeCanvas = () => makeCanvas(120, 120, 200);
+    // 自造蒙版层：全幅不透明，用来验证叠加确实被画上去
+    const maskSource = { width: 4, height: 4, data: new Uint8ClampedArray(64).fill(255) };
+    config.layers.push({ id: 'overlay-mask', name: 'overlay-mask', type: 'image', x: 0, y: 0, width: 120, height: 120, visible: true, link: maskSource, params: {}, data: null, order: config.layers.length });
+    try {
+      const plain = {};
+      await bridge.handleRequest({ type: 'editor.preview_png', requestId: 'o1', editorInstanceId: bridge.editorInstanceId, maxWidth: 120 }, { postMessage(value) { plain.value = value; } });
+      const tinted = {};
+      await bridge.handleRequest({ type: 'editor.preview_png', requestId: 'o2', editorInstanceId: bridge.editorInstanceId, maxWidth: 120, overlay: { layerId: 'overlay-mask', color: '#ff00ff', opacity: 0.5 } }, { postMessage(value) { tinted.value = value; } });
+      assert.equal(plain.value.ok, true, JSON.stringify(plain.value));
+      assert.equal(tinted.value.ok, true, JSON.stringify(tinted.value));
+      assert.ok(tinted.value.result.overlay, '要回报叠加的矩形与颜色');
+      assert.equal(tinted.value.result.overlay.layerId, 'overlay-mask');
+      assert.equal(tinted.value.result.overlay.color, '#ff00ff');
+      assert.equal(tinted.value.result.overlay.opacity, 0.5);
+      assert.notEqual(tinted.value.result.dataUrl, plain.value.result.dataUrl, '带叠加的预览应与不带不同');
+      assert.equal(plain.value.result.overlay, undefined, '没要求叠加时不要附带 overlay');
+      const before = bridge.readState();
+      assert.equal(before.revision, bridge.revision, '预览与叠加都不改文档');
+    } finally {
+      bridge.compositeCanvas = originalComposite;
+      const index = config.layers.findIndex(item => item.id === 'overlay-mask');
+      if (index >= 0) config.layers.splice(index, 1);
+      if (typeof bridge.refreshRevision === 'function') bridge.refreshRevision();
+    }
+  });
+
   await test('layer.add_image with maskRef layer:<id> binds a LIVE mask, not baked pixels', async () => {
     // 自造一张带 alpha 的蒙版层：alpha 通道白/黑各半
     const maskSource = { width: 2, height: 2, data: new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255]) };

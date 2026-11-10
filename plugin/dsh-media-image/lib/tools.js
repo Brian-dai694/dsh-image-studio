@@ -62,7 +62,7 @@ const RESULT_SCHEMA = {
     preview: {
       type: 'object',
       additionalProperties: false,
-      properties: { dataUrl: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' }, bytes: { type: 'integer' } },
+      properties: { dataUrl: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' }, bytes: { type: 'integer' }, overlay: { type: 'object', additionalProperties: true } },
     },
     // 批量执行：逐步结果与回滚情况。
     steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
@@ -678,11 +678,11 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     try {
       bindings.assert(exec, kind, args);
       const state = await verify(kind, bridge, args, exec);
-      const image = await bridge.preview({ instanceId: args.instanceId, ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }), ...(args.grid ? { grid: true } : {}) });
+      const image = await bridge.preview({ instanceId: args.instanceId, ...(args.maxWidth === undefined ? {} : { maxWidth: args.maxWidth }), ...(args.grid ? { grid: true } : {}), ...(args.overlayLayerId === undefined && args.overlaySelection !== true ? {} : { overlay: { ...(args.overlayLayerId === undefined ? {} : { layerId: args.overlayLayerId }), ...(args.overlaySelection === true ? { selection: true } : {}), ...(args.overlayColor === undefined ? {} : { color: args.overlayColor }), ...(args.overlayOpacity === undefined ? {} : { opacity: args.overlayOpacity }) } }) });
       return {
         status: 'applied', commandId: 'preview', editorKind: kind,
         projectId: state.documentId, revision: state.revision,
-        preview: { dataUrl: image.dataUrl, width: image.width, height: image.height, bytes: image.bytes },
+        preview: { dataUrl: image.dataUrl, width: image.width, height: image.height, bytes: image.bytes, ...(image.overlay ? { overlay: image.overlay } : {}) },
         note: '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。',
       };
     } catch (error) {
@@ -697,6 +697,10 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       ...READ_PARAMS,
       maxWidth: { type: 'integer', description: 'Long-edge pixel cap (64..1024, default 640). Larger means more detail and more bytes.' },
       grid: { type: 'boolean', description: 'Draw a 100px coordinate grid with labels on the preview so positions can be checked numerically.' },
+      overlayLayerId: { type: 'string', description: 'Tint this layer\'s alpha over the preview so the affected region is visible before/after an edit.' },
+      overlaySelection: { type: 'boolean', description: 'Tint the current marquee selection over the preview (used when an edit is scoped to a selection).' },
+      overlayColor: { type: 'string', description: 'Overlay tint as #rrggbb (default #ff00ff).' },
+      overlayOpacity: { type: 'number', description: 'Overlay opacity 0.05..0.85 (default 0.35).' },
     },
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: preview('image', bridge),

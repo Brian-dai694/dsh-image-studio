@@ -365,7 +365,7 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
     // 缩略预览：只读，返回 data URL；超 256 KB 明确报错而不是截断。
     async preview(input) {
       opaqueId(input?.instanceId, 'instanceId');
-      const result = await request('editor.preview_png', { editorInstanceId: input.instanceId, ...(input.maxWidth === undefined ? {} : { maxWidth: input.maxWidth }), ...(input.grid ? { grid: true } : {}) });
+      const result = await request('editor.preview_png', { editorInstanceId: input.instanceId, ...(input.maxWidth === undefined ? {} : { maxWidth: input.maxWidth }), ...(input.grid ? { grid: true } : {}), ...(input.overlay === undefined ? {} : { overlay: input.overlay }) });
       if (!isObject(result) || typeof result.dataUrl !== 'string' || !result.dataUrl.startsWith('data:image/png;base64,')) {
         throw new MediaBridgeError('EDITOR_ERROR', 'Editor returned an invalid preview.');
       }

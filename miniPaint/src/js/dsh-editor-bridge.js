@@ -367,6 +367,8 @@ export class DshEditorBridge {
     const ctx = small.getContext('2d');
     if (!ctx) throw this.error('EDITOR_ERROR', '当前环境无法生成预览');
     ctx.drawImage(full, 0, 0, width, height);
+    // 可选蒙版叠加：把"这次会改到哪块"画成半透明色块，避免改完才发现动错了地方。
+    const overlayInfo = this.previewOverlay(request.overlay, ctx, scale, width, height);
     // 可选坐标网格：按源图像素每 100 画一条线并标注坐标，方便调用方把"位置"对上数字。
     if (request.grid) {
       const stepSource = 100;
@@ -389,7 +391,49 @@ export class DshEditorBridge {
     const dataUrl = small.toDataURL('image/png');
     const bytes = Math.round((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75);
     if (bytes > 256 * 1024) throw this.error('PREVIEW_TOO_LARGE', `预览 ${Math.round(bytes / 1024)} KB 超过 256 KB，请调低 maxWidth`);
-    return { dataUrl, width, height, bytes };
+    return { dataUrl, width, height, bytes, ...(overlayInfo ? { overlay: overlayInfo } : {}) };
+  }
+
+  /**
+   * 预览叠加层：把蒙版（或当前选区）画成半透明色块。
+   * 只影响预览图，不改文档、不推进 revision——目的是让"改到哪块"在执行前就看得见。
+   */
+  previewOverlay(overlay, ctx, scale, width, height) {
+    if (!overlay) return null;
+    const source = overlay.layerId !== undefined ? this.get_layer_for_preview(overlay.layerId) : null;
+    const selection = !source && overlay.selection !== false ? this.readSelectionRect() : null;
+    if (!source && !selection) return null;
+
+    const tint = typeof overlay.color === 'string' && /^#[0-9a-f]{6}$/i.test(overlay.color) ? overlay.color : '#ff00ff';
+    const alpha = Number.isFinite(Number(overlay.opacity)) ? Math.max(0.05, Math.min(0.85, Number(overlay.opacity))) : 0.35;
+    const scratch = document.createElement('canvas');
+    scratch.width = width; scratch.height = height;
+    const sctx = scratch.getContext('2d');
+    if (source && source.link) {
+      const sw = Number(source.width) || 1, sh = Number(source.height) || 1;
+      sctx.drawImage(source.link_canvas != null ? source.link_canvas : source.link, Math.round((source.x || 0) * scale), Math.round((source.y || 0) * scale), Math.max(1, Math.round(sw * scale)), Math.max(1, Math.round(sh * scale)));
+    } else if (selection) {
+      sctx.fillStyle = '#ffffff';
+      sctx.fillRect(Math.round(selection.x * scale), Math.round(selection.y * scale), Math.max(1, Math.round(selection.width * scale)), Math.max(1, Math.round(selection.height * scale)));
+    }
+    // 用蒙版的 alpha 当形状：先把形状留下，再整体染成提示色。
+    sctx.globalCompositeOperation = 'source-in';
+    sctx.fillStyle = tint;
+    sctx.fillRect(0, 0, width, height);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(scratch, 0, 0);
+    ctx.restore();
+    const box = source
+      ? { x: Math.round(source.x || 0), y: Math.round(source.y || 0), width: Math.round(source.width || 0), height: Math.round(source.height || 0), kind: 'layer', layerId: String(source.id) }
+      : { x: Math.round(selection.x), y: Math.round(selection.y), width: Math.round(selection.width), height: Math.round(selection.height), kind: 'selection' };
+    return { ...box, color: tint, opacity: alpha, scale: Number(scale.toFixed(4)) };
+  }
+
+  /** read_state 之外的内部取层（预览叠加用），不存在返回 null。 */
+  get_layer_for_preview(id) {
+    const layers = config.layers || [];
+    return layers.find(layer => String(layer.id) === String(id)) || null;
   }
 
   /** 把当前文档合成到一张全尺寸画布（只读，不改任何图层）。 */

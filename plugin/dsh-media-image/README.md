@@ -126,7 +126,13 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 | 图层体检 | 越界、零尺寸、文字层估计宽度超框、文字与背景对比不足、位图被放大 |
 
 `layer.update_text` 支持 `style:{fill_color}`，所以"文字与背景对比不足"有可执行的修复命令（`TEXT_LOW_CONTRAST` → `layer.update_text`），而不是只报警。
-`media_image_preview` 支持 `grid:true`：在缩略图上画 100px 坐标网格并标注源图像素坐标，方便把"位置"对上数字。
+`media_image_preview` 支持：
+
+- `grid:true`：画 100px 坐标网格并标注源图像素坐标
+- `overlayLayerId` / `overlaySelection` / `overlayColor` / `overlayOpacity`：把**这次会改到的区域**染成半透明色块，
+  并在回执里给 `overlay:{x,y,width,height,kind,color,opacity,scale}`。只影响预览图，不改文档、不推进 revision。
+
+这条对应"AI 修图翻车"里最常见的一种失败：**没人看得见它要改哪块**。先看见，再执行。
 
 返回 `analysis` + `findings[]`，每条 finding 带 `suggestedCommand`（**必须是白名单命令**，测试逐条核对）。
 助手执行完 plan / 套版后会自动跑一次，回一句 `计划自检：平均亮度 0.46 · 高光裁切 0.0%`，只报数值不做主观评价；
