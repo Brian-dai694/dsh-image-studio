@@ -14,6 +14,8 @@ const DSH_EFFECT_RANGES = {
   blur: [0, 50], brightness: [0, 3], contrast: [0, 3], saturate: [0, 3],
   grayscale: [0, 1], sepia: [0, 1], invert: [0, 1], hueRotate: [-180, 180], opacity: [0, 1],
 };
+// read_state 里回给调用方的历史条数上限：长历史对"跳到某一步"没意义，还会撑大回执。
+const HISTORY_ENTRIES = 30;
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
@@ -947,7 +949,15 @@ export class DshEditorBridge {
       canvas: { width: canvasWidth, height: canvasHeight },
       view: { scale: zoomView.getScale(), position: { x: position.x, y: position.y } },
       history: { ...(validTop ? { lastCommandId: top.commandId, appliedRevision: top.revision, afterDigest: top.afterDigest } : {}), canUndo: app.State.can_undo(), canRedo: app.State.can_redo(),
-        undoDepth: historyIndex, redoDepth: historyLength - historyIndex, lastActionId: historyIndex > 0 ? app.State.action_history[historyIndex - 1]?.action_id ?? 'unknown' : 'unknown' },
+        undoDepth: historyIndex, redoDepth: historyLength - historyIndex, lastActionId: historyIndex > 0 ? app.State.action_history[historyIndex - 1]?.action_id ?? 'unknown' : 'unknown',
+        // 位置语义：index = 已经应用了几步；entries 里 position <= index 的是"已应用"。
+        // 只给最近 HISTORY_ENTRIES 条（长的历史对调用方没意义，也会撑大回执）。
+        index: historyIndex,
+        total: historyLength,
+        entries: app.State.action_history.slice(-HISTORY_ENTRIES).map((action, offset) => {
+          const position = Math.max(0, historyLength - Math.min(historyLength, HISTORY_ENTRIES)) + offset;
+          return { position, action: String(action?.action_id || 'unknown'), label: String(action?.action_description || '').slice(0, 80), applied: position < historyIndex };
+        }) },
       selectedLayerId, selectedObjects: selectedLayer ? [{ id: selectedLayer.id, kind: selectedLayer.type,
         textSummary: selectedLayer.type === 'text' ? selectedLayer.text : null,
         propsSummary: selectedLayer.type === 'text' ? null : { name: selectedLayer.name },

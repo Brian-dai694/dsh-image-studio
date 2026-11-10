@@ -1564,6 +1564,115 @@ async function fetchEditorState() {
 }
 
 /**
+ * 历史条：把 read_state.history.entries 画成可点的步骤，点一条就**逐步** undo/redo 到那个位置。
+ * 为什么逐步而不是一步跳：miniPaint 只有单步 undo/redo；伪造一步跳会绕开它的历史模型。
+ * 代价是 N 次 revision，所以限制单次跳转距离并把每一步的结果如实报出来。
+ */
+const historyBar = (() => {
+  const bar = $('history-bar');
+  const steps = $('history-steps');
+  const meta = $('history-meta');
+  const MAX_JUMP = 20;
+  let busy = false;
+
+  const render = history => {
+    steps.replaceChildren();
+    if (!history || !Array.isArray(history.entries)) {
+      meta.textContent = '历史（未连接）';
+      return;
+    }
+    meta.textContent = `历史 ${history.index}/${history.total}${history.canUndo ? '' : ' · 无更早'}${history.canRedo ? '' : ' · 无更晚'}`;
+    for (const entry of history.entries) {
+      const step = document.createElement('button');
+      step.type = 'button';
+      step.className = 'history-step';
+      step.dataset.applied = entry.applied ? '1' : '0';
+      step.dataset.current = entry.position === history.index - 1 ? '1' : '0';
+      step.textContent = entry.label || entry.action;
+      step.title = `跳到第 ${entry.position + 1} 步（${entry.action}）`;
+      step.disabled = busy || entry.position + 1 === history.index;
+      step.addEventListener('click', () => { jumpTo(entry.position + 1).catch(() => {}); });
+      steps.append(step);
+    }
+  };
+
+  const refresh = async () => {
+    try {
+      const state = await fetchEditorState();
+      render(state?.history);
+      return state?.history;
+    } catch {
+      render(null);
+      return null;
+    }
+  };
+
+  /** 走到 target（= 已应用步数）。返回实际走到的位置与步数，失败即停。 */
+  const jumpTo = async target => {
+    if (busy) return null;
+    busy = true;
+    let state = await fetchEditorState();
+    let history = state?.history;
+    if (!history) { busy = false; return null; }
+    const start = history.index;
+    const distance = Math.abs(target - history.index);
+    if (distance === 0) { busy = false; await refresh(); return { position: start, moved: 0 }; }
+    if (distance > MAX_JUMP) {
+      bubble('bot', `一次最多跳 ${MAX_JUMP} 步，这次要从第 ${history.index} 步到第 ${target} 步（${distance} 步）。请分几次点。`);
+      busy = false;
+      await refresh();
+      return null;
+    }
+    const answer = await askConfirm({
+      title: `跳到第 ${target} 步`,
+      details: [
+        `从  第 ${history.index} 步`,
+        `到  第 ${target} 步（${target < history.index ? `撤销 ${distance} 步` : `重做 ${distance} 步`}）`,
+        '每一步都会真实改动工程并推进一次 revision；中途失败会停下并如实报告走到第几步。',
+      ].join('\n'),
+      maskAvailable: false,
+    });
+    if (!answer.ok) { busy = false; await refresh(); return null; }
+    let moved = 0;
+    try {
+      render({ ...history, entries: history.entries ?? [] });
+      while (true) {
+        state = await fetchEditorState();
+        history = state?.history;
+        if (!history) break;
+        if (history.index === target) break;
+        const operation = history.index > target ? 'history.undo' : 'history.redo';
+        const result = await transport.request({
+          type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId,
+          documentId: state.documentId, expectedRevision: state.revision, commandId: crypto.randomUUID(),
+          command: { type: operation, payload: {} },
+        }, { timeoutMs: 15000 });
+        if (!result || typeof result.revision !== 'number') break;
+        moved += 1;
+        if (moved >= distance + 2) break; // 防御：不该超过请求距离
+      }
+    } catch (error) {
+      bubble('bot', `跳转中途停下（${error.code || error.message}）：已走 ${moved} 步，当前在第 ${(await refresh())?.index ?? '?'} 步。`);
+      busy = false;
+      return { position: null, moved };
+    }
+    const finalState = await fetchEditorState().catch(() => null);
+    const finalHistory = finalState?.history;
+    busy = false;
+    render(finalHistory);
+    if (finalHistory && finalHistory.index !== target) {
+      bubble('bot', `只走到第 ${finalHistory.index} 步（目标 ${target}），可能已经到头了。画布没有继续改动。`);
+    } else {
+      bubble('bot', `已跳到第 ${target} 步（走了 ${moved} 步）。`);
+      await reportSelfCheck('历史跳转');
+    }
+    return { position: finalHistory?.index ?? null, moved };
+  };
+
+  return { refresh, render, jumpTo, get busy() { return busy; } };
+})();
+
+/**
  * Photoshop 固定 action：读/写都走同一个已审计的宿主路由（同源 + token + action 白名单）。
  * 模型永远给不出 JSX；这里也只转发结构化 action + 参数。
  * 返回 { ok, action, progId, attached, result, document }，失败由 api() 抛 code/message。
@@ -1692,6 +1801,8 @@ function commandTargetSummary(state, command, payload = {}) {
 async function reportSelfCheck(label) {
   try {
     const state = await fetchEditorState();
+    // 每次执行完都顺手刷新历史条：它是"刚才那步落在历史哪一格"的唯一视图。
+    historyBar.render(state?.history);
     const analysis = await transport.request({ type: 'editor.analyze', requestId: crypto.randomUUID(), editorInstanceId: state.editorInstanceId }, { timeoutMs: 10000 });
     if (!analysis) return;
     const parts = [];
@@ -2051,6 +2162,9 @@ $('assist-reset')?.addEventListener('click', () => { if (assistLog) assistLog.te
 $('assist-send')?.addEventListener('click', () => void sendAssist());
 $('assist-text')?.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void sendAssist(); } });
 renderChips();
+
+// 历史条首帧：编辑器可能还没就绪，失败就先显示「未连接」，点「连接」后会再刷。
+void historyBar.refresh();
 
 window.addEventListener('pagehide', () => { if (batchTimer !== null) clearTimeout(batchTimer); stopPolling(); void relay?.stop(); });
 

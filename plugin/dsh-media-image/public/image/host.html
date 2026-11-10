@@ -133,6 +133,15 @@ dialog#confirm-modal pre{max-height:200px}
 .palette-params textarea{flex:1;min-height:62px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
   background:transparent;color:inherit;border:1px solid var(--dsw-alias-border,#333);border-radius:8px;padding:8px}
 .palette-hint{font-size:12px;opacity:.7;padding:0 14px 10px}
+/* 历史条：点一条跳到该历史点（逐步 undo/redo，每步一次 revision）。 */
+.history-bar{display:flex;gap:6px;align-items:center;overflow-x:auto;padding:6px 12px;
+  border-top:1px solid var(--dsw-alias-border,#333);background:var(--dsw-alias-bg-sunken,rgba(0,0,0,.16))}
+.history-bar .meta{font-size:12px;opacity:.7;white-space:nowrap;margin-right:6px}
+.history-step{border:1px solid transparent;background:transparent;color:inherit;font:inherit;font-size:12px;
+  padding:2px 8px;border-radius:999px;white-space:nowrap;cursor:pointer;opacity:.55}
+.history-step[data-applied="1"]{opacity:1;border-color:var(--dsw-alias-border,#444)}
+.history-step[data-current="1"]{outline:2px solid var(--dsw-alias-accent,#4d6bfe);opacity:1}
+.history-step:hover{background:var(--dsw-alias-bg-hover,rgba(255,255,255,.08))}
   </style>
 </head>
 <body>
@@ -226,6 +235,10 @@ dialog#confirm-modal pre{max-height:200px}
       </section>
     </aside>
   </main>
+  <div class="history-bar" id="history-bar" aria-label="历史">
+    <span class="meta" id="history-meta">历史</span>
+    <div id="history-steps" style="display:flex;gap:6px;align-items:center"></div>
+  </div>
   <button class="assist-launcher" id="assist-open"><span class="dot"></span>助手</button>
   <section class="assist-card" id="assist-card" aria-label="助手">
     <div class="assist-head">

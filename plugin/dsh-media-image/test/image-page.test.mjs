@@ -317,6 +317,33 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('历史条：逐步 undo/redo 跳到目标位置，限制单次距离，失败如实报告走到第几步', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const page = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const start = code.indexOf('const historyBar = ');
+  assert.ok(start > 0, '必须有历史条实现');
+  const block = code.slice(start);
+
+  // 页面元素
+  assert.match(page, /id="history-bar"/);
+  assert.match(page, /id="history-steps"/);
+
+  // 只读 state 里已有的结构，不在页面里另算历史
+  assert.match(block, /history\.entries/, '必须用 read_state 给的历史条目');
+  assert.match(block, /entry\.applied/, '要区分已应用/未应用');
+  // 单步走：只能发 history.undo / history.redo，不得伪造一次跳多步的命令
+  assert.match(block, /'history\.undo' : 'history\.redo'/, '必须逐步 undo/redo');
+  assert.equal(/type: 'history\.jump'/.test(code), false, '不得发明不存在的 history.jump 命令');
+  // 距离上限与失败如实报告
+  assert.match(block, /const MAX_JUMP = \d+/, '必须有单次跳转上限');
+  assert.match(block, /最多跳 \$\{MAX_JUMP\} 步/, '超限要明确告诉人');
+  assert.match(block, /中途停下/, '失败必须说清走到第几步');
+  assert.match(block, /只走到第 \$\{finalHistory\.index\} 步/, '没走到目标要如实报告');
+  // 每步都要用当前 revision（否则会被 REVISION_CONFLICT 拒绝）
+  assert.match(block, /expectedRevision: state\.revision/, '每一步都要带当前 revision');
+});
+
 test('命令面板：吃同一份命令目录、快捷键可用、执行走 Agent 同一条 apply_command 路径', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const page = readFileSync(join(publicImage, 'host.html'), 'utf8');

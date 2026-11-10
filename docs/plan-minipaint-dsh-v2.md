@@ -255,13 +255,20 @@ detail01 解析出 2 组「细节图」（4 个图片层）与「文案」（3 �
 - 确认卡、执行卡、自检卡**分卡片**，不再挤在一条消息流里；卡片带 `revision` 与 `digest` 便于核对。
 - 底部历史条：显示最近 N 条，点一条 → `history.undo` 到该点（复用现有守卫凭据）。
 
+**历史条实现（v0.48.0）**：miniPaint 只有单步 undo/redo，所以"跳到第 K 步"只能**逐步走**，
+不伪造一步跳转（那会绕开它自己的历史模型）。代价是每一步一次 revision，因此：
+单次跳转距离上限 **20 步**（超了明确告诉人要分几次点）、每步都用当前 revision、
+中途失败立即停下并如实报告"走到第几步"、没走到目标（到头了）也如实说。
+操作前一次确认，操作后自动自检。`read_state.history` 新增 `index` / `total` / `entries[]`（最近 30 条）。
+
 #### C 进度（v0.47.0）
 
 | 项 | 状态 | 说明 |
 |---|---|---|
 | **C2 命令面板 ⌘K** | ✅ | 见下；这是 Phase C 里唯一"UI 与 Agent 必须同源"的硬要求 |
 | C1 三栏布局 | ⏸ 未做 | 现状是 `stage(iframe) + aside(7 个面板)` 两栏，助手已是可开合的浮层卡片；改成三栏需要动 iframe 尺寸策略，收益主要是观感 |
-| C1 卡片分离 | ◐ 部分 | `askConfirm` 已是独立确认卡、`reportSelfCheck` 已是独立自检卡；历史条未做 |
+| C1 卡片分离 | ◐ 部分 | `askConfirm` 已是独立确认卡、`reportSelfCheck` 已是独立自检卡；**历史条已做**（见下） |
+| C1 历史条 | ✅ | `read_state.history` 增加 `index` / `total` / `entries[]`（position / action / label / applied，限最近 30 条）；页面底部历史条点一条 → **逐步** undo/redo 到该位置 |
 | C3 主题 token | ◐ 部分 | 面板配色走 `--dsw-alias-*`；新面板/命令面板也用同一批 token，没有硬编码色 |
 
 **C2 实现要点**：新增只读路由 `POST /media-image/commands`（body 带页面已有的 `state`），

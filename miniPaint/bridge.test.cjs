@@ -1576,5 +1576,68 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     assert.equal(bad.ok, false);
     assert.equal(bad.error.code, 'INVALID_REQUEST');
   });
+  await test('read_state 暴露可跳转的历史条目：位置语义与 applied 标记必须自洽', async () => {
+    const layer = { id: 9601, name: '历史层', type: 'image', link: makeCanvas(20, 20, 3), x: 0, y: 0, width: 20, height: 20, order: 120, visible: true };
+    config.layers.push(layer);
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    await bridge.prepareDigest();
+
+    const before = bridge.readState().history;
+    const startIndex = before.index;
+    const total = before.total;
+    assert.equal(typeof total, 'number');
+    // 做两步可撤销的改动
+    for (const [opacity, name] of [[80, '第一步'], [60, '第二步']]) {
+      const response = await send({ type: 'layer.set_appearance', payload: { layerId: '9601', opacity, name } });
+      assert.equal(response.ok, true, JSON.stringify(response));
+    }
+    const after = bridge.readState().history;
+    assert.equal(after.index, startIndex + 2, '每步都应推进 index');
+    assert.equal(after.total, total + 2);
+    assert.ok(Array.isArray(after.entries) && after.entries.length >= 2);
+    assert.ok(after.entries.length <= 30, '历史条目要截断，不能无限大');
+
+    // applied 标记 = position < index；最后一个 entry 就是刚做的那一步
+    for (const entry of after.entries) assert.equal(entry.applied, entry.position < after.index, JSON.stringify(entry));
+    const last = after.entries[after.entries.length - 1];
+    assert.equal(last.position, after.index - 1);
+    assert.equal(last.applied, true);
+    // 标签来自原生动作自身（action_id / action_description），不是命令参数里的 name。
+    assert.equal(last.action, 'update_layer');
+    assert.equal(typeof last.label, 'string');
+    assert.ok(last.label.length > 0, '要带人能看懂的动作描述');
+
+    // 撤销一步后，同一个 position 的 applied 要跟着翻
+    const undo = await send({ type: 'history.undo', payload: {} });
+    assert.equal(undo.ok, true);
+    const undone = bridge.readState().history;
+    assert.equal(undone.index, after.index - 1);
+    const lastAfterUndo = undone.entries[undone.entries.length - 1];
+    assert.equal(lastAfterUndo.applied, false, '撤销之后该条不再是已应用');
+    config.layers = config.layers.filter(item => item.id !== 9601);
+  });
+  await test('history.entries 在空历史上是空数组，不会编造条目', async () => {
+    const saved = config.layers.slice();
+    config.layers = [{ id: 9602, name: '底', type: 'image', link: makeCanvas(8, 8, 1), x: 0, y: 0, width: 8, height: 8, order: 130, visible: true }];
+    const savedHistory = app.State.action_history;
+    const savedIndex = app.State.action_history_index;
+    app.State.action_history = [];
+    app.State.action_history_index = 0;
+    bridge.refreshRevision();
+    try {
+      const history = bridge.readState().history;
+      assert.deepEqual(history.entries, []);
+      assert.equal(history.index, 0);
+      assert.equal(history.total, 0);
+      assert.equal(history.canUndo, false);
+    } finally {
+      app.State.action_history = savedHistory;
+      app.State.action_history_index = savedIndex;
+      config.layers = saved;
+      bridge.pixelMutation += 1;
+      bridge.refreshRevision();
+    }
+  });
   console.log(JSON.stringify({passed:count,scope:'real bridge + real native action/state methods; DOM/rendering stubbed, not browser acceptance'}));
 })().catch(error => { console.error(error); process.exitCode=1; });
