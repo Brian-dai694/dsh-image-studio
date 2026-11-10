@@ -12,7 +12,8 @@ description: Use when editing images inside the DSH image studio (miniPaint edit
 
 0. `media_image_list_commands` —— 先拿命令目录：每条命令的 `params`、`needs`、`highRisk`，以及**当前** `enabled` / `disabledReason`（如 `no-selected-layer`、`selected-layer-is-text-not-image`）。它只读、不写画布，用来避免"发一条注定失败的写"。
 0b. `media_image_analyze` —— 做完再量一遍：平均亮度、直方图、暗部/高光裁切比例、偏色、清晰度、图层越界/零尺寸/文字超框。返回 `findings[]`，每条带可用的 `suggestedCommand`。**它是只读的**，不会推进 revision；不要凭感觉说"改好了"，用它的数值说话。
-0c. `media_image_preview` —— 拿一张降采样缩略图（data URL，≤256 KB）。只读。**能否真的看到画面取决于宿主是否渲染 tool 结果里的图片**；不能渲染时它只是可保存的缩略图，别声称自己看见了。
+0c. `media_image_preview` —— 拿一张降采样缩略图（data URL，≤256 KB）。只读。**能否真的看到画面取决于宿主是否渲染 tool 结果里的图片**；不能渲染时它只是可保存的缩略图，别声称自己看见了。带 `grid:true` 会画坐标网格；带 `overlayLayerId` 会把该蒙版区域染成半透明色块，用来在执行前看清"会改到哪块"。
+0d. `media_image_recipe` —— 预录流程（对应 PS 的 .atn）：人先审阅一串命令存成带参数的名字（`${param}` 占位），之后任何调用方都能 `action=run` 复用。整串执行仍然是一条历史、失败整体回滚；同样的白名单与高危限制。
 1. `media_image_read_state` —— 拿 `projectId` / `revision` / `stateDigest` / 图层表 / `selection` / `assets`。
 2. 用读到的 `revision` 作为 `expectedRevision` 提交 `media_image_apply_command`。
 3. 回执里 `revision` 会 +1，`afterDigest` 是真回读出来的摘要。

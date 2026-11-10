@@ -90,6 +90,17 @@ DSH 侧栏「图片编辑器」和画布主面板保持显示。截图红框里�
 - `clear()` 只清内存缓存，**不删用户文件**；只有测试/运维用的 `purge()` 才真删
 - 写盘失败不让上传失败：退回内存态并把该素材标记为未持久化
 
+## 预录流程（recipe）
+
+对应 Photoshop 的 `.atn` 思路：**效果由人先定义并审阅，模型只负责挑选与填参**。
+
+- `action=save`：把 1..12 条白名单命令存成有名字的流程，字符串里可用 `${参数名}`
+- `action=list` / `get` / `delete`
+- `action=run`：填参后当作**一条** `history.batch` 执行 —— 一条历史、失败整串回滚
+- 限制与 `run_plan` 一致：不能含 `history.*`、不能含高危命令（`layer.remove`/`canvas.crop`/`layer.add_image`）
+- 缺参数明确报 `RECIPE_PARAMS_MISSING`，不会用空串糊过去
+- 配了 `dataDir` 就落盘到 `<dataDir>/recipes/recipes.json`，重启后仍在；索引坏行跳过
+
 ## 活蒙版（可接管）
 
 `layer.add_image {maskRef:"layer:<蒙版层id>"}` 现在绑定的是**活蒙版**：蒙版记在 `params.dshMask`，由合成阶段按蒙版层 alpha 逐像素相乘。

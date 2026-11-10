@@ -199,6 +199,7 @@ export const HIGH_RISK_OPERATIONS = {
 export const TOOL_KINDS = {
   media_image_read_state: 'image',
   media_image_analyze: 'image',
+  media_image_recipe: 'image',
   media_image_preview: 'image',
   media_image_list_commands: 'image',
   media_image_apply_command: 'image',

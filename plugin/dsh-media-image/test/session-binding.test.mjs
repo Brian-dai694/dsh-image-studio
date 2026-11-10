@@ -37,6 +37,13 @@ test('unwired production registration fails closed; no tool reaches editor witho
       steps: [{ operation: kind === 'image' ? 'layer.add_text' : 'media.video.overlay.update', params: {} }] };
     // 生成工具不碰工程，没有会话绑定可查；它的 fail-closed 是"没配后端就拒绝"，
     // 与编辑器工具的 SESSION_* 是两回事，分开断言而不是放宽循环。
+    // 流程库的 list/save/delete 不碰编辑器；它自己的 fail-closed 是"没配 dataDir 就拒绝"。
+    if (name === 'media_image_recipe') {
+      const listed = await tool.execute({ action: 'list' }, exec('s1'));
+      assert.ok(['applied', 'rejected'].includes(listed.status));
+      if (listed.status === 'rejected') assert.equal(listed.error.code, 'RECIPE_UNAVAILABLE');
+      continue;
+    }
     if (name === 'media_image_generate') {
       const generated = await tool.execute({ editorKind: 'image' }, exec('s1'));
       assert.equal(generated.status, 'rejected');

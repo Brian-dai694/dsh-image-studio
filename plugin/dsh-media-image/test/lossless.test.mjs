@@ -80,6 +80,7 @@ function argsFor(name, definition) {
   if (name.endsWith('export_start')) return { editorKind: kind, projectId: 'p1', instanceId, commandId: 'c2', expectedRevision: revision, format: kind === 'image' ? 'png' : 'webm' };
   if (name.endsWith('export_status')) return { editorKind: kind, projectId: 'p1', instanceId, exportId: 'exp-1' };
   if (name.endsWith('run_plan')) return { editorKind: kind, projectId: 'p1', instanceId, commandId: 'c3', expectedRevision: revision, steps: [{ operation: kind === 'image' ? 'layer.add_text' : 'media.video.overlay.update', params: {} }] };
+  if (name.endsWith('recipe')) return { action: 'list' };
   return { projectId: 'p1', instanceId, commandId: 'c1' };
 }
 

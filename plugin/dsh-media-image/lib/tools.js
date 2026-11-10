@@ -3,6 +3,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { MediaBridgeError, HIGH_RISK_COMMANDS } from './bridge.js';
 import { describeCommands, summarize, suggestOperation } from './commands.js';
+import { validateRecipeSteps, fillRecipeParams, recipeParamsOf } from './recipes.js';
 import { reviewMeasurements, summarizeMeasurements } from './analyze.js';
 import {
   HIGH_RISK_OPERATIONS, digestOf, requestHumanApproval, createSessionBindings, trustedSessionId, APPROVAL_WAIT_MS,
@@ -59,6 +60,9 @@ const RESULT_SCHEMA = {
     findings: { type: 'array', items: { type: 'object', additionalProperties: true } },
     summary: { type: 'string' },
     note: { type: 'string' },
+    // 预录流程
+    recipe: { type: 'object', additionalProperties: true },
+    recipeList: { type: 'array', items: { type: 'object', additionalProperties: true } },
     preview: {
       type: 'object',
       additionalProperties: false,
@@ -304,7 +308,7 @@ export function toLosslessJson(value) {
 // 注册本包的全部模型工具（图片 5 个 / 视频 5 个）。
 // 每个 execute 先过 toLosslessJson 再做 schema 快照校验，避免 undefined 导致
 // "non-lossless JSON"；binding 校验与审批在各自 execute 内完成。
-export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null }) {
+export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null, recipes = null }) {
   const appliedCommands = new Map();
   const verify = async (kind, bridge, args, exec) => {
     const binding = bindings.assert(exec, kind, args);
@@ -705,6 +709,81 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: preview('image', bridge),
     timeoutMs: 10_000,
+  }));
+
+  // 预录流程：人先定义并审阅一串命令，模型只负责挑选与填参（对应 PS 的 .atn 思路）。
+  // 执行仍走 history.batch：一条历史、失败整串回滚。
+  const recipeTool = () => async (args, exec) => {
+    try {
+      if (!recipes) throw new MediaBridgeError('RECIPE_UNAVAILABLE', '流程库未启用：需要在插件配置里设置 dataDir');
+      const action = args.action;
+      if (action === 'list') {
+        return { status: 'applied', commandId: 'recipe-list', editorKind: 'image', recipeList: recipes.list(), counts: { recipes: recipes.list().length } };
+      }
+      if (action === 'get') {
+        const recipe = recipes.get(args.name);
+        if (!recipe) throw new MediaBridgeError('RECIPE_NOT_FOUND', `没有名为 ${args.name} 的流程`);
+        return { status: 'applied', commandId: 'recipe-get', editorKind: 'image', recipe: { name: recipe.name, description: recipe.description, steps: recipe.steps, params: recipeParamsOf(recipe.steps) } };
+      }
+      if (action === 'save') {
+        const saved = recipes.save({ name: args.name, description: args.description, steps: args.steps });
+        return { status: 'applied', commandId: 'recipe-save', editorKind: 'image', recipe: saved, note: saved.replaced ? '同名流程已更新（替换，不是新增）' : '流程已保存' };
+      }
+      if (action === 'delete') {
+        const removed = recipes.remove(args.name);
+        if (!removed) throw new MediaBridgeError('RECIPE_NOT_FOUND', `没有名为 ${args.name} 的流程`);
+        return { status: 'applied', commandId: 'recipe-delete', editorKind: 'image', note: `已删除流程 ${args.name}` };
+      }
+      if (action !== 'run') throw new MediaBridgeError('INVALID_REQUEST', 'action 必须是 list/get/save/delete/run');
+
+      const commandId = args.commandId;
+      bindings.assert(exec, 'image', args);
+      const recipe = recipes.get(args.name);
+      if (!recipe) throw new MediaBridgeError('RECIPE_NOT_FOUND', `没有名为 ${args.name} 的流程`);
+      const steps = fillRecipeParams(recipe.steps, args.params ?? {});
+      const state = await verify('image', bridge, args, exec);
+      if (state.revision !== args.expectedRevision) {
+        return envelope('image', { commandId, revision: state.revision, stateDigest: state.stateDigest, error: { code: 'REVISION_CONFLICT', message: `Project is at revision ${state.revision}; read_state again before writing.`, retryable: true } });
+      }
+      const projectId = args.projectId ?? state.documentId;
+      const result = await bridge.applyCommand({
+        instanceId: args.instanceId, projectId, expectedRevision: args.expectedRevision, commandId,
+        command: { type: 'history.batch', payload: { steps: steps.map(step => ({ type: step.operation, payload: step.params })) } },
+      });
+      return {
+        status: 'applied', commandId, editorKind: 'image', projectId,
+        revision: result.revision,
+        ...(result.stateDigest ? { stateDigest: result.stateDigest } : {}),
+        ...(result.afterDigest ? { afterDigest: result.afterDigest } : {}),
+        recipe: { name: recipe.name, stepCount: steps.length },
+        steps: steps.map((step, index) => ({ step: index + 1, operation: step.operation })),
+        note: '整串作为一条历史执行；任一步失败会整体回滚。',
+      };
+    } catch (error) {
+      return failure('image', args.commandId || `recipe-${args.action}`, error);
+    }
+  };
+
+  register(defineTool({
+    name: 'media_image_recipe',
+    description: 'Store and run named, parameterised command recipes (the .atn idea): a human reviews the steps once, then any caller can replay them with parameters. Steps must be 1..12 allowlisted commands, cannot contain history.* or high-risk operations. Running uses history.batch, so the whole recipe is ONE undo step and rolls back as a whole. Actions: list, get, save, delete, run.',
+    parameters: {
+      action: { type: 'string', required: true, enum: ['list', 'get', 'save', 'delete', 'run'] },
+      name: { type: 'string', description: 'Recipe name (1..40 chars; letters, digits, CJK, space, dot, dash, underscore).' },
+      description: { type: 'string', description: 'save: short human description.' },
+      steps: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'save: [{operation, params}] with ${param} placeholders allowed in string values.' },
+      params: { type: 'object', additionalProperties: true, description: 'run: values for ${param} placeholders.' },
+      // list/get/save/delete 不碰编辑器，所以这三个字段在 schema 上不是必填；
+      // run 分支会自己校验（缺 projectId/instanceId 时明确报错）。
+      editorKind: { type: 'string', enum: ['image'], description: 'Only the image editor is supported.' },
+      projectId: { type: 'string', description: 'run: explicit Host-bound project id.' },
+      instanceId: { type: 'string', description: 'run: connected editor instance id.' },
+      commandId: { type: 'string', description: 'run: idempotency key.' },
+      expectedRevision: { type: 'integer', description: 'run: revision from the latest read_state.' },
+    },
+    output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+    execute: recipeTool(),
+    timeoutMs: APPROVAL_BUDGET_MS,
   }));
 
   register(defineTool({

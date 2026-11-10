@@ -30,7 +30,7 @@ function makeContext() {
 test('every registered tool and metric kind belongs to the image editor', () => {
   const { ctx, tools } = makeContext();
   apply(ctx, { dataDir: 'C:/tmp/image-scope' });
-  assert.equal(tools.size, 10);
+  assert.equal(tools.size, 11);
   for (const name of tools.keys()) assert.match(name, /^media_image_/);
   assert.deepEqual([...new Set(Object.values(TOOL_KINDS))], ['image']);
   for (const definition of tools.values()) {

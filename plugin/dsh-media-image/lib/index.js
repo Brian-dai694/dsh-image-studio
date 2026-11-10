@@ -11,6 +11,7 @@ import { createBindTickets } from './tickets.js';
 import { registerMediaTools } from './tools.js';
 import { createMediaRouter } from './http.js';
 import { createAssetStore } from './assets.js';
+import { createRecipeStore } from './recipes.js';
 import { createGenerationService } from './generation.js';
 import { createBatchQueue } from './batch.js';
 import { createFontStore } from './fonts.js';
@@ -54,6 +55,8 @@ export function apply(ctx, config = {}) {
   const bridge = createMediaBridge({ relay, editorKind: 'image' });
   // 配置了 dataDir 就把素材落盘：重启后素材还在；没配置则保持纯内存（临时语义）。
   const assets = createAssetStore({ dir: config.dataDir ? join(resolve(config.dataDir), 'assets') : null });
+  // 预录流程（.atn 思路）：和素材同一套目录，重启后仍在。
+  const recipes = createRecipeStore({ dir: config.dataDir ? join(resolve(config.dataDir), 'recipes') : null });
   const fonts = createFontStore();
   // 配置错误不能让整个插件起不来：坏 provider 被跳过并记一行警告，其余功能照常。
   let generation = null;
@@ -124,6 +127,6 @@ export function apply(ctx, config = {}) {
   });
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/media-image', handler: router }), 'dsh-media-image: routes');
 
-  registerMediaTools(ctx, { bridge, approvals, bindings, assets, generation });
+  registerMediaTools(ctx, { bridge, approvals, bindings, assets, generation, recipes });
   return { dispose() { relay.close(); assets.clear(); fonts.clear(); } };
 }
