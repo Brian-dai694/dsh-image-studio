@@ -1157,6 +1157,7 @@ const CHIPS = [
   ['批量', '批量：晨光|夜景|木桌'],
   ['上传', '@upload'],
   ['套版', '@psd'],
+  ['预设', '@xmp'],
   ['局部重绘', '局部重绘：'],
   ['抠图', '抠图'],
   ['导入', '导入：https://example.com/a.png'],
@@ -1209,6 +1210,7 @@ function renderChips() {
     button.addEventListener('click', () => {
       if (command === '@upload') { $('assist-file')?.click(); return; }
       if (command === '@psd') { $('assist-psd')?.click(); return; }
+      if (command === '@xmp') { $('assist-xmp')?.click(); return; }
       if (command === '局部重绘：') { if (assistText) { assistText.value = command; assistText.focus(); } return; }
       void sendAssist(command);
     });
@@ -1223,6 +1225,55 @@ $('assist-psd')?.addEventListener('change', async event => {
   bubble('me', `套版模板：${file.name}（${Math.round(file.size / 1024)} KB）`);
   await applyTemplateFlow(file);
   if (event.target) event.target.value = '';
+});
+
+// XMP 预设：解析 → 展示"能还原什么/还原不了什么" → 确认后套到当前图层。
+// 关键取舍：只套 miniPaint 真的有的调整（CSS filter 九项 + 纯色叠加），
+// 色调曲线 / 分区 HSL / 暗角这些一律列在 unmapped 里，不假装还原。
+$('assist-xmp')?.addEventListener('change', async event => {
+  const file = event.target?.files?.[0];
+  if (!file) return;
+  bubble('me', `预设：${file.name}（${Math.round(file.size / 1024)} KB）`);
+  const pending = bubble('bot', '正在解析预设…');
+  try {
+    const text = await file.text();
+    const value = await api('/media-image/preset/parse', { method: 'POST', body: { xmp: text } });
+    const plan = value.plan;
+    const lines = [];
+    if (plan.name) lines.push(`预设名：${plan.name}`);
+    const effectPairs = Object.entries(plan.effects || {});
+    lines.push(effectPairs.length ? `可套用的调整：${effectPairs.map(([key, value2]) => `${key}=${value2}`).join('、')}` : '可套用的调整：无');
+    if ((plan.overlays || []).length) lines.push(`近似叠加：${plan.overlays.map(item => `${item.color}@${item.opacity}`).join('、')}`);
+    if ((plan.unmapped || []).length) {
+      lines.push(`还原不了 ${plan.unmapped.length} 项：${plan.unmapped.map(item => item.key).join('、')}`);
+    }
+    pending.textContent = lines.join('\n');
+    if (!plan.executable) {
+      bubble('bot', '这个预设的调整项 miniPaint 都还原不了，所以没有套用。要用风格方向的话，可以让我按参数描述给你写一段生成提示词。');
+      return;
+    }
+    const state = await fetchEditorState();
+    const target = state.layers.find(layer => String(layer.id) === String(state.selectedLayerId));
+    if (!target) { bubble('bot', '先在图层面板选一个图层，再把预设套上去。'); return; }
+    const answer = await askConfirm({
+      title: `把预设套到「${target.name || target.id}」`,
+      details: [
+        `目标图层  ${target.name || target.id} · ${target.type || 'image'}`,
+        `将写入    ${effectPairs.length ? effectPairs.map(([key, value2]) => `${key}=${value2}`).join('、') : '（无）'}`,
+        (plan.unmapped || []).length ? `还原不了  ${plan.unmapped.map(item => item.key).join('、')}（确认后画面里不会有这些效果）` : '',
+        '这会把调整写成该图层的非破坏效果（layer.set_effect），可以一步撤销。',
+      ].filter(Boolean).join('\n'),
+      maskAvailable: false,
+    });
+    if (!answer.ok) { bubble('bot', '已取消，画布没有改动。'); return; }
+    await runPlanOnEditor([{ operation: 'layer.set_effect', params: { layerId: target.id, effects: plan.effects } }]);
+    bubble('bot', `已套用预设（现在 R${(await fetchEditorState()).revision}）。${(plan.unmapped || []).length ? `另有 ${plan.unmapped.length} 项 miniPaint 做不到，已在上面的清单里列出。` : ''}`);
+    await reportSelfCheck('预设');
+  } catch (error) {
+    pending.textContent = `${error.code || 'PRESET_FAILED'}：${error.message}`;
+  } finally {
+    if (event.target) event.target.value = '';
+  }
 });
 
 // 本地文件上传：面板列隐藏后，入口在这里（选完文件立刻上传并回执）。

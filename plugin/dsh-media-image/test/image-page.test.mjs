@@ -197,6 +197,27 @@ test('面板插入图层走真实编辑器命令，且未知结果只查不重�
   assert.equal(/for\s*\(.*retry/i.test(script), false, '插入路径不得含自动重试循环');
 });
 
+test('XMP 预设入口：只套 miniPaint 真有的调整，还原不了的必须当场列清楚', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  assert.match(html, /id="assist-xmp"/, '要有 .xmp 文件入口');
+  assert.match(script, /@xmp/, '筹码要能触发预设选择');
+  assert.match(script, /\/media-image\/preset\/parse/, '解析必须走插件路由（纯计算在 Host）');
+
+  const start = script.indexOf("$('assist-xmp')");
+  assert.ok(start > 0, '必须绑定 change 处理器');
+  const block = script.slice(start, script.indexOf("$('assist-file')", start));
+  // 必须把"还原不了"的字段摆给用户看，不能只报成功
+  assert.match(block, /plan\.unmapped/, '要把 unmapped 显示出来');
+  assert.match(block, /还原不了/, '要有明确措辞');
+  // 不可执行的预设不许硬套
+  assert.match(block, /if \(!plan\.executable\)/, '不可执行时要停下');
+  // 套用走既有非破坏命令，且先确认
+  assert.match(block, /layer\.set_effect/, '套用应写成非破坏效果');
+  assert.match(block, /askConfirm\(\{/, '套用前必须确认');
+  assert.equal(/layer\.remove_background|rasterize/.test(block), false, '预设不该烤平图层');
+});
+
 test('三栏布局：左图层/素材 · 中画布 · 右助手（助手是栅格列，不再压住画布）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');

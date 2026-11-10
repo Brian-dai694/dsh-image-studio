@@ -9,6 +9,7 @@ import { psdToTemplate } from './psd.js';
 import { compositePsdLayers } from './psd-composite.js';
 import { planTemplateApply, planTemplateBatch } from './template.js';
 import { describeCommands, summarize } from './commands.js';
+import { planPresetFromXmp } from './xmp-preset.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -424,6 +425,26 @@ async function handleCommands(req, res, { token }) {
   return true;
 }
 
+/**
+ * XMP 预设解析（只读、纯计算）：.xmp 文本 → miniPaint 能执行的调整 + 还原不了的字段清单。
+ * 不写画布：应用由页面/模型在同一条 apply_command 路径上做，这里只给方案。
+ */
+async function handlePresetParse(req, res, { token }) {
+  const rejection = authorizeSameOrigin(req, token, ['POST']);
+  if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
+  try {
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const text = typeof body?.xmp === 'string' ? body.xmp : (typeof body?.text === 'string' ? body.text : '');
+    const plan = planPresetFromXmp(text);
+    send(res, 200, { ok: true, plan });
+  } catch (error) {
+    const code = error?.code || 'PRESET_FAILED';
+    const status = code === 'PAYLOAD_TOO_LARGE' || code === 'REQUEST_TOO_LARGE' ? 413 : code.startsWith('XMP_') ? 400 : 500;
+    send(res, status, { code, message: error.message });
+  }
+  return true;
+}
+
 async function handleTemplatePlan(req, res, { token, fonts = null }) {
   const rejection = authorizeSameOrigin(req, token, ['POST']);
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
@@ -657,6 +678,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     }
     if (pathname === `${prefix}/commands`) {
       return handleCommands(req, res, { token });
+    }
+    if (pathname === `${prefix}/preset/parse`) {
+      return handlePresetParse(req, res, { token });
     }
     if (pathname === `${prefix}/template/apply`) {
       return handleTemplateApply(req, res, { token, assets, fonts });
