@@ -324,10 +324,26 @@ detail01 解析出 2 组「细节图」（4 个图片层）与「文案」（3 �
 - 页面加载 0 console 错误
 - **未做**：1440×900 与 1024×700 两种尺寸的截图（只有 1280×800 这一组），窄屏自动折叠的逻辑有测试但没截图
 
-**v0.50.0 的 preview 通路**：给 `media_image_preview` 加了 `savePath`——把预览写成真实 PNG 文件并
-返回 `savedPath`/`savedBytes`，调用方用自己的看图工具打开即可**真的看到画面**。
-为什么不走"把图片塞进模型消息"：DSH 的 `ImageBlock` 需要 `attachment: ImageAttachmentRef`，
-而附件服务只有 `fileHostPath`/`imageHostPath` 两个**读**接口，写入接口没有公开声明——猜方法名就是造事实。
+**v0.51.0 修正（**我之前判断错了，记下来**）：v0.50.0 我写"附件写入接口没有公开声明"，
+理由是我只翻了 `dsh-tools` / `dsh-llm` 两个包，那里确实只有 `fileHostPath`/`imageHostPath` 两个**读**接口。
+但那是**读路径**，写入接口在 **attachment 子系统的文档**里，是公开的：
+
+```ts
+ctx.attachments.saveImage({ data: Uint8Array, mediaType: 'image/png', name? })
+  → Promise<ImageAttachmentRef>   // 无损 JSON：attachmentId / mediaType / bytes / width / height
+```
+
+`ImageAttachmentRef` 可以放进工具结果，`render()` 返回 `[{type:'image', attachment}, {type:'text',...}]`
+就是官方设计的图片块。所以 v0.51.0 接上了：有 `ctx.attachments` 就发真正的图片块，
+没有或失败就退回文本（**不伪造**），`savePath` 落盘作为并行的第二条路径。
+
+教训：**"我翻过的代码里没有" ≠ "不存在"**。判断某个能力不存在之前，应该先查该子系统的文档，
+而不是只 grep 手边两个包的实现。
+
+另外两条查到的可行方案：
+- `ImageAttachmentAccess.readonlyPath` / `attachments.imageHostPath()`：给模型一条**可读的图片路径**
+  （官方 feature note 就叫 "model-readable image paths"）
+- 第三方插件 `@goodandready/dsh-vision-bridge`：通用视觉桥（40+ 工具，PDF/OCR/图），**未验证**，仅记录
 
 ---
 

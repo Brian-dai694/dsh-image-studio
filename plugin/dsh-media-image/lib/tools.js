@@ -5,7 +5,7 @@ import { MediaBridgeError, HIGH_RISK_COMMANDS } from './bridge.js';
 import { describeCommands, summarize, suggestOperation } from './commands.js';
 import { validateRecipeSteps, fillRecipeParams, recipeParamsOf } from './recipes.js';
 import { reviewMeasurements, summarizeMeasurements } from './analyze.js';
-import { writePreviewPng } from './preview-file.js';
+import { writePreviewPng, decodePngDataUrl } from './preview-file.js';
 import {
   HIGH_RISK_OPERATIONS, digestOf, requestHumanApproval, createSessionBindings, trustedSessionId, APPROVAL_WAIT_MS,
   AUTONOMOUS_CAPABILITIES, NEVER_AUTONOMOUS,
@@ -70,7 +70,20 @@ const RESULT_SCHEMA = {
     preview: {
       type: 'object',
       additionalProperties: false,
-      properties: { dataUrl: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' }, bytes: { type: 'integer' }, overlay: { type: 'object', additionalProperties: true } },
+      properties: {
+        dataUrl: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' }, bytes: { type: 'integer' },
+        overlay: { type: 'object', additionalProperties: true },
+        crop: { type: 'object', additionalProperties: true },
+        scale: { type: 'number' },
+        layerId: { type: 'string' },
+        gridStep: { type: 'integer' },
+        savedPath: { type: 'string' },
+        savedBytes: { type: 'integer' },
+        saveError: { type: 'object', additionalProperties: true },
+        // DSH 持久附件引用（无损 JSON）：render 用它构造真正的图片块。
+        attachment: { type: 'object', additionalProperties: true },
+        attachError: { type: 'object', additionalProperties: true },
+      },
     },
     // 批量执行：逐步结果与回滚情况。
     steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
@@ -161,18 +174,25 @@ const GENERATE_PARAMS = {
 // The model only ever sees this text, never the canonical value. An export therefore has
 // to surface `exportId` (the only handle for the follow-up status call) and the finished
 // `artifactRef`; writes keep the compact status/command/revision shape.
-const renderSummary = (_args, value) => [{
-  type: 'text',
-  text: [
+const renderSummary = (_args, value) => {
+  const lines = [
     `${value.status} · ${value.commandId}${value.revision === undefined ? '' : ` · R${value.revision}`}`,
     ...(value.exportId ? [`exportId ${value.exportId}`] : []),
     ...(value.artifactRef ? [`artifactRef ${value.artifactRef}`] : []),
     ...(value.jobId ? [`jobId ${value.jobId}${value.jobStatus ? ` (${value.jobStatus})` : ''}`] : []),
     // 编辑器算出来的落点等结构化结果：模型只看得到这段文本，所以必须写进正文。
-    ...(value.detail && typeof value.detail === 'object' ? [`detail ${JSON.stringify(value.detail).slice(0, 2000)}`] : []),
+    ...(value.detail && typeof value.detail === 'object' ? [`detail ${JSON.stringify(value.detail).slice(0, 200)}`] : []),
     ...(value.error ? [value.error.code] : []),
-  ].join(' · '),
-}];
+  ];
+  const text = lines.join(' · ');
+  // 预览带持久附件时，除了文本再发一个**真正的图片块**：
+  // DSH 会把它交给能看图的模型，纯文本模型则由宿主降级成占位文本（不是我们假装）。
+  const attachment = value?.preview?.attachment;
+  if (attachment && typeof attachment === 'object' && typeof attachment.attachmentId === 'string') {
+    return [{ type: 'text', text }, { type: 'image', attachment }];
+  }
+  return [{ type: 'text', text }];
+};
 
 // read_state is the only way a model learns projectId / digest / history, so the render
 // must carry them as text; the model never sees the tool's canonical JSON value.
@@ -828,8 +848,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         ...(args.crop === undefined ? {} : { crop: args.crop }),
         ...(args.overlayLayerId === undefined && args.overlaySelection !== true ? {} : { overlay: { ...(args.overlayLayerId === undefined ? {} : { layerId: args.overlayLayerId }), ...(args.overlaySelection === true ? { selection: true } : {}), ...(args.overlayColor === undefined ? {} : { color: args.overlayColor }), ...(args.overlayOpacity === undefined ? {} : { opacity: args.overlayOpacity }) } }),
       });
-      // 落盘：给调用方一条**今天就能用**的看图路径（宿主附件写入接口没有公开声明）。
-      // 失败不掩盖预览本身：照样返回 dataUrl，并如实带上写文件失败的原因。
+      // 落盘：给宿主不渲染图片块时一条可核对的看图路径。
       let saved = null;
       let saveError = null;
       if (typeof args.savePath === 'string' && args.savePath.trim()) {
@@ -838,6 +857,24 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
           saved = written;
         } catch (error) {
           saveError = { code: error.code || 'PREVIEW_SAVE_FAILED', message: error.message };
+        }
+      }
+      // 持久附件：DSH 的 ctx.attachments.saveImage() 把字节变成不可变引用，
+      // 引用是无损 JSON，可以放进工具结果，render() 再把它变成真正的图片块。
+      // 这是"模型真的看到图"的正规路径；拿不到服务（或失败）就退回文本 + 落盘。
+      let attachment = null;
+      let attachError = null;
+      const attachments = typeof ctx?.get === 'function' ? ctx.get('attachments') : null;
+      if (attachments && typeof attachments.saveImage === 'function') {
+        try {
+          const bytes = decodePngDataUrl(image.dataUrl);
+          attachment = await attachments.saveImage({
+            data: new Uint8Array(bytes),
+            mediaType: 'image/png',
+            name: `media-image-preview-r${state.revision}.png`,
+          });
+        } catch (error) {
+          attachError = { code: error?.code || 'PREVIEW_ATTACH_FAILED', message: error?.message || '保存附件失败' };
         }
       }
       return {
@@ -852,10 +889,16 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
           ...(image.gridStep ? { gridStep: image.gridStep } : {}),
           ...(saved ? { savedPath: saved.path, savedBytes: saved.bytes } : {}),
           ...(saveError ? { saveError } : {}),
+          ...(attachment ? { attachment } : {}),
+          ...(attachError ? { attachError } : {}),
         },
-        note: saved
-          ? `已把这份预览写成 PNG：${saved.path}（${saved.bytes} 字节）。用你的看图工具打开这个路径就能真的看到画面；它是降采样缩略图，不推进 revision。crop/scale 是把预览位置换算回画布坐标的依据。`
-          : '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。传 savePath 可以把它写成真实 PNG 文件，再用看图工具打开。crop/scale 是把预览上的位置换算回画布坐标的依据。',
+        note: [
+          attachment ? '已把它作为持久附件随结果发出：这条工具结果里带一个真实图片块，能看图的模型会直接看到画面。' : '',
+          saved ? `同时写了一份 PNG：${saved.path}（${saved.bytes} 字节）。` : '',
+          attachError ? `附件写入失败（${attachError.code}）：${attachError.message}；这次的画面只能靠文本与 dataUrl。` : '',
+          attachment || saved ? '' : '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染图片块。传 savePath 可写成 PNG 再用看图工具打开。',
+          'crop/scale 是把预览位置换算回画布坐标的依据。',
+        ].filter(Boolean).join(' '),
       };
     } catch (error) {
       return failure(kind, 'preview', error);
