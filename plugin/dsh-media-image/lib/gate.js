@@ -210,6 +210,7 @@ export const AUTONOMOUS_CAPABILITIES = {
     'layer.reorder',
     'layer.feather',
     'layer.color_match',
+    'layer.apply_grade',
     'layer.remove',
     'canvas.crop',
     'canvas.resize',

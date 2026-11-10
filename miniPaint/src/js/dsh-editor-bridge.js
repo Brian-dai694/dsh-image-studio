@@ -3,11 +3,12 @@ import config from './config.js';
 import zoomView from './libs/zoomView.js';
 // PSD 写入器刻意不依赖浏览器 API（只吃 RGBA 数组），所以宿主侧测试也能直接 import 它。
 import { buildPsd } from './dsh-psd-write.js';
+import { applyGrade } from './dsh-color-grade.js';
 
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
 const BLEND_MODES = new Set(['color', 'color-burn', 'color-dodge', 'copy', 'darken', 'darker', 'destination-atop', 'destination-in', 'destination-out', 'destination-over', 'difference', 'exclusion', 'hard-light', 'hue', 'lighten', 'lighter', 'luminosity', 'multiply', 'overlay', 'saturation', 'screen', 'soft-light', 'source-atop', 'source-in', 'source-out', 'source-over', 'xor']);
-const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.align', 'layer.duplicate', 'layer.rasterize', 'layer.merge_down', 'layer.paint_stroke', 'layer.set_effect', 'layer.remove_effect', 'layer.update_mask', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'history.batch', 'canvas.resize', 'canvas.crop', 'layer.remove']);
+const COMMANDS = new Set(['layer.add_image', 'layer.add_text', 'layer.update_text', 'layer.set_transform', 'layer.set_visibility', 'layer.set_appearance', 'layer.reorder', 'layer.set_frame', 'layer.align', 'layer.duplicate', 'layer.rasterize', 'layer.merge_down', 'layer.paint_stroke', 'layer.set_effect', 'layer.remove_effect', 'layer.update_mask', 'layer.feather', 'layer.color_match', 'layer.apply_grade', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'history.undo', 'history.redo', 'history.batch', 'canvas.resize', 'canvas.crop', 'layer.remove']);
 // dshEffects 的词表与取值域。字符串的拼装归渲染器（base-layers.dsh_effect_filter）：
 // 回执里给出的 filter 必须是"渲染时真正用的那个"，不能是桥里另算一份。
 const DSH_EFFECT_RANGES = {
@@ -18,6 +19,75 @@ const DSH_EFFECT_RANGES = {
 const HISTORY_ENTRIES = 30;
 const randomId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * 色彩分级参数的形状校验 + 夹取。
+ * 曲线点是外部输入：必须按 x 升序、有限值、落在 0..1（或 0..255），否则插值会乱。
+ * 返回 null 表示形状不合法 —— 由调用方抛 INVALID_REQUEST，不做"尽力而为"。
+ */
+const normalizeGrade = value => {
+  if (!plain(value)) return null;
+  const numeric = key => {
+    const raw = value[key];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) return NaN;
+    return raw;
+  };
+  const out = {};
+  for (const key of ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks']) {
+    const parsed = numeric(key);
+    if (parsed === undefined) continue;
+    if (Number.isNaN(parsed)) return null;
+    out[key] = key === 'exposure' ? Math.max(-5, Math.min(5, parsed)) : Math.max(-100, Math.min(100, parsed));
+  }
+  const points = (list, name) => {
+    if (list === undefined) return [];
+    if (!Array.isArray(list) || list.length > 64) throw this.error?.('INVALID_REQUEST') ?? new Error(name);
+    return list.map(point => {
+      if (!plain(point) || typeof point.x !== 'number' || typeof point.y !== 'number' || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+        throw new Error(`${name} 的点必须是 {x,y} 数字`);
+      }
+      return { x: point.x, y: point.y };
+    });
+  };
+  try {
+    out.curve = points(value.curve, 'curve');
+    out.curveRed = points(value.curveRed, 'curveRed');
+    out.curveGreen = points(value.curveGreen, 'curveGreen');
+    out.curveBlue = points(value.curveBlue, 'curveBlue');
+  } catch { return null; }
+  for (const key of ['curve', 'curveRed', 'curveGreen', 'curveBlue']) if (!out[key].length) delete out[key];
+  if (value.hsl !== undefined) {
+    if (!plain(value.hsl)) return null;
+    const hsl = {};
+    for (const [band, entry] of Object.entries(value.hsl)) {
+      if (!['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'].includes(band)) continue;
+      if (!plain(entry)) return null;
+      const clamped = {};
+      for (const channel of ['hue', 'sat', 'lum']) {
+        const raw = entry[channel];
+        if (raw === undefined) continue;
+        if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+        clamped[channel] = channel === 'hue' ? Math.max(-100, Math.min(100, raw)) : Math.max(-100, Math.min(100, raw));
+      }
+      if (Object.keys(clamped).length) hsl[band] = clamped;
+    }
+    if (Object.keys(hsl).length) out.hsl = hsl;
+  }
+  if (value.splitTone !== undefined) {
+    if (!plain(value.splitTone)) return null;
+    const split = {};
+    for (const key of ['highlightHue', 'highlightSat', 'shadowHue', 'shadowSat']) {
+      const raw = value.splitTone[key];
+      if (raw === undefined) continue;
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+      split[key] = key.endsWith('Hue') ? ((raw % 360) + 360) % 360 : Math.max(0, Math.min(100, raw));
+    }
+    if (Object.keys(split).length) out.splitTone = split;
+  }
+  if (!Object.keys(out).length) return null;
+  return out;
+};
 const textOf = layer => Array.isArray(layer.data) ? layer.data.map(line => line.map(span => span.text || '').join('')).join('\n') : '';
 const keysOnly = (value, keys) => plain(value) && Object.keys(value).every(key => keys.includes(key));
 const stableStringify = value => {
@@ -935,6 +1005,9 @@ export class DshEditorBridge {
         // 只在真的应用过时出现；快照本身留在编辑器内部，模型看不到原始像素。
         ...(applied.feather ? { feather: applied.feather } : {}),
         ...(applied.colorMatch ? { colorMatch: applied.colorMatch } : {}),
+        // 色彩分级：记录这次分级用的参数摘要与处理了多少像素，撤销后随历史一起消失。
+        ...(applied.grade ? { grade: applied.grade } : {}),
+        ...(applied.gradedPixels ? { gradedPixels: applied.gradedPixels } : {}),
         // 非破坏效果栈：模型改完要能读回来核对，否则只能靠猜。
         ...(layer.params?.dshEffects && Object.keys(layer.params.dshEffects).length ? { effects: { ...layer.params.dshEffects } } : {}),
         ...(layer.type === 'text' ? { text: textOf(layer) } : {}) };
@@ -1514,6 +1587,43 @@ export class DshEditorBridge {
         else appliedState.delete(key);
       };
       return { action, ids: () => [key] };
+    }
+    if (command.type === 'layer.apply_grade') {
+      // 色调曲线 + 分区 HSL：CSS filter 表达不了这些，只能真的算像素。
+      // 与 feather/color_match 同一套语义：每次都从首帧快照重算（覆盖而不是叠加），
+      // 参数挂到该动作的 do/undo 上，撤销后 read_state 不会还宣称分级在生效。
+      if (!keysOnly(p, ['layerId', 'grade'])) throw this.error('INVALID_REQUEST');
+      const layer = config.layers.find(item => String(item.id) === p.layerId);
+      if (!layer) throw this.error('LAYER_NOT_FOUND');
+      if (!plain(p.grade)) throw this.error('INVALID_REQUEST');
+      const ops = await this.pixelOps();
+      const key = String(layer.id);
+      const current = this.rasterizeLayer(layer);
+      const snapshot = this.baseSnapshot(layer.id, current, ops.pixelDigest);
+      const grade = normalizeGrade(p.grade);
+      if (!grade) throw this.error('INVALID_REQUEST');
+      const output = new ImageData(new Uint8ClampedArray(snapshot.base.data), snapshot.base.width, snapshot.base.height);
+      const result = applyGrade(output.data, grade);
+      output.layerId = layer.id;
+      const previous = { ...(this.pixelApplied.get(key) || {}) };
+      const action = this.imageAction(ops.ensureImageData(output), layer.id);
+      const nativeDo = action.do.bind(action);
+      const nativeUndo = action.undo.bind(action);
+      const appliedState = this.pixelApplied;
+      const owner = this;
+      const record = { grade: { spec: grade, fromDigest: snapshot.digest }, gradedPixels: result.touched };
+      action.do = async () => {
+        await nativeDo();
+        owner.pixelMutation += 1;
+        appliedState.set(key, { ...previous, ...record });
+      };
+      action.undo = async () => {
+        await nativeUndo();
+        owner.pixelMutation += 1;
+        if (Object.keys(previous).length) appliedState.set(key, previous);
+        else appliedState.delete(key);
+      };
+      return { action, ids: () => [key], detail: () => ({ gradedPixels: result.touched, spec: grade }) };
     }
     if (command.type === 'layer.remove_background') {
       // 自动去背景：不需要坐标，也不依赖外部模型。取边界主色后按连通域擦除；

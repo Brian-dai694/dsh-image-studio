@@ -25,7 +25,7 @@ const finite = (value, name, { min = -Infinity, max = Infinity } = {}) => {
   }
 };
 
-const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.align', 'layer.duplicate', 'layer.rasterize', 'layer.merge_down', 'layer.paint_stroke', 'layer.set_effect', 'layer.remove_effect', 'layer.update_mask', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo', 'history.batch']);
+const IMAGE_COMMANDS = new Set(['layer.add_text', 'layer.update_text', 'layer.add_image', 'layer.set_frame', 'layer.align', 'layer.duplicate', 'layer.rasterize', 'layer.merge_down', 'layer.paint_stroke', 'layer.set_effect', 'layer.remove_effect', 'layer.update_mask', 'layer.set_appearance', 'layer.feather', 'layer.color_match', 'layer.apply_grade', 'layer.remove_background', 'layer.magic_erase', 'layer.add_mask_layer', 'layer.set_transform', 'layer.set_visibility', 'layer.reorder', 'layer.remove', 'canvas.resize', 'canvas.crop', 'history.undo', 'history.redo', 'history.batch']);
 
 // dshEffects 的非破坏效果词表与取值域。**必须与编辑器 dsh-editor-bridge.js 的
 // DSH_EFFECT_RANGES 完全一致**（顺序也一致，因为 CSS filter 的先后会改变结果）——
@@ -80,6 +80,8 @@ function validateImageCommand(command) {
     'layer.update_mask': ['layerId', 'invert', 'sourceLayerId', 'remove'],
     'layer.feather': ['layerId', 'radiusPx'],
     'layer.color_match': ['layerId', 'method', 'strength', 'reference'],
+  // 色调曲线 + 分区 HSL：真像素分级（CSS filter 表达不了这些）
+  'layer.apply_grade': ['layerId', 'grade'],
     'layer.remove_background': ['layerId', 'tolerance', 'featherPx'],
     'layer.magic_erase': ['layerId', 'x', 'y', 'tolerance', 'contiguous'],
     'layer.add_mask_layer': ['sourceLayerId', 'mode', 'tolerance', 'featherPx', 'name'],

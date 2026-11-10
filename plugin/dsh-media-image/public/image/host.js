@@ -1255,6 +1255,26 @@ $('assist-xmp')?.addEventListener('change', async event => {
     const state = await fetchEditorState();
     const target = state.layers.find(layer => String(layer.id) === String(state.selectedLayerId));
     if (!target) { bubble('bot', '先在图层面板选一个图层，再把预设套上去。'); return; }
+    // 真像素路径优先：曲线/HSL/分离色调只有这条能还原，别拿 CSS filter 假装。
+    if (plan.grade) {
+      const gradeAnswer = await askConfirm({
+        title: `把色调曲线套到「${target.name || target.id}」`,
+        details: [
+          `目标图层  ${target.name || target.id} · ${target.type || 'image'}`,
+          `会按像素重算：${Object.keys(plan.grade).filter(key => key !== 'curve' && !key.startsWith('curve')).join('、') || '曲线'}`,
+          (plan.grade.curve ? `含 master 曲线 ${plan.grade.curve.length} 个控制点` : ''),
+          (plan.unmapped || []).length ? `还原不了  ${plan.unmapped.map(item => item.key).join('、')}（确认后画面里不会有这些效果）` : '',
+          '这是像素运算：会改这一层的内容（可一步撤销），不是非破坏滤镜。',
+        ].filter(Boolean).join('\n'),
+        maskAvailable: false,
+      });
+      if (!gradeAnswer.ok) { bubble('bot', '已取消，画布没有改动。'); return; }
+      await runPlanOnEditor([{ operation: 'layer.apply_grade', params: { layerId: target.id, grade: plan.grade } }]);
+      const after = await fetchEditorState();
+      bubble('bot', `已按像素套用预设（现在 R${after.revision}）。${(plan.unmapped || []).length ? `另有 ${plan.unmapped.length} 项 miniPaint 做不到。` : ''}`);
+      await reportSelfCheck('预设分级');
+      return;
+    }
     const answer = await askConfirm({
       title: `把预设套到「${target.name || target.id}」`,
       details: [

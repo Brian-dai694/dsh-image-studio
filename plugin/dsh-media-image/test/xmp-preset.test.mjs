@@ -1,7 +1,7 @@
 // XMP 预设解析：重点验证"能还原的映射"与"还原不了的如实上报"两件事。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseXmp, mapToMiniPaint, planPresetFromXmp, UNMAPPED_KEYS } from '../lib/xmp-preset.js';
+import { parseXmp, mapToMiniPaint, planPresetFromXmp, buildGrade, UNMAPPED_KEYS } from '../lib/xmp-preset.js';
 
 // Lightroom 导出的典型写法：rdf:Description 上的属性。
 const ATTRIBUTE_STYLE = `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
@@ -69,26 +69,59 @@ test('曝光/对比/饱和度映射成 effects，并写明是近似', () => {
   assert.ok(overlay.opacity > 0 && overlay.opacity <= 0.35);
 });
 
-test('还原不了的字段必须逐条上报，并带上原因', () => {
+test('高光/阴影/分离色调现在走像素分级，不再列进 unmapped', () => {
   const { raw } = parseXmp(ATTRIBUTE_STYLE);
   const plan = mapToMiniPaint(raw);
   const keys = plan.unmapped.map(item => item.key);
-  for (const key of ['Highlights2012', 'Shadows2012', 'Clarity2012']) {
-    assert.ok(keys.includes(key), `${key} 应被登记为还原不了`);
-    assert.equal(typeof plan.unmapped.find(item => item.key === key).reason, 'string');
+  // 这三项已经能真算了，必须从"做不到"名单里消失
+  for (const key of ['Highlights2012', 'Shadows2012', 'SplitToningHighlightHue']) {
+    assert.equal(keys.includes(key), false, `${key} 已可分级，不该再报做不到`);
   }
-  // 值为 0 或缺失的不登记（避免噪声）
-  assert.equal(keys.includes('Dehaze'), false);
+  // 真正做不到的仍然要报
+  assert.ok(keys.includes('Clarity2012'), JSON.stringify(keys));
+  assert.equal(typeof plan.unmapped.find(item => item.key === 'Clarity2012').reason, 'string');
+});
+
+test('曲线与 8 色 HSL 被解析成 grade（真像素路径）', () => {
+  const withCurve = `<x:xmpmeta><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Exposure2012="0.5"
+    crs:HueAdjustmentRed="10" crs:SaturationAdjustmentRed="20" crs:LuminanceAdjustmentRed="15"
+    crs:HueAdjustmentBlue="-8" crs:SaturationAdjustmentBlue="-12"
+    crs:SplitToningHighlightHue="40" crs:SplitToningHighlightSaturation="25"
+    crs:SplitToningShadowHue="210" crs:SplitToningShadowSaturation="30">
+   <crs:ToneCurvePV2012>
+    <rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>64, 80</rdf:li><rdf:li>128, 130</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq>
+   </crs:ToneCurvePV2012>
+  </rdf:Description></rdf:RDF></x:xmpmeta>`;
+  const plan = planPresetFromXmp(withCurve);
+  assert.ok(plan.grade, JSON.stringify(plan));
+  assert.equal(plan.grade.exposure, 0.5);
+  // 主曲线点被解析出来（顺序按 x 升序）
+  assert.equal(plan.grade.curve.length, 4);
+  assert.deepEqual(plan.grade.curve[1], { x: 64, y: 80 });
+  // 分区 HSL：红色带三个通道、蓝色带两个
+  assert.deepEqual(plan.grade.hsl.red, { hue: 10, sat: 20, lum: 15 });
+  assert.deepEqual(plan.grade.hsl.blue, { hue: -8, sat: -12 });
+  // 分离色调
+  assert.deepEqual(plan.grade.splitTone, { highlightHue: 40, highlightSat: 25, shadowHue: 210, shadowSat: 30 });
+  assert.equal(plan.executable, true);
+  assert.match(plan.note, /像素分级/);
+  assert.match(plan.note, /色相带 HSL/);
 });
 
 test('全是不可还原字段时，明确说不要假装套用', () => {
-  const plan = planPresetFromXmp(ELEMENT_STYLE.replace('<crs:Exposure2012>1.20</crs:Exposure2012>', '')
-    .replace('<crs:Contrast2012>-30</crs:Contrast2012>', ''));
+  // 只剩清晰度/去雾/纹理/锐化/颗粒/暗角——这些确实没有实现
+  const onlyUnmappable = `<x:xmpmeta><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Clarity2012="30" crs:Dehaze="20" crs:Texture="15" crs:SharpenAmount="40"
+    crs:GrainAmount="25" crs:VignetteAmount="-30"/>
+  </rdf:RDF></x:xmpmeta>`;
+  const plan = planPresetFromXmp(onlyUnmappable);
+  assert.equal(plan.grade, null, '这些字段不该产出 grade');
   assert.equal(plan.executable, false, JSON.stringify(plan));
   assert.match(plan.note, /都还原不了/);
-  assert.ok(plan.unmapped.length >= 2);
-  assert.ok(plan.unmapped.some(item => item.key === 'GrainAmount'));
-  assert.ok(plan.unmapped.some(item => item.key === 'SplitToningHighlightHue'));
+  assert.ok(plan.unmapped.length >= 5, JSON.stringify(plan.unmapped));
 });
 
 test('effects 数值落在编辑器允许的区间内（否则会被 validate 拒绝）', () => {

@@ -15,19 +15,18 @@ export const KNOWN_KEYS = [
   'Clarity2012', 'Dehaze', 'Texture', 'SharpenAmount',
   'SplitToningHighlightHue', 'SplitToningHighlightSaturation', 'SplitToningShadowHue', 'SplitToningShadowSaturation',
   'GrainAmount', 'VignetteAmount',
+  // 8 个色相带的 HSL（Lightroom 口径）
+  ...['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'].flatMap(name => [
+    `HueAdjustment${name}`, `SaturationAdjustment${name}`, `LuminanceAdjustment${name}`,
+  ]),
 ];
 
-/** 明确"miniPaint 做不到"的字段：列出来是为了让人知道差异在哪，不是为了省事。 */
+/** 现在这些字段**能**还原了（走像素分级），所以从"做不到"名单里移除。 */
 export const UNMAPPED_KEYS = {
-  Highlights2012: '高光恢复需要色调曲线，miniPaint 的 CSS filter 没有',
-  Shadows2012: '阴影提亮需要色调曲线',
-  Whites2012: '白场需要色阶/曲线',
-  Blacks2012: '黑场需要色阶/曲线',
   Clarity2012: '局部对比（中频）无等价实现',
   Dehaze: '去雾是专用算法，不是亮度/对比能替代的',
   Texture: '纹理是局部中频细节，无等价实现',
-  SharpenAmount: '锐化需要卷积，CSS filter 里没有（blur 只做模糊）',
-  SplitToningHighlightHue: '分离色调需要双色映射，只能近似成纯色叠加层（见 overlays）',
+  SharpenAmount: '锐化需要卷积，当前没有该效果',
   GrainAmount: '颗粒是噪声纹理，当前没有该效果',
   VignetteAmount: '暗角需要径向遮罩 + 亮度调整，当前没有',
 };
@@ -68,6 +67,77 @@ export function parseXmp(text) {
   const raw = {};
   for (const [key, value] of Object.entries(params)) if (KNOWN_KEYS.includes(key)) raw[key] = value;
   return { name, params, raw };
+}
+
+const BAND_NAMES = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
+const BAND_SUFFIX = { red: 'Red', orange: 'Orange', yellow: 'Yellow', green: 'Green', aqua: 'Aqua', blue: 'Blue', purple: 'Purple', magenta: 'Magenta' };
+
+/** ToneCurvePV2012 之类的曲线：rdf:Seq 里是 "x, y" 形式的字符串。 */
+function parseCurve(text, key) {
+  // 兼容两种写法：整段 <crs:Key>...</crs:Key>，或属性 crs:Key="0, 0 255, 255"。
+  const element = new RegExp(`<crs:${key}>([\\s\\S]*?)</crs:${key}>`).exec(text);
+  const attribute = new RegExp(`crs:${key}\\s*=\\s*"([^"]*)"`).exec(text);
+  const body = element?.[1] ?? attribute?.[1];
+  if (!body) return null;
+  const points = [];
+  for (const match of body.matchAll(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/g)) {
+    points.push({ x: Number.parseFloat(match[1]), y: Number.parseFloat(match[2]) });
+  }
+  if (points.length < 2) return null;
+  return points.sort((a, b) => a.x - b.x);
+}
+
+/**
+ * 把 Camera Raw 参数整理成编辑器的 `layer.apply_grade` 参数。
+ * 这是"真的算像素"的路径：曲线 / 高光阴影 / 分区 HSL / 分离色调都在这里，
+ * 只有 local（清晰度/去雾/颗粒/暗角）留给 unmapped。
+ */
+export function buildGrade(raw, text = '') {
+  const grade = {};
+  const assign = (key, target, scale = 1) => {
+    const value = num(raw[key]);
+    if (value === null || value === 0) return false;
+    target[scale === 1 ? key : 'x'] = value;
+    return true;
+  };
+  const exposure = num(raw.Exposure2012);
+  if (exposure !== null && exposure !== 0) grade.exposure = clamp(exposure, -5, 5);
+  const contrast = num(raw.Contrast2012);
+  if (contrast !== null && contrast !== 0) grade.contrast = clamp(contrast, -100, 100);
+  for (const [key, field] of [['Highlights2012', 'highlights'], ['Shadows2012', 'shadows'], ['Whites2012', 'whites'], ['Blacks2012', 'blacks']]) {
+    const value = num(raw[key]);
+    if (value !== null && value !== 0) grade[field] = clamp(value, -100, 100);
+  }
+  // 显式曲线（含 RGB 分量）
+  const master = parseCurve(text, 'ToneCurvePV2012');
+  if (master) grade.curve = master;
+  for (const [suffix, field] of [['Red', 'curveRed'], ['Green', 'curveGreen'], ['Blue', 'curveBlue']]) {
+    const curve = parseCurve(text, `ToneCurvePV2012${suffix}`);
+    if (curve) grade[field] = curve;
+  }
+  // 分区 HSL
+  const hsl = {};
+  for (const band of BAND_NAMES) {
+    const suffix = BAND_SUFFIX[band];
+    const entry = {};
+    for (const [key, channel] of [[`HueAdjustment${suffix}`, 'hue'], [`SaturationAdjustment${suffix}`, 'sat'], [`LuminanceAdjustment${suffix}`, 'lum']]) {
+      const value = num(raw[key]);
+      if (value !== null && value !== 0) entry[channel] = clamp(value, -100, 100);
+    }
+    if (Object.keys(entry).length) hsl[band] = entry;
+  }
+  if (Object.keys(hsl).length) grade.hsl = hsl;
+  // 分离色调
+  const split = {};
+  const highlightHue = num(raw.SplitToningHighlightHue), highlightSat = num(raw.SplitToningHighlightSaturation);
+  const shadowHue = num(raw.SplitToningShadowHue), shadowSat = num(raw.SplitToningShadowSaturation);
+  if (highlightHue !== null) split.highlightHue = ((highlightHue % 360) + 360) % 360;
+  if (highlightSat !== null) split.highlightSat = clamp(highlightSat, 0, 100);
+  if (shadowHue !== null) split.shadowHue = ((shadowHue % 360) + 360) % 360;
+  if (shadowSat !== null) split.shadowSat = clamp(shadowSat, 0, 100);
+  if (Object.keys(split).length) grade.splitTone = split;
+  void assign;
+  return Object.keys(grade).length ? grade : null;
 }
 
 /** 色温/色调 → 一层纯色叠加（近似）。Camera Raw 的色温是线性白平衡，这里只能用色偏近似。 */
@@ -138,17 +208,32 @@ export function mapToMiniPaint(raw) {
 export function planPresetFromXmp(text) {
   const parsed = parseXmp(text);
   const mapped = mapToMiniPaint(parsed.raw);
-  const executable = Object.keys(mapped.effects).length > 0 || mapped.overlays.length > 0;
+  // 真像素这条路优先：曲线/HSL/分离色调都在 grade 里，能字节级还原（除了局部调整）。
+  const grade = buildGrade(parsed.raw, text);
+  const executable = Boolean(grade) || Object.keys(mapped.effects).length > 0 || mapped.overlays.length > 0;
+  const parts = [];
+  if (grade) {
+    const items = [];
+    if (grade.curve) items.push('master 曲线');
+    if (grade.curveRed || grade.curveGreen || grade.curveBlue) items.push('通道曲线');
+    if (grade.hsl) items.push(`${Object.keys(grade.hsl).length} 个色相带 HSL`);
+    if (grade.splitTone) items.push('分离色调');
+    for (const key of ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks']) if (grade[key] !== undefined) items.push(`${key}=${grade[key]}`);
+    parts.push(`像素分级：${items.join('、')}`);
+  }
+  if (Object.keys(mapped.effects).length) parts.push(`滤镜近似：${Object.keys(mapped.effects).join('/')}`);
+  if (mapped.overlays.length) parts.push(`色温近似：${mapped.overlays.map(item => item.color).join('/')}`);
   return {
     name: parsed.name,
     params: parsed.raw,
+    grade,
     effects: mapped.effects,
     overlays: mapped.overlays,
     unmapped: mapped.unmapped,
     assumptions: mapped.assumptions,
     executable,
     note: executable
-      ? `可用 ${Object.keys(mapped.effects).join('/') || '纯色叠加'}${Object.keys(mapped.effects).length ? ' 近似' : ''}还原${mapped.unmapped.length ? `；另有 ${mapped.unmapped.length} 项还原不了（见 unmapped）` : ''}。`
+      ? `${parts.join('；')}${mapped.unmapped.length ? `。另有 ${mapped.unmapped.length} 项（${mapped.unmapped.map(item => item.key).join('、')}）miniPaint 做不到` : ''}。`
       : `这个预设的调整项 miniPaint 都还原不了（见 unmapped），不要假装套用。`,
   };
 }

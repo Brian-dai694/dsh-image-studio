@@ -33,6 +33,7 @@ export const COMMAND_NEEDS = {
   'layer.remove': 'layer',
   'layer.feather': 'image',
   'layer.color_match': 'image',
+  'layer.apply_grade': 'image',
   'layer.remove_background': 'image',
   'layer.magic_erase': 'image',
   'layer.add_mask_layer': 'image',
@@ -59,6 +60,8 @@ export const COMMAND_PARAMS = {
   'layer.remove': '{layerId}',
   'layer.feather': '{layerId, radiusPx}',
   'layer.color_match': '{layerId, method:"reinhard", strength?, reference?}',
+  // 色调曲线 + 分区 HSL：真像素分级，所以会改图层内容（不是非破坏滤镜）。
+  'layer.apply_grade': '{layerId, grade:{exposure?,-5..5, contrast?,highlights?,shadows?,whites?,blacks? -100..100, curve?:[{x,y},...], curveRed?/curveGreen?/curveBlue?, hsl?:{red|orange|yellow|green|aqua|blue|purple|magenta:{hue?,sat?,lum?}}, splitTone?:{highlightHue?,highlightSat?,shadowHue?,shadowSat?}}}',
   'layer.remove_background': '{layerId, tolerance?, featherPx?}',
   'layer.magic_erase': '{layerId, x, y, tolerance?, contiguous?}',
   'layer.add_mask_layer': '{sourceLayerId, mode?, tolerance?, featherPx?, name?}',

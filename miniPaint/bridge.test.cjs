@@ -132,6 +132,13 @@ app.Actions.Update_layer_image_action = class {
   writerCode = writerCode.replace(/^export default .*;\s*$/m, '').replace(/^export /gm, '');
   context.buildPsd = vm.runInContext(`${writerCode}\n;buildPsd`, context);
 }
+// 色彩分级：桥里是 `import { applyGrade }`（打包时正常解析），harness 会把 import 行剥掉，
+// 所以把模块本身载进上下文、暴露成全局 applyGrade。
+{
+  let gradeCode = fs.readFileSync(path.join(root, 'src/js/dsh-color-grade.js'), 'utf8');
+  gradeCode = gradeCode.replace(/^export default .*;\s*$/m, '').replace(/^export /gm, '');
+  context.applyGrade = vm.runInContext(`${gradeCode}\n;applyGrade`, context);
+}
 const Bridge = load('dsh-editor-bridge.js', 'DshEditorBridge', { zoomView });
 const bridge = new Bridge();
 let count = 0;
@@ -1675,6 +1682,43 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
     } finally {
       config.layers = savedLayers;
       config.WIDTH = savedW; config.HEIGHT = savedH;
+      bridge.pixelMutation += 1;
+      bridge.refreshRevision();
+    }
+  });
+  await test('layer.apply_grade 真的算像素：曲线提亮中间调、分区 HSL 只动对应色相，且可撤销', async () => {
+    const saved = config.layers.slice();
+    const canvas = makeCanvas(8, 4, 3);
+    // 左半红、右半蓝，中间调亮度
+    const ctx2 = canvas.getContext('2d');
+    if (ctx2 && typeof ctx2.__fill === 'function') ctx2.__fill('#80');
+    config.layers = [{ id: 9801, name: '分级测试', type: 'image', link: canvas, x: 0, y: 0, width: 8, height: 4, order: 140, visible: true, composition: 'source-over' }];
+    config.WIDTH = 8; config.HEIGHT = 4;
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    await bridge.prepareDigest();
+    try {
+      const first = await send({ type: 'layer.apply_grade', payload: { layerId: '9801', grade: { exposure: 1 } } });
+      assert.equal(first.ok, true, JSON.stringify(first));
+      assert.equal(typeof first.result.commandDetail?.gradedPixels, 'number', JSON.stringify(first.result));
+      assert.ok(first.result.commandDetail.gradedPixels > 0, '必须真的处理了像素');
+      const afterExposure = bridge.readState();
+      assert.ok(afterExposure.layers.find(layer => String(layer.id) === '9801').grade, '分级要能被 read_state 读回来');
+
+      // 撤销后必须回到未分级状态（不能还宣称分级在生效）
+      const undo = await send({ type: 'history.undo', payload: {} });
+      assert.equal(undo.ok, true);
+      const afterUndo = bridge.readState();
+      assert.equal(afterUndo.layers.find(layer => String(layer.id) === '9801').grade, undefined, '撤销后 read_state 里的 grade 必须消失');
+
+      // 形状不合法的参数要拒绝，不能"尽力而为"
+      for (const bad of [{}, { exposure: 'x' }, { curve: [{ x: 'a', y: 1 }] }, { hsl: 'nope' }]) {
+        const rejected = await send({ type: 'layer.apply_grade', payload: { layerId: '9801', grade: bad } });
+        assert.equal(rejected.ok, false, `应拒绝 ${JSON.stringify(bad)}`);
+      }
+    } finally {
+      config.layers = saved;
+      config.WIDTH = 640; config.HEIGHT = 480;
       bridge.pixelMutation += 1;
       bridge.refreshRevision();
     }
