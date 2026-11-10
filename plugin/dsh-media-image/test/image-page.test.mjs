@@ -317,6 +317,41 @@ test('上传的图也能插入：最近可插入素材由生成/上传/导入共
   assert.match(code, /nearestAssetName/, '插入名应取素材名');
 });
 
+test('筹码表的每一项都必须是二元组：双逗号造成的数组空位会让整页初始化中断', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const start = script.indexOf('const CHIPS = [');
+  assert.ok(start > 0, '必须能找到 CHIPS');
+  const table = script.slice(start, script.indexOf('];', start));
+  // 不许出现 ",,"：那会产生 elision（空位），for...of 解构到 undefined 就抛错。
+  assert.equal(/,\s*,/.test(table), false, 'CHIPS 里不得有双逗号（数组空位）');
+  // 每一项都必须是形如 ['标签', '指令'] 的二元组。
+  const rows = [...table.matchAll(/\[[^\[\]]+\]/g)].map(match => match[0]);
+  assert.ok(rows.length >= 8, `筹码项数异常：${rows.length}`);
+  for (const row of rows) {
+    const inner = row.slice(1, -1);
+    const parts = inner.split(',').filter(part => part.trim());
+    assert.equal(parts.length, 2, `筹码项必须是二元组：${row}`);
+  }
+});
+
+test('页面里用到的样式类名必须在 CSS 里存在（否则组件会退回浏览器默认样式）', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const page = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  // 命令面板与历史条是纯 JS 构建的节点：类名写错不会报错，只会"看起来像默认按钮"。
+  const used = new Set();
+  for (const match of script.matchAll(/className = '([a-z][a-z0-9-]*)'/g)) {
+    if (match[1].startsWith('cmd-') || match[1].startsWith('history-') || match[1].startsWith('assist-')) used.add(match[1]);
+  }
+  assert.ok(used.size >= 4, `至少应识别到命令面板/历史条的类名，实际 ${used.size}`);
+  for (const name of used) {
+    assert.match(page, new RegExp(`\\.${name}[\\s{,:]`), `类名 .${name} 在 host.html 里没有对应样式`);
+  }
+  // 反向：不得残留已被替换掉的旧类名。
+  for (const stale of ['palette-item', 'palette-badge', 'palette-why', 'palette-hint', 'palette-backdrop']) {
+    assert.equal(script.includes(`'${stale}'`), false, `JS 里残留了旧类名 ${stale}`);
+  }
+});
+
 test('历史条：逐步 undo/redo 跳到目标位置，限制单次距离，失败如实报告走到第几步', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const page = readFileSync(join(publicImage, 'host.html'), 'utf8');

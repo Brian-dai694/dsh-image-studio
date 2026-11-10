@@ -1119,7 +1119,7 @@ const CHIPS = [
   ['上传', '@upload'],
   ['套版', '@psd'],
   ['局部重绘', '局部重绘：'],
-  ['抠图', '抠图'],,
+  ['抠图', '抠图'],
   ['导入', '导入：https://example.com/a.png'],
   ['字体', '字体列表'],
   ['状态', '状态'],
@@ -2175,8 +2175,7 @@ window.addEventListener('pagehide', () => { if (batchTimer !== null) clearTimeou
  * 执行走与 Agent 完全相同的 apply_command 路径：一次确认、一步撤销。
  */
 const palette = (() => {
-  const backdrop = $('palette-backdrop');
-  const panel = $('palette');
+  const panel = $('cmd-panel');
   const query = $('palette-q');
   const paletteList = $('palette-list');
   const count = $('palette-count');
@@ -2202,7 +2201,7 @@ const palette = (() => {
     paletteList.replaceChildren();
     if (!filtered.length) {
       const empty = document.createElement('p');
-      empty.className = 'palette-hint';
+      empty.className = 'cmd-why';
       empty.textContent = commands.length ? '没有匹配的命令' : '命令目录还没加载';
       paletteList.append(empty);
       count.textContent = '';
@@ -2211,20 +2210,20 @@ const palette = (() => {
     filtered.forEach((command, index) => {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'palette-item';
+      item.className = 'cmd-item';
       item.dataset.active = index === active ? '1' : '0';
       item.disabled = command.enabled === false;
       const code = document.createElement('code');
       code.textContent = command.id;
       item.append(code);
       const badge = document.createElement('span');
-      badge.className = 'palette-badge';
+      badge.className = 'cmd-badge';
       badge.textContent = command.highRisk ? '需单独确认' : command.needs;
       item.append(badge);
       const why = describeWhy(command);
       if (why) {
         const note = document.createElement('span');
-        note.className = 'palette-why';
+        note.className = 'cmd-why';
         note.textContent = why;
         item.append(note);
       }
@@ -2273,8 +2272,9 @@ const palette = (() => {
   };
 
   const open = async () => {
+    // 面板嵌在助手卡片里：先确保助手是打开的，否则焦点会给到隐藏元素。
+    openAssist(true);
     panel.hidden = false;
-    backdrop.dataset.open = '1';
     query.value = '';
     params.value = '';
     params.dataset.for = '';
@@ -2283,20 +2283,19 @@ const palette = (() => {
     query.focus();
     try { await load(); } catch (error) { count.textContent = `目录加载失败：${error.code || error.message}`; }
   };
-  const close = () => { panel.hidden = true; backdrop.dataset.open = '0'; };
+  const close = () => { panel.hidden = true; };
 
-  $('palette-open').addEventListener('click', open);
+  $('palette-open').addEventListener('click', () => { if (panel.hidden) void open(); else close(); });
   $('palette-close').addEventListener('click', close);
-  backdrop.addEventListener('click', close);
   query.addEventListener('input', filter);
   query.addEventListener('keydown', event => {
     if (event.key === 'ArrowDown') { event.preventDefault(); active = Math.min(filtered.length - 1, active + 1); render(); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); active = Math.max(0, active - 1); render(); }
     else if (event.key === 'Enter' && filtered[active]) { event.preventDefault(); select(filtered[active]); }
   });
-  // 全局快捷键：Ctrl/⌘+K 开、Esc 关。输入框里也生效（这是命令面板的通行做法）。
+  // 全局快捷键：Ctrl/⌘+K 打开（助手也会一起展开）、Esc 收起面板。
   document.addEventListener('keydown', event => {
-    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'k') { event.preventDefault(); open(); }
+    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === 'k') { event.preventDefault(); void open(); }
     else if (event.key === 'Escape' && !panel.hidden) { event.preventDefault(); close(); }
   });
 
