@@ -69,7 +69,39 @@ test('曝光/对比/饱和度映射成 effects，并写明是近似', () => {
   assert.ok(overlay.opacity > 0 && overlay.opacity <= 0.35);
 });
 
-test('高光/阴影/分离色调现在走像素分级，不再列进 unmapped', () => {
+test('六项局部调整现在都能进 grade（不再有"做不到"的常规字段）', () => {
+  const local = `<x:xmpmeta><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Clarity2012="30" crs:Dehaze="20" crs:Texture="15" crs:SharpenAmount="40"
+    crs:GrainAmount="25" crs:VignetteAmount="-30"/>
+  </rdf:RDF></x:xmpmeta>`;
+  const plan = planPresetFromXmp(local);
+  assert.ok(plan.grade, JSON.stringify(plan));
+  for (const key of ['clarity', 'dehaze', 'texture', 'sharpen', 'grain', 'vignette']) {
+    assert.equal(plan.grade[key], key === 'vignette' ? -30 : { clarity: 30, dehaze: 20, texture: 15, sharpen: 40, grain: 25 }[key], `${key} 应进 grade`);
+  }
+  assert.equal(plan.executable, true);
+  // 常规字段都已映射，unmapped 里不该再出现它们
+  const keys = plan.unmapped.map(item => item.key);
+  for (const key of ['Clarity2012', 'Dehaze', 'Texture', 'SharpenAmount', 'GrainAmount', 'VignetteAmount']) {
+    assert.equal(keys.includes(key), false, `${key} 已实现，不该再报做不到`);
+  }
+});
+
+test('真正做不到的只有未识别字段：如实报出且 executable=false', () => {
+  const unknownOnly = `<x:xmpmeta><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Look="Some 3D LUT.cube" crs:SomeFuturisticSlider="42"/>
+  </rdf:RDF></x:xmpmeta>`;
+  const plan = planPresetFromXmp(unknownOnly);
+  assert.equal(plan.grade, null, '未识别字段不该产出 grade');
+  assert.equal(plan.executable, false, JSON.stringify(plan));
+  assert.match(plan.note, /都还原不了/);
+  assert.ok(plan.unmapped.some(item => item.key === 'Look'), 'crs:Look（3D LUT）要如实上报');
+  assert.ok(plan.unmapped.some(item => item.key === 'SomeFuturisticSlider'));
+});
+
+test('高光/阴影/分离色调走像素分级，不列进 unmapped', () => {
   const { raw } = parseXmp(ATTRIBUTE_STYLE);
   const plan = mapToMiniPaint(raw);
   const keys = plan.unmapped.map(item => item.key);
@@ -77,9 +109,8 @@ test('高光/阴影/分离色调现在走像素分级，不再列进 unmapped', 
   for (const key of ['Highlights2012', 'Shadows2012', 'SplitToningHighlightHue']) {
     assert.equal(keys.includes(key), false, `${key} 已可分级，不该再报做不到`);
   }
-  // 真正做不到的仍然要报
-  assert.ok(keys.includes('Clarity2012'), JSON.stringify(keys));
-  assert.equal(typeof plan.unmapped.find(item => item.key === 'Clarity2012').reason, 'string');
+  // 六项局部调整也已实现，所以这份预设不该再有"做不到"
+  assert.deepEqual(keys, [], JSON.stringify(plan.unmapped));
 });
 
 test('曲线与 8 色 HSL 被解析成 grade（真像素路径）', () => {
@@ -110,19 +141,8 @@ test('曲线与 8 色 HSL 被解析成 grade（真像素路径）', () => {
   assert.match(plan.note, /色相带 HSL/);
 });
 
-test('全是不可还原字段时，明确说不要假装套用', () => {
-  // 只剩清晰度/去雾/纹理/锐化/颗粒/暗角——这些确实没有实现
-  const onlyUnmappable = `<x:xmpmeta><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
-    crs:Clarity2012="30" crs:Dehaze="20" crs:Texture="15" crs:SharpenAmount="40"
-    crs:GrainAmount="25" crs:VignetteAmount="-30"/>
-  </rdf:RDF></x:xmpmeta>`;
-  const plan = planPresetFromXmp(onlyUnmappable);
-  assert.equal(plan.grade, null, '这些字段不该产出 grade');
-  assert.equal(plan.executable, false, JSON.stringify(plan));
-  assert.match(plan.note, /都还原不了/);
-  assert.ok(plan.unmapped.length >= 5, JSON.stringify(plan.unmapped));
-});
+// 2026-11-10：原先这条断言"清晰度/去雾/纹理/锐化/颗粒/暗角都做不到"，
+// 这些已经实现，断言作废；对应能力由上面两条新用例覆盖。
 
 test('effects 数值落在编辑器允许的区间内（否则会被 validate 拒绝）', () => {
   const extreme = {

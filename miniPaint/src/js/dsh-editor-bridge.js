@@ -34,7 +34,7 @@ const normalizeGrade = value => {
     return raw;
   };
   const out = {};
-  for (const key of ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks']) {
+  for (const key of ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'sharpen', 'clarity', 'texture', 'dehaze', 'grain', 'vignette']) {
     const parsed = numeric(key);
     if (parsed === undefined) continue;
     if (Number.isNaN(parsed)) return null;
@@ -1603,7 +1603,8 @@ export class DshEditorBridge {
       const grade = normalizeGrade(p.grade);
       if (!grade) throw this.error('INVALID_REQUEST');
       const output = new ImageData(new Uint8ClampedArray(snapshot.base.data), snapshot.base.width, snapshot.base.height);
-      const result = applyGrade(output.data, grade);
+      // 传宽高：清晰度/纹理/锐化/暗角这些局部算子需要几何信息才能算。
+      const result = applyGrade(output.data, grade, { width: snapshot.base.width, height: snapshot.base.height });
       output.layerId = layer.id;
       const previous = { ...(this.pixelApplied.get(key) || {}) };
       const action = this.imageAction(ops.ensureImageData(output), layer.id);
@@ -1623,7 +1624,8 @@ export class DshEditorBridge {
         if (Object.keys(previous).length) appliedState.set(key, previous);
         else appliedState.delete(key);
       };
-      return { action, ids: () => [key], detail: () => ({ gradedPixels: result.touched, spec: grade }) };
+      // 没几何信息时被跳过的算子要如实报出来，不能让调用方以为做了
+      return { action, ids: () => [key], detail: () => ({ gradedPixels: result.touched, spec: grade, ...(result.skipped?.length ? { skipped: result.skipped } : {}) }) };
     }
     if (command.type === 'layer.remove_background') {
       // 自动去背景：不需要坐标，也不依赖外部模型。取边界主色后按连通域擦除；

@@ -157,6 +157,24 @@ dialog#confirm-modal pre{max-height:200px}
 .cmd-actions{display:flex;gap:6px;align-items:center;margin-top:7px}
 .cmd-actions button{flex:0 0 auto;white-space:nowrap}
 .cmd-hint{font-size:11px;color:var(--ink-3);margin-left:auto;text-align:right}
+/* 调色面板：曲线编辑器 + 滑杆 + 8 色带 HSL。全部走本页变量。 */
+.grade-panel{padding:9px 11px;background:var(--panel-2);box-shadow:inset 0 -1px 0 var(--border-soft);max-height:52vh;overflow:auto}
+.grade-panel[hidden]{display:none}
+.grade-actions{position:sticky;top:-9px;z-index:2;background:var(--panel-2);display:flex;gap:6px;padding:4px 0 6px;margin-top:-4px}
+.grade-actions button{font-size:11.5px;padding:4px 9px}
+.grade-row{display:flex;gap:8px;align-items:center;margin:5px 0}
+.grade-row label{flex:0 0 62px;margin:0;font-size:11px;color:var(--ink-3)}
+.grade-row input[type=range]{flex:1;min-width:0;accent-color:var(--accent)}
+.grade-row output{flex:0 0 34px;font-size:11px;color:var(--ink-2);text-align:right;font-variant-numeric:var(--tab)}
+.curve-wrap{display:flex;gap:8px;align-items:flex-start;margin:6px 0}
+#curve-canvas{width:168px;height:112px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg);cursor:crosshair;touch-action:none}
+.curve-side{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+.curve-side button{font-size:11px;padding:3px 7px}
+.curve-side button[data-active="1"]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.band-row{display:flex;gap:3px;flex-wrap:wrap;margin:5px 0}
+.band-row button{font-size:10.5px;padding:2px 7px;border-radius:999px}
+.band-row button[data-active="1"]{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.grade-note{font-size:10.5px;color:var(--ink-3);line-height:1.5;margin:6px 0 0}
 /* 历史条：同样只用本页变量。 */
 body{display:flex;flex-direction:column;min-height:100vh}
 main{flex:1 1 auto;min-height:0;height:auto}
@@ -229,6 +247,27 @@ body.assist-collapsed .assist-rail{display:flex}
         <button id="palette-close" class="ghost">收起</button>
         <span class="cmd-hint">执行走与 Agent 同一条 apply_command：一次确认、一步撤销</span>
       </div>
+    </div>
+    <div class="grade-panel" id="grade-panel" hidden>
+      <div class="grade-actions">
+        <button id="grade-apply" class="primary">应用到选中图层</button>
+        <button id="grade-reset" class="ghost">全部重置</button>
+        <button id="grade-json" class="ghost">复制参数</button>
+      </div>
+      <div class="curve-wrap">
+        <canvas id="curve-canvas" width="168" height="112" title="点一下加控制点，双击删点；拖动调整"></canvas>
+        <div class="curve-side">
+          <button id="curve-channel-rgb" data-active="1">RGB</button>
+          <button id="curve-channel-red">红</button>
+          <button id="curve-channel-green">绿</button>
+          <button id="curve-channel-blue">蓝</button>
+          <button id="curve-reset">重置曲线</button>
+        </div>
+      </div>
+      <div id="grade-sliders"></div>
+      <div class="band-row" id="hsl-bands"></div>
+      <div id="hsl-sliders"></div>
+      <p class="grade-note">曲线预览按控制点连线绘制；实际应用走单调三次插值（不会过冲）。这是像素运算，会改图层内容，可一步撤销。</p>
     </div>
     <div class="assist-log" id="assist-log" aria-live="polite"></div>
     <div class="assist-controls">

@@ -158,14 +158,53 @@ const BAYER_4X4 = [
 ].map(row => row.map(value => value / 16 - 0.5));
 
 /**
+ * 可分离盒式模糊（对单通道）。O(n) 与半径无关，适合清晰度/纹理/锐化取低频。
+ * @returns {Float32Array} 模糊后的同尺寸数组
+ */
+export function boxBlurPlane(plane, width, height, radius) {
+  const r = Math.max(0, Math.round(radius));
+  if (r === 0) return Float32Array.from(plane);
+  const temp = new Float32Array(plane.length);
+  const out = new Float32Array(plane.length);
+  // 水平
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    let sum = 0;
+    for (let x = -r; x <= r; x += 1) sum += plane[row + Math.min(width - 1, Math.max(0, x))];
+    for (let x = 0; x < width; x += 1) {
+      temp[row + x] = sum / (2 * r + 1);
+      const add = Math.min(width - 1, x + r + 1);
+      const remove = Math.max(0, x - r);
+      sum += plane[row + add] - plane[row + remove];
+    }
+  }
+  // 垂直
+  for (let x = 0; x < width; x += 1) {
+    let sum = 0;
+    for (let y = -r; y <= r; y += 1) sum += temp[Math.min(height - 1, Math.max(0, y)) * width + x];
+    for (let y = 0; y < height; y += 1) {
+      out[y * width + x] = sum / (2 * r + 1);
+      const add = Math.min(height - 1, y + r + 1);
+      const remove = Math.max(0, y - r);
+      sum += temp[add * width + x] - temp[remove * width + x];
+    }
+  }
+  return out;
+}
+
+const lumaOf = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+/**
  * 对一段 RGBA 像素**就地**应用色彩分级。
  * @param {Uint8ClampedArray} pixels RGBA
  * @param {object} spec
  *   exposure(EV) / contrast / highlights / shadows / whites / blacks / curve[] /
- *   curveRed|Green|Blue[] / hsl:{red:{hue,sat,lum},...} / splitTone:{highlightHue,highlightSat,shadowHue,shadowSat}
+ *   curveRed|Green|Blue[] / hsl:{red:{hue,sat,lum},...} / splitTone:{...}
+ *   / sharpen / clarity / texture / dehaze / grain / vignette（-100..100）
  * @param {object} [options]
- *   width 给定时启用 4×4 有序抖动（平滑渐变不再出条带）；dither=false 可关掉。
- * @returns {{pixels:Uint8ClampedArray, touched:number}}
+ *   width/height：给定时启用 4×4 有序抖动，并且局部算子（清晰度/纹理/锐化/暗角）才能算；
+ *   缺省时局部算子被跳过并在返回值里报告（不假装做了）。
+ * @returns {{pixels:Uint8ClampedArray, touched:number, skipped:string[]}}
  */
 export function applyGrade(pixels, spec = {}, options = {}) {
   const master = buildMasterLut(spec);
@@ -173,8 +212,38 @@ export function applyGrade(pixels, spec = {}, options = {}) {
   const hsl = spec.hsl && typeof spec.hsl === 'object' ? spec.hsl : null;
   const split = spec.splitTone && typeof spec.splitTone === 'object' ? spec.splitTone : null;
   const width = Number.isSafeInteger(options.width) && options.width > 0 ? options.width : 0;
-  const dither = options.dither !== false && width > 0;
+  const height = Number.isSafeInteger(options.height) && options.height > 0 ? options.height : 0;
+  const hasGeometry = width > 0 && height > 0;
+  const dither = options.dither !== false && hasGeometry;
+  const skipped = [];
   let touched = 0;
+
+  // ── 需要几何的局部算子：先算低频亮度，再逐像素加回高频 ──
+  const lumaPlane = hasGeometry ? new Float32Array(width * height) : null;
+  if (hasGeometry) {
+    for (let index = 0, p = 0; index < pixels.length; index += 4, p += 1) {
+      lumaPlane[p] = lumaOf(pixels[index], pixels[index + 1], pixels[index + 2]) / 255;
+    }
+  }
+  const unsharp = (amount, radius, label) => {
+    if (!amount) return null;
+    if (!hasGeometry) { skipped.push(label); return null; }
+    const low = boxBlurPlane(lumaPlane, width, height, Math.max(1, Math.round(radius)));
+    const detail = new Float32Array(lumaPlane.length);
+    for (let p = 0; p < lumaPlane.length; p += 1) detail[p] = (lumaPlane[p] - low[p]) * (amount / 100);
+    return detail;
+  };
+  // 半径按画面尺寸缩放：清晰度是大半径（局部对比），纹理/锐化是小半径（细节/边缘）
+  const clarityDetail = unsharp(Number(spec.clarity) || 0, Math.max(4, (width + height) / 120), 'clarity');
+  const textureDetail = unsharp(Number(spec.texture) || 0, Math.max(2, (width + height) / 500), 'texture');
+  const sharpenDetail = unsharp(Number(spec.sharpen) || 0, 1.2, 'sharpen');
+  const dehazeAmount = Number(spec.dehaze) || 0;
+  if (dehazeAmount && !hasGeometry) skipped.push('dehaze');
+  const grainAmount = Number(spec.grain) || 0;
+  const vignetteAmount = Number(spec.vignette) || 0;
+  if (vignetteAmount && !hasGeometry) skipped.push('vignette');
+  const centerX = (width - 1) / 2, centerY = (height - 1) / 2;
+  const maxDistance = Math.hypot(centerX, centerY) || 1;
 
   for (let index = 0; index < pixels.length; index += 4) {
     const alpha = pixels[index + 3];
@@ -222,6 +291,43 @@ export function applyGrade(pixels, spec = {}, options = {}) {
       apply(Number(split.highlightHue), Number(split.highlightSat), lum);
     }
 
+    if (hasGeometry) {
+      const p = index / 4;
+      // 清晰度/纹理/锐化：都是"原亮度 + 高频增量"，加在三个通道上保持色相。
+      let delta = 0;
+      if (clarityDetail) delta += clarityDetail[p];
+      if (textureDetail) delta += textureDetail[p];
+      if (sharpenDetail) delta += sharpenDetail[p];
+      if (delta) { r += delta; g += delta; b += delta; }
+
+      // 去雾（近似）：抬对比 + 压暗部 + 加一点饱和。真正的去雾要估大气光，这里明确是近似。
+      if (dehazeAmount) {
+        const strength = dehazeAmount / 100;
+        const lum = lumaOf(r, g, b);
+        const curved = clamp01((lum - 0.5) * (1 + strength * 0.5) + 0.5);
+        const gain = lum > 0.001 ? curved / lum : 1;
+        r = clamp01(r * gain * (1 + strength * 0.12));
+        g = clamp01(g * gain * (1 + strength * 0.12));
+        b = clamp01(b * gain * (1 + strength * 0.12));
+      }
+
+      // 颗粒：确定性伪随机（按像素索引），保证同样输入得到同样输出。
+      if (grainAmount) {
+        const x = p % width, y = (p - x) / width;
+        const hash = Math.sin((x * 12.9898 + y * 78.233) * 43758.5453);
+        const noise = (hash - Math.floor(hash) - 0.5) * (grainAmount / 100) * 0.18;
+        r += noise; g += noise; b += noise;
+      }
+
+      // 暗角：按到中心的归一化距离压暗（负值则提亮四周）。
+      if (vignetteAmount) {
+        const x = p % width, y = (p - x) / width;
+        const distance = Math.hypot(x - centerX, y - centerY) / maxDistance;
+        const factor = 1 + (vignetteAmount / 100) * 0.9 * distance * distance;
+        r *= factor; g *= factor; b *= factor;
+      }
+    }
+
     // 抖动：按像素位置取矩阵值，±0.5 LSB 的量级足够打散条带，又不会引入可见噪点。
     let noise = 0;
     if (dither) {
@@ -234,5 +340,5 @@ export function applyGrade(pixels, spec = {}, options = {}) {
     // alpha 原样保留：分级不该改透明度
     touched += 1;
   }
-  return { pixels, touched };
+  return { pixels, touched, skipped };
 }

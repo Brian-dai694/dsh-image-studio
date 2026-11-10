@@ -21,14 +21,17 @@ export const KNOWN_KEYS = [
   ]),
 ];
 
+/** 只用于元信息、不当作画面参数的字段（列进 unmapped 会造成噪声）。 */
+export const KNOWN_META_KEYS = [
+  'PresetType', 'Name', 'ProcessVersion', 'Version', 'WhiteBalance', 'AutoBrightness',
+  'CameraProfile', 'CameraProfileDigest', 'HasSettings', 'HasCrop', 'AlreadyApplied',
+  'ToneCurveName2012', 'ParametricShadows', 'ParametricDarks', 'ParametricLights', 'ParametricHighlights',
+];
+
 /** 现在这些字段**能**还原了（走像素分级），所以从"做不到"名单里移除。 */
 export const UNMAPPED_KEYS = {
-  Clarity2012: '局部对比（中频）无等价实现',
-  Dehaze: '去雾是专用算法，不是亮度/对比能替代的',
-  Texture: '纹理是局部中频细节，无等价实现',
-  SharpenAmount: '锐化需要卷积，当前没有该效果',
-  GrainAmount: '颗粒是噪声纹理，当前没有该效果',
-  VignetteAmount: '暗角需要径向遮罩 + 亮度调整，当前没有',
+  // 这一版把清晰度/去雾/纹理/锐化/颗粒/暗角也实现了，名单只剩真正做不到的：
+  // 基于 AI 的局部蒙版调整（主体/天空选择）与 3D LUT（crs:Look）不在解析范围内。
 };
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -127,6 +130,11 @@ export function buildGrade(raw, text = '') {
     if (Object.keys(entry).length) hsl[band] = entry;
   }
   if (Object.keys(hsl).length) grade.hsl = hsl;
+  // 局部算子：都进 grade，编辑器按像素算（需要几何信息，命令会传宽高）
+  for (const [key, field] of [['Clarity2012', 'clarity'], ['Dehaze', 'dehaze'], ['Texture', 'texture'], ['SharpenAmount', 'sharpen'], ['GrainAmount', 'grain'], ['VignetteAmount', 'vignette']]) {
+    const value = num(raw[key]);
+    if (value !== null && value !== 0) grade[field] = clamp(value, -100, 100);
+  }
   // 分离色调
   const split = {};
   const highlightHue = num(raw.SplitToningHighlightHue), highlightSat = num(raw.SplitToningHighlightSaturation);
@@ -208,7 +216,12 @@ export function mapToMiniPaint(raw) {
 export function planPresetFromXmp(text) {
   const parsed = parseXmp(text);
   const mapped = mapToMiniPaint(parsed.raw);
-  // 真像素这条路优先：曲线/HSL/分离色调都在 grade 里，能字节级还原（除了局部调整）。
+  // 未知字段要看**全量** params：raw 已经过滤成已知字段，只扫 raw 会永远漏掉 crs:Look 这类。
+  const unknown = Object.keys(parsed.params)
+    .filter(key => !KNOWN_KEYS.includes(key) && !KNOWN_META_KEYS.includes(key))
+    .map(key => ({ key, value: String(parsed.params[key]).slice(0, 80), reason: '未识别的 Camera Raw 字段（可能是 3D LUT / 蒙版 / 新版本参数）' }));
+  const unmapped = [...mapped.unmapped, ...unknown];
+  // 真像素这条路优先：曲线/HSL/分离色调都在 grade 里，能字节级还原。
   const grade = buildGrade(parsed.raw, text);
   const executable = Boolean(grade) || Object.keys(mapped.effects).length > 0 || mapped.overlays.length > 0;
   const parts = [];
@@ -229,11 +242,11 @@ export function planPresetFromXmp(text) {
     grade,
     effects: mapped.effects,
     overlays: mapped.overlays,
-    unmapped: mapped.unmapped,
+    unmapped,
     assumptions: mapped.assumptions,
     executable,
     note: executable
-      ? `${parts.join('；')}${mapped.unmapped.length ? `。另有 ${mapped.unmapped.length} 项（${mapped.unmapped.map(item => item.key).join('、')}）miniPaint 做不到` : ''}。`
+      ? `${parts.join('；')}${unmapped.length ? `。另有 ${unmapped.length} 项（${unmapped.map(item => item.key).join('、')}）miniPaint 做不到` : ''}。`
       : `这个预设的调整项 miniPaint 都还原不了（见 unmapped），不要假装套用。`,
   };
 }

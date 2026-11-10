@@ -197,6 +197,37 @@ test('面板插入图层走真实编辑器命令，且未知结果只查不重�
   assert.equal(/for\s*\(.*retry/i.test(script), false, '插入路径不得含自动重试循环');
 });
 
+test('调色面板：曲线编辑器 + 12 滑杆 + 8 色带 HSL，且应用走像素命令', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  for (const id of ['grade-panel', 'curve-canvas', 'curve-channel-rgb', 'grade-sliders', 'hsl-bands', 'hsl-sliders', 'grade-apply', 'grade-reset', 'grade-json']) {
+    assert.match(html, new RegExp(`id="${id}"`), `调色面板缺少 ${id}`);
+  }
+  assert.match(script, /const gradePanel = /, '必须有调色面板实现');
+  const start = script.indexOf('const gradePanel = ');
+  const block = script.slice(start, script.indexOf('const historyBar = '));
+  // 12 个滑杆、8 个色带、三通道曲线
+  assert.match(block, /const SLIDERS = \[/, '缺滑杆表');
+  for (const key of ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks', 'clarity', 'dehaze', 'texture', 'sharpen', 'grain', 'vignette']) {
+    assert.ok(block.includes(`['${key}'`), `缺少 ${key} 滑杆`);
+  }
+  assert.match(block, /const BANDS = \[/, '缺色带表');
+  for (const band of ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta']) {
+    assert.ok(block.includes(`['${band}'`), `缺少 ${band} 色带`);
+  }
+  // 曲线可加/拖/删点
+  assert.match(block, /pointerdown/, '曲线要能加点');
+  assert.match(block, /pointermove/, '曲线要能拖点');
+  assert.match(block, /dblclick/, '曲线要能删点');
+  // 应用走像素命令，并先确认
+  assert.match(block, /layer\.apply_grade/, '应用必须走像素分级命令');
+  assert.match(block, /askConfirm\(\{/, '应用前必须确认');
+  assert.match(block, /像素运算/, '要说明这是像素运算而不是非破坏调整');
+  // 预览与实现的差异要写明
+  assert.match(html, /曲线预览按控制点连线绘制/, '要说明预览只是连线');
+  assert.match(html, /单调三次插值/, '要说明实际是单调插值');
+});
+
 test('XMP 预设入口：只套 miniPaint 真有的调整，还原不了的必须当场列清楚', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');

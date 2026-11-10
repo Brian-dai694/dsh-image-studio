@@ -1158,6 +1158,7 @@ const CHIPS = [
   ['上传', '@upload'],
   ['套版', '@psd'],
   ['预设', '@xmp'],
+  ['调色', '@grade'],
   ['局部重绘', '局部重绘：'],
   ['抠图', '抠图'],
   ['导入', '导入：https://example.com/a.png'],
@@ -1211,6 +1212,11 @@ function renderChips() {
       if (command === '@upload') { $('assist-file')?.click(); return; }
       if (command === '@psd') { $('assist-psd')?.click(); return; }
       if (command === '@xmp') { $('assist-xmp')?.click(); return; }
+      // 调色面板与命令面板互斥：两个都占助手空间，同时开会挤成一团。
+      if (command === '@grade') {
+        if (gradePanel) { palette.close(); gradePanel.open(); }
+        return;
+      }
       if (command === '局部重绘：') { if (assistText) { assistText.value = command; assistText.focus(); } return; }
       void sendAssist(command);
     });
@@ -1800,6 +1806,304 @@ function renderAssetPane() {
     list.append(row);
   }
 }
+
+/**
+ * 调色面板：色调曲线编辑器 + 12 个滑杆 + 8 色带 HSL + 分离色调。
+ *
+ * 诚实点：曲线预览按**控制点连线**画（不复制一份插值算法，避免两处漂移），
+ * 实际应用走编辑器里的单调三次插值，面板上也写明了这一点。
+ * 应用=像素运算（layer.apply_grade），可一步撤销，但不是非破坏调整层。
+ */
+const gradePanel = (() => {
+  const panel = $('grade-panel');
+  const canvas = $('curve-canvas');
+  const sliderHost = $('grade-sliders');
+  const bandHost = $('hsl-bands');
+  const hslHost = $('hsl-sliders');
+  if (!panel || !canvas || !sliderHost || !bandHost || !hslHost) return null;
+
+  const SLIDERS = [
+    ['exposure', '曝光 EV', -3, 3, 0.05],
+    ['contrast', '对比', -100, 100, 1],
+    ['highlights', '高光', -100, 100, 1],
+    ['shadows', '阴影', -100, 100, 1],
+    ['whites', '白场', -100, 100, 1],
+    ['blacks', '黑场', -100, 100, 1],
+    ['clarity', '清晰度', -100, 100, 1],
+    ['dehaze', '去雾', -100, 100, 1],
+    ['texture', '纹理', -100, 100, 1],
+    ['sharpen', '锐化', -100, 100, 1],
+    ['grain', '颗粒', -100, 100, 1],
+    ['vignette', '暗角', -100, 100, 1],
+  ];
+  const BANDS = [
+    ['red', '红', '#e0473f'], ['orange', '橙', '#e08a3f'], ['yellow', '黄', '#ded33f'], ['green', '绿', '#4ec06a'],
+    ['aqua', '青', '#3fc4c4'], ['blue', '蓝', '#4a7ae0'], ['purple', '紫', '#8a5ae0'], ['magenta', '品红', '#e04a9c'],
+  ];
+  const CHANNELS = [['rgb', 'RGB'], ['red', '红'], ['green', '绿'], ['blue', '蓝']];
+
+  const state = {
+    values: Object.fromEntries(SLIDERS.map(([key]) => [key, 0])),
+    // 曲线：每个通道一份控制点（0..1 归一化）
+    curves: { rgb: [{ x: 0, y: 0 }, { x: 1, y: 1 }], red: [{ x: 0, y: 0 }, { x: 1, y: 1 }], green: [{ x: 0, y: 0 }, { x: 1, y: 1 }], blue: [{ x: 0, y: 0 }, { x: 1, y: 1 }] },
+    channel: 'rgb',
+    hsl: {},
+    band: 'orange',
+    splitTone: { highlightHue: 0, highlightSat: 0, shadowHue: 0, shadowSat: 0 },
+  };
+
+  const setSlider = (key, value) => { state.values[key] = value; };
+  let dragging = null;
+
+  const draw = () => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const { width: w, height: h } = canvas;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(120,130,150,.35)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 4; i += 1) {
+      ctx.beginPath(); ctx.moveTo((w / 4) * i, 0); ctx.lineTo((w / 4) * i, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, (h / 4) * i); ctx.lineTo(w, (h / 4) * i); ctx.stroke();
+    }
+    // 恒等参考线
+    ctx.strokeStyle = 'rgba(120,130,150,.25)';
+    ctx.beginPath(); ctx.moveTo(0, h); ctx.lineTo(w, 0); ctx.stroke();
+    // 当前通道的折线（预览用连线，标注里说明了实际是单调插值）
+    const points = [...state.curves[state.channel]].sort((a, b) => a.x - b.x);
+    const color = { rgb: '#15181f', red: '#e0473f', green: '#2f9b52', blue: '#3f6fe0' }[state.channel];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const px = point.x * w, py = h - point.y * h;
+      if (index === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.fillStyle = color;
+    for (const point of points) {
+      ctx.beginPath();
+      ctx.arc(point.x * w, h - point.y * h, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+
+  const renderSliders = () => {
+    sliderHost.replaceChildren();
+    for (const [key, label, min, max, step] of SLIDERS) {
+      const row = document.createElement('div');
+      row.className = 'grade-row';
+      const name = document.createElement('label');
+      name.textContent = label;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = String(min); input.max = String(max); input.step = String(step);
+      input.value = String(state.values[key]);
+      input.dataset.key = key;
+      const output = document.createElement('output');
+      output.textContent = String(state.values[key]);
+      input.addEventListener('input', () => {
+        setSlider(key, Number(input.value));
+        output.textContent = input.value;
+      });
+      row.append(name, input, output);
+      sliderHost.append(row);
+    }
+  };
+
+  const renderBands = () => {
+    bandHost.replaceChildren();
+    for (const [key, label] of BANDS) {
+      const button = document.createElement('button');
+      button.textContent = label;
+      button.dataset.active = state.band === key ? '1' : '0';
+      button.addEventListener('click', () => { state.band = key; renderBands(); renderHsl(); });
+      bandHost.append(button);
+    }
+  };
+
+  const renderHsl = () => {
+    hslHost.replaceChildren();
+    const entry = state.hsl[state.band] || {};
+    for (const [channel, label] of [['hue', '色相'], ['sat', '饱和'], ['lum', '明亮度']]) {
+      const row = document.createElement('div');
+      row.className = 'grade-row';
+      const name = document.createElement('label');
+      name.textContent = `${label}`;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = '-100'; input.max = '100'; input.step = '1';
+      input.value = String(entry[channel] ?? 0);
+      input.dataset.band = state.band;
+      input.dataset.channel = channel;
+      const output = document.createElement('output');
+      output.textContent = String(entry[channel] ?? 0);
+      input.addEventListener('input', () => {
+        const next = { ...(state.hsl[state.band] || {}) };
+        const value = Number(input.value);
+        if (value === 0) delete next[channel]; else next[channel] = value;
+        state.hsl[state.band] = next;
+        output.textContent = input.value;
+      });
+      row.append(name, input, output);
+      hslHost.append(row);
+    }
+    // 分离色调跟在 HSL 后面，一起在这里展示
+    for (const [key, label] of [['highlightHue', '高光色相'], ['highlightSat', '高光饱和'], ['shadowHue', '阴影色相'], ['shadowSat', '阴影饱和']]) {
+      const row = document.createElement('div');
+      row.className = 'grade-row';
+      const name = document.createElement('label');
+      name.textContent = label;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = '0'; input.max = key.endsWith('Hue') ? '360' : '100'; input.step = '1';
+      input.value = String(state.splitTone[key] ?? 0);
+      const output = document.createElement('output');
+      output.textContent = String(state.splitTone[key] ?? 0);
+      input.addEventListener('input', () => {
+        state.splitTone[key] = Number(input.value);
+        output.textContent = input.value;
+      });
+      row.append(name, input, output);
+      hslHost.append(row);
+    }
+  };
+
+  /** 面板状态 → layer.apply_grade 的 grade 参数。空值不写，避免给编辑器塞一堆 0。 */
+  const composeGrade = () => {
+    const grade = {};
+    for (const [key] of SLIDERS) {
+      const value = state.values[key];
+      if (value) grade[key] = key === 'exposure' ? value : Math.round(value);
+    }
+    for (const channel of CHANNELS) {
+      const name = channel[0];
+      const points = state.curves[name];
+      // 只有真的改过（不是默认两点）才发曲线
+      const isDefault = points.length === 2 && points[0].x === 0 && points[0].y === 0 && points[1].x === 1 && points[1].y === 1;
+      if (isDefault) continue;
+      const payload = points.map(point => ({ x: Math.round(point.x * 255), y: Math.round(point.y * 255) }));
+      if (name === 'rgb') grade.curve = payload;
+      else grade[`curve${name[0].toUpperCase()}${name.slice(1)}`] = payload;
+    }
+    const hsl = {};
+    for (const [band] of BANDS) {
+      const entry = state.hsl[band];
+      if (entry && Object.keys(entry).length) hsl[band] = entry;
+    }
+    if (Object.keys(hsl).length) grade.hsl = hsl;
+    const split = state.splitTone;
+    if (split.highlightHue || split.highlightSat || split.shadowHue || split.shadowSat) {
+      grade.splitTone = {
+        ...(split.highlightHue ? { highlightHue: split.highlightHue } : {}),
+        ...(split.highlightSat ? { highlightSat: split.highlightSat } : {}),
+        ...(split.shadowHue ? { shadowHue: split.shadowHue } : {}),
+        ...(split.shadowSat ? { shadowSat: split.shadowSat } : {}),
+      };
+    }
+    return grade;
+  };
+
+  // ── 曲线交互：点空白加点、拖点移动、双击删点 ──
+  const pointAt = (event, points) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = 1 - (event.clientY - rect.top) / rect.height;
+    let best = null, bestDistance = Infinity;
+    points.forEach((point, index) => {
+      const distance = Math.hypot((point.x - x) * rect.width, (point.y - y) * rect.height);
+      if (distance < bestDistance) { bestDistance = distance; best = index; }
+    });
+    return { index: bestDistance <= 10 ? best : -1, x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+  };
+
+  canvas.addEventListener('pointerdown', event => {
+    const points = state.curves[state.channel];
+    const hit = pointAt(event, points);
+    if (hit.index >= 0) { dragging = hit.index; return; }
+    points.push({ x: hit.x, y: hit.y });
+    points.sort((a, b) => a.x - b.x);
+    dragging = points.findIndex(point => point.x === hit.x && point.y === hit.y);
+    draw();
+  });
+  canvas.addEventListener('pointermove', event => {
+    if (dragging === null) return;
+    const points = state.curves[state.channel];
+    const hit = pointAt(event, points);
+    // 端点只允许改 y（x 固定在两端），中间点可以改 x
+    const isEndpoint = dragging === 0 || dragging === points.length - 1;
+    points[dragging] = { x: isEndpoint ? points[dragging].x : hit.x, y: hit.y };
+    points.sort((a, b) => a.x - b.x);
+    dragging = points.findIndex(point => point.y === hit.y && (isEndpoint ? point.x === points.find(p => p.y === hit.y)?.x : true));
+    draw();
+  });
+  canvas.addEventListener('pointerup', () => { dragging = null; });
+  canvas.addEventListener('dblclick', event => {
+    const points = state.curves[state.channel];
+    const hit = pointAt(event, points);
+    if (hit.index > 0 && hit.index < points.length - 1) { points.splice(hit.index, 1); draw(); }
+  });
+
+  for (const [channel] of CHANNELS) {
+    $(`curve-channel-${channel}`)?.addEventListener('click', () => {
+      state.channel = channel;
+      for (const [name] of CHANNELS) $(`curve-channel-${name}`)?.setAttribute('data-active', name === channel ? '1' : '0');
+      draw();
+    });
+  }
+  $('curve-reset')?.addEventListener('click', () => {
+    state.curves[state.channel] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+    draw();
+  });
+  $('grade-reset')?.addEventListener('click', () => {
+    for (const [key] of SLIDERS) state.values[key] = 0;
+    state.curves = { rgb: [{ x: 0, y: 0 }, { x: 1, y: 1 }], red: [{ x: 0, y: 0 }, { x: 1, y: 1 }], green: [{ x: 0, y: 0 }, { x: 1, y: 1 }], blue: [{ x: 0, y: 0 }, { x: 1, y: 1 }] };
+    state.hsl = {};
+    state.splitTone = { highlightHue: 0, highlightSat: 0, shadowHue: 0, shadowSat: 0 };
+    renderSliders(); renderHsl(); draw();
+  });
+  $('grade-json')?.addEventListener('click', async () => {
+    const text = JSON.stringify(composeGrade(), null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      bubble('bot', `参数已复制到剪贴板：\n${text}`);
+    } catch {
+      bubble('bot', `参数如下（复制失败，手动选）：\n${text}`);
+    }
+  });
+  $('grade-apply')?.addEventListener('click', async () => {
+    const grade = composeGrade();
+    if (!Object.keys(grade).length) { bubble('bot', '还没有任何调整，先把滑杆或曲线动一下。'); return; }
+    try {
+      const state2 = await fetchEditorState();
+      const target = state2.layers.find(layer => String(layer.id) === String(state2.selectedLayerId));
+      if (!target) { bubble('bot', '先在图层面板选一个图层。'); return; }
+      const answer = await askConfirm({
+        title: `把调色套到「${target.name || target.id}」`,
+        details: [`目标图层  ${target.name || target.id} · ${target.type || 'image'}`, `参数  ${JSON.stringify(grade).slice(0, 400)}`, '像素运算，会改这一层内容（可一步撤销），不是非破坏调整层。'].join('\n'),
+        maskAvailable: false,
+      });
+      if (!answer.ok) { bubble('bot', '已取消，画布没有改动。'); return; }
+      await runPlanOnEditor([{ operation: 'layer.apply_grade', params: { layerId: target.id, grade } }]);
+      bubble('bot', `已应用调色（R${(await fetchEditorState()).revision}）。`);
+      await reportSelfCheck('调色');
+    } catch (error) {
+      bubble('bot', `${error.code || 'GRADE_FAILED'}：${error.message}`);
+    }
+  });
+
+  return {
+    open() {
+      const willOpen = panel.hidden;
+      panel.hidden = !willOpen;
+      if (willOpen) { renderSliders(); renderBands(); renderHsl(); draw(); }
+      return panel.hidden;
+    },
+    close() { panel.hidden = true; },
+    get hidden() { return panel.hidden; },
+    composeGrade,
+  };
+})();
 
 /**
  * 历史条：把 read_state.history.entries 画成可点的步骤，点一条就**逐步** undo/redo 到那个位置。
