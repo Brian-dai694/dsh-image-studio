@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fetchRemoteBytes } from '../lib/remote.js';
 import { createAssetStore } from '../lib/assets.js';
-import { createFontStore, normalizeFamily, sniffFont } from '../lib/fonts.js';
+import { createFontStore, normalizeFamily, sniffFont, splitFontName } from '../lib/fonts.js';
 import { createMediaRouter } from '../lib/http.js';
 
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
@@ -42,6 +42,32 @@ test('远程拉取守卫：声明长度与实际读取都卡上限', async () =>
   await assert.rejects(() => fetchRemoteBytes('https://cdn.example.com/a.png', { fetchImpl: async () => okResponse(big), maxBytes: 1024 }), { code: 'PAYLOAD_TOO_LARGE' });
   // 没有 content-length 也要在流式读取时停下。
   await assert.rejects(() => fetchRemoteBytes('https://cdn.example.com/a.png', { fetchImpl: async () => okResponse(big), maxBytes: 100 }), { code: 'PAYLOAD_TOO_LARGE' });
+});
+
+test('字体名解析：PSD 的 Family-Style 能对上已登记字体，对不上就返回 null（不编造）', () => {
+  const fonts = createFontStore();
+  fonts.add({ bytes: WOFF2, family: 'Poppins' });
+  const roboto = fonts.add({ bytes: WOFF2, family: 'Roboto Bold' });
+
+  // 精确 / 拆家族 / 前缀三种命中
+  assert.equal(fonts.matchFontName('Poppins').match, 'exact');
+  assert.equal(fonts.matchFontName('Poppins-Medium').family, 'Poppins');
+  assert.equal(fonts.matchFontName('poppins').family, 'Poppins');
+  assert.equal(fonts.matchFontName('Roboto-Bold').id, roboto.id);
+  // 登记族名更长时按前缀命中
+  assert.equal(fonts.matchFontName('Roboto').family, 'Roboto Bold');
+  // 没登记的一律 null —— 绝不返回一个假字体让编辑器静默回退
+  assert.equal(fonts.matchFontName('Arial-Bold'), null);
+  assert.equal(fonts.matchFontName(''), null);
+  assert.equal(fonts.matchFontName(undefined), null);
+  // 命中结果必须带可加载的 URL（编辑器只认 /media-image/fonts/<48 位 id>）
+  assert.match(fonts.matchFontName('Poppins-Medium').url, /^\/media-image\/fonts\/[a-f0-9]{48}$/);
+
+  // 家族/样式拆分：样式词才拆，普通双词族名不拆
+  assert.deepEqual(splitFontName('Poppins-Medium'), { family: 'Poppins', style: 'Medium' });
+  assert.deepEqual(splitFontName('Roboto-Bold'), { family: 'Roboto', style: 'Bold' });
+  assert.deepEqual(splitFontName('Helvetica Neue'), { family: 'Helvetica Neue', style: null });
+  assert.deepEqual(splitFontName(''), { family: null, style: null });
 });
 
 test('字体库：按签名认类型、家族名只收安全字符、按 id 取回', () => {

@@ -503,7 +503,7 @@ export function createMediaBridge({ relay, editorKind = 'image', timeoutMs = DEF
       opaqueId(input?.instanceId, 'instanceId');
       opaqueId(input.projectId, 'projectId');
       opaqueId(input.commandId, 'commandId');
-      const formats = ['png', 'jpeg'];
+      const formats = ['png', 'jpeg', 'psd'];
       if (!formats.includes(input.format)) throw new MediaBridgeError('INVALID_REQUEST', `Export format for ${editorKind} must be one of ${formats.join(', ')}.`);
       const key = keyOf(input.instanceId, input.commandId);
       if (completed.has(key)) return completed.get(key);

@@ -125,6 +125,13 @@ app.Actions.Update_layer_image_action = class {
   async undo() { if (this.layer && this.previous) Object.assign(this.layer, this.previous); }
   free() {}
 };
+// PSD 写入器：桥里是 `import { buildPsd }`（打包时正常解析），但本 harness 会把 import 行剥掉，
+// 所以这里把模块本身载进 vm 上下文、暴露成全局 buildPsd。
+{
+  let writerCode = fs.readFileSync(path.join(root, 'src/js/dsh-psd-write.js'), 'utf8');
+  writerCode = writerCode.replace(/^export default .*;\s*$/m, '').replace(/^export /gm, '');
+  context.buildPsd = vm.runInContext(`${writerCode}\n;buildPsd`, context);
+}
 const Bridge = load('dsh-editor-bridge.js', 'DshEditorBridge', { zoomView });
 const bridge = new Bridge();
 let count = 0;
@@ -1521,6 +1528,53 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       assert.throws(() => bridge.previewPng({ gridStep: step }), error => error.code === 'INVALID_REQUEST', `step ${step}`);
     }
     config.layers = config.layers.filter(item => item.id !== 9401);
+  });
+  await test('export_start format psd 产出可解析的分层文件，并如实登记降级项', async () => {
+    const previousBlob = context.Blob;
+    const previousURL = context.URL;
+    const savedLayers = config.layers.slice();
+    const savedWidth = config.WIDTH, savedHeight = config.HEIGHT;
+    context.Blob = class { constructor(parts) { this.size = parts.reduce((sum, part) => sum + (part.length ?? 0), 0); this.parts = parts; } };
+    context.URL = { createObjectURL: () => 'blob:psd-1' };
+    try {
+      config.WIDTH = 40; config.HEIGHT = 30;
+      const base = { id: 9501, name: '底', type: 'image', link: makeCanvas(40, 30, 4), x: 0, y: 0, width: 40, height: 30, order: 10, visible: true, opacity: 100, composition: 'source-over' };
+      const top = { id: 9502, name: '上层', type: 'image', link: makeCanvas(20, 10, 7), x: 5, y: 5, width: 20, height: 10, order: 20, visible: true, opacity: 50, composition: 'multiply', params: { dshMask: { sourceLayerId: '9501', mode: 'alpha', invert: false } } };
+      const offCanvas = { id: 9503, name: '画布外', type: 'image', link: makeCanvas(5, 5, 1), x: 900, y: 900, width: 5, height: 5, order: 30, visible: true };
+      // 只留这三层，避免受前面用例残留图层的影响。
+      config.layers = [base, top, offCanvas];
+      bridge.pixelMutation += 1;
+      bridge.refreshRevision();
+      await bridge.prepareDigest();
+
+      const result = await callEditor({ type: 'editor.export_start', requestId: 'psd-exp-1', editorInstanceId: bridge.editorInstanceId, documentId: bridge.documentId, expectedRevision: bridge.revision, commandId: 'psd-1', format: 'psd' });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.result.status, 'completed');
+      assert.equal(result.result.mimeType, 'image/vnd.adobe.photoshop');
+      assert.equal(result.result.layerCount, 2, '画布外的层不该写进 PSD');
+      assert.match(result.result.artifactRef, /^blob:/);
+
+      // 降级项必须如实登记：活蒙版烤进像素 + 画布外跳过。
+      const kinds = result.result.approximations.map(item => item.kind);
+      assert.ok(kinds.includes('mask-baked'), JSON.stringify(result.result.approximations));
+      assert.ok(kinds.includes('off-canvas'), JSON.stringify(result.result.approximations));
+
+      // 同一个 commandId 重复调用返回同一份结果，不重写。
+      const again = await callEditor({ type: 'editor.export_start', requestId: 'psd-exp-2', editorInstanceId: bridge.editorInstanceId, documentId: bridge.documentId, expectedRevision: bridge.revision, commandId: 'psd-1', format: 'psd' });
+      assert.equal(again.result.exportId, result.result.exportId);
+    } finally {
+      context.Blob = previousBlob;
+      context.URL = previousURL;
+      config.layers = savedLayers;
+      config.WIDTH = savedWidth; config.HEIGHT = savedHeight;
+      bridge.pixelMutation += 1;
+      bridge.refreshRevision();
+    }
+  });
+  await test('export_start 拒绝未知格式', async () => {
+    const bad = await callEditor({ type: 'editor.export_start', requestId: 'bad-exp', editorInstanceId: bridge.editorInstanceId, documentId: bridge.documentId, expectedRevision: bridge.revision, commandId: 'bad-1', format: 'tiff' });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'INVALID_REQUEST');
   });
   console.log(JSON.stringify({passed:count,scope:'real bridge + real native action/state methods; DOM/rendering stubbed, not browser acceptance'}));
 })().catch(error => { console.error(error); process.exitCode=1; });

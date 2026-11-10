@@ -36,7 +36,8 @@ test('every registered tool and metric kind belongs to the image editor', () => 
   for (const definition of tools.values()) {
     assert.deepEqual(definition.parameters.properties.editorKind.enum, ['image']);
   }
-  assert.deepEqual(tools.get('media_image_export_start').parameters.properties.format.enum, ['png', 'jpeg']);
+  // psd 走编辑器内的分层导出；png/jpeg 是拼平后的位图。
+  assert.deepEqual(tools.get('media_image_export_start').parameters.properties.format.enum, ['png', 'jpeg', 'psd']);
 });
 
 test('the guard accepts only image operations and still denies video ones', () => {

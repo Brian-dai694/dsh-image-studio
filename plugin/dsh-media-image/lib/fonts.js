@@ -30,6 +30,23 @@ export function normalizeFamily(value) {
   return trimmed;
 }
 
+// PSD 里的字体名常是 "Family-Style"（如 Poppins-Medium、Roboto-Bold）。
+// 拆成家族与样式，便于和登记过的字体族比对；拆不出来就整串当家族。
+export function splitFontName(name) {
+  const text = String(name ?? '').trim();
+  if (!text) return { family: null, style: null };
+  // 只在"最后一段看起来像样式词"时才拆，避免把 "Helvetica Neue" 拆坏。
+  const STYLES = ['thin', 'extralight', 'ultralight', 'light', 'regular', 'normal', 'book', 'medium', 'semibold', 'demibold', 'bold', 'extrabold', 'ultrabold', 'black', 'heavy', 'italic', 'oblique'];
+  const parts = text.split(/[-_ ]/);
+  if (parts.length >= 2 && STYLES.includes(parts[parts.length - 1].toLowerCase())) {
+    return { family: parts.slice(0, -1).join(' '), style: parts[parts.length - 1] };
+  }
+  return { family: text, style: null };
+}
+
+/** 比较用的归一化：去掉空格/连字符/下划线，转小写。 */
+const foldName = value => String(value ?? '').toLowerCase().replace(/[\s_-]+/g, '');
+
 export function createFontStore({ maxFontBytes = MAX_FONT_BYTES, maxTotalBytes = MAX_FONT_STORE_BYTES, maxFonts = MAX_FONTS } = {}) {
   const fonts = new Map();
   let totalBytes = 0;
@@ -49,6 +66,30 @@ export function createFontStore({ maxFontBytes = MAX_FONT_BYTES, maxTotalBytes =
       return { ...metadata(font), url: `/media-image/fonts/${font.id}` };
     },
     get(id) { return fonts.get(id) ?? null; },
+    /**
+     * 按"PSD 风格的字体名"找已登记的字体。
+     * 顺序：整串精确（忽略大小写/空格/连字符）→ 拆出的家族精确 → 登记家族是该名字的前缀。
+     * 找不到就返回 null —— **绝不**编一个字体名让编辑器去悄悄回退。
+     * @returns {{id:string, family:string, url:string, match:'exact'|'family'|'prefix'}|null}
+     */
+    matchFontName(name) {
+      const wanted = foldName(name);
+      if (!wanted) return null;
+      const all = [...fonts.values()];
+      const describe = (font, match) => ({ id: font.id, family: font.family, url: `/media-image/fonts/${font.id}`, match });
+      const exact = all.find(font => foldName(font.family) === wanted);
+      if (exact) return describe(exact, 'exact');
+      const { family } = splitFontName(name);
+      const foldedFamily = foldName(family);
+      if (foldedFamily) {
+        const byFamily = all.find(font => foldName(font.family) === foldedFamily);
+        if (byFamily) return describe(byFamily, 'family');
+        // 登记名可能带额外后缀（如 "Poppins Local"）：允许登记家族以请求家族开头。
+        const byPrefix = all.find(font => foldName(font.family).startsWith(foldedFamily));
+        if (byPrefix) return describe(byPrefix, 'prefix');
+      }
+      return null;
+    },
     list() { return [...fonts.values()].map(font => ({ ...metadata(font), url: `/media-image/fonts/${font.id}` })); },
     get totalBytes() { return totalBytes; },
     clear() { fonts.clear(); totalBytes = 0; },

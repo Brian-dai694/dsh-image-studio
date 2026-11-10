@@ -1,6 +1,8 @@
 import app from './app.js';
 import config from './config.js';
 import zoomView from './libs/zoomView.js';
+// PSD 写入器刻意不依赖浏览器 API（只吃 RGBA 数组），所以宿主侧测试也能直接 import 它。
+import { buildPsd } from './dsh-psd-write.js';
 
 // 与 modules/layer/composition.js 的清单一致：浏览器 globalCompositeOperation 全集。
 // 编辑器的 "-- Default --" 对应这里显式写出的 source-over。
@@ -1059,9 +1061,10 @@ export class DshEditorBridge {
   async exportStart(request) {
     if (request.documentId !== this.documentId) throw this.error('DOCUMENT_MISMATCH');
     if (request.expectedRevision !== this.revision) throw this.error('REVISION_CONFLICT');
-    if (!['png', 'jpeg'].includes(request.format) || typeof request.commandId !== 'string' || !request.commandId) throw this.error('INVALID_REQUEST');
+    if (!['png', 'jpeg', 'psd'].includes(request.format) || typeof request.commandId !== 'string' || !request.commandId) throw this.error('INVALID_REQUEST');
     const existing = Array.from(this.exports.values()).find(item => item.commandId === request.commandId);
     if (existing) return existing;
+    if (request.format === 'psd') return this.exportPsd(request);
     const canvas = document.createElement('canvas');
     canvas.width = config.WIDTH; canvas.height = config.HEIGHT;
     const ctx = canvas.getContext('2d');
@@ -1071,6 +1074,81 @@ export class DshEditorBridge {
     const artifactRef = URL.createObjectURL(blob);
     const exportId = randomId();
     const item = { editorKind: 'image', exportId, commandId: request.commandId, documentId: this.documentId, revision: this.revision, status: 'completed', artifactRef, mimeType: blob.type, bytes: blob.size };
+    this.exports.set(exportId, item);
+    return item;
+  }
+
+  /**
+   * 导出分层 PSD。
+   * 必须在这里做（而不是宿主侧）：host 的 relay 有 64 KiB 消息 / 256 KiB 响应上限，
+   * 整层像素过不去；而画布和图层像素本来就在这个页面里。
+   *
+   * 明确的取舍（写进导出回执的 approximations 里，不藏着）：
+   * - 文字/矢量层会被**栅格化**：PSD 里不会再是可编辑文字；
+   * - 活蒙版（params.dshMask）会被**烤进像素**：不再是有蒙版通道的图层；
+   * - 图层矩形会**夹到画布内**：超出画布的部分不写（PSD 的图层矩形越界会有兼容性问题）；
+   * - 不写智能对象 / 图层样式 / 调整层。
+   */
+  async exportPsd(request) {
+    const W = Math.max(1, Math.round(config.WIDTH || 1));
+    const H = Math.max(1, Math.round(config.HEIGHT || 1));
+    if (typeof buildPsd !== 'function') throw this.error('EDITOR_ERROR', '缺少 PSD 写入器');
+
+    const compositeCanvas = document.createElement('canvas');
+    compositeCanvas.width = W; compositeCanvas.height = H;
+    const compositeCtx = compositeCanvas.getContext('2d');
+    if (!compositeCtx || typeof compositeCtx.getImageData !== 'function') throw this.error('EDITOR_ERROR', '当前环境无法读取像素');
+    app.Layers.convert_layers_to_canvas(compositeCtx, null, false);
+    const composite = compositeCtx.getImageData(0, 0, W, H).data;
+
+    // PSD 的图层记录是**从下到上**：order 越大越在上面，所以按 order 升序写。
+    const sorted = app.Layers.get_sorted_layers().slice().sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
+    const layers = [];
+    const approximations = [];
+    for (const layer of sorted) {
+      if (layer.type === null || layer.type === undefined) continue;
+      const lw = Math.round(layer.width || layer.width_original || 0);
+      const lh = Math.round(layer.height || layer.height_original || 0);
+      if (lw < 1 || lh < 1) continue;
+      const x0 = Math.max(0, Math.round(layer.x || 0));
+      const y0 = Math.max(0, Math.round(layer.y || 0));
+      const x1 = Math.min(W, Math.round(layer.x || 0) + lw);
+      const y1 = Math.min(H, Math.round(layer.y || 0) + lh);
+      if (x1 <= x0 || y1 <= y0) {
+        approximations.push({ layerId: String(layer.id), kind: 'off-canvas', reason: '整层都在画布外，未写入 PSD' });
+        continue;
+      }
+      // 用编辑器自己的渲染管线把这个图层画到整幅画布，再裁到它的矩形：
+      // 这样文字、旋转、效果栈、活蒙版都按画布上看到的样子落地。
+      const pad = document.createElement('canvas');
+      pad.width = W; pad.height = H;
+      const pctx = pad.getContext('2d');
+      if (!pctx) throw this.error('EDITOR_ERROR', '当前环境无法创建画布');
+      app.Layers.render_object(pctx, layer);
+      const cropped = pctx.getImageData(x0, y0, x1 - x0, y1 - y0);
+      if (layer.type !== 'image' || layer.render_function) approximations.push({ layerId: String(layer.id), kind: 'rasterized', reason: `${layer.type} 层已栅格化为像素` });
+      if (layer.params && layer.params.dshMask) approximations.push({ layerId: String(layer.id), kind: 'mask-baked', reason: '活蒙版已烤进图层像素，不再有蒙版通道' });
+      if (x0 !== Math.round(layer.x || 0) || y0 !== Math.round(layer.y || 0) || (x1 - x0) !== lw || (y1 - y0) !== lh) {
+        approximations.push({ layerId: String(layer.id), kind: 'clipped', reason: '图层矩形超出画布，写入时已夹到画布内' });
+      }
+      layers.push({
+        name: String(layer.name || '图层'),
+        rect: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+        opacity: layer.opacity ?? 100,
+        blendMode: layer.composition || 'source-over',
+        visible: layer.visible !== false,
+        pixels: cropped.data,
+      });
+    }
+
+    const bytes = buildPsd({ width: W, height: H, layers, composite });
+    const blob = new Blob([bytes], { type: 'image/vnd.adobe.photoshop' });
+    const exportId = randomId();
+    const item = {
+      editorKind: 'image', exportId, commandId: request.commandId, documentId: this.documentId, revision: this.revision,
+      status: 'completed', artifactRef: URL.createObjectURL(blob), mimeType: 'image/vnd.adobe.photoshop', bytes: blob.size,
+      layerCount: layers.length, approximations,
+    };
     this.exports.set(exportId, item);
     return item;
   }

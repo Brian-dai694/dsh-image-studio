@@ -15,6 +15,70 @@ function realTemplate() {
   return psdToTemplate(readFileSync(APLUS), { name: 'aplus01.psd' });
 }
 
+test('文字命令沿用 PSD 的字号与颜色；字体未登记时如实登记 warning、不写 family', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const plan = planTemplateApply(template, { product: { assetRef: ASSET } });
+  const textCommands = plan.commands.filter(command => command.type === 'layer.add_text');
+  assert.ok(textCommands.length >= 1, '真实模板应有文字命令');
+  const [first] = textCommands;
+  // 字号/颜色来自 PSD 量出来的事实。
+  assert.ok(first.payload.style.size >= 8, JSON.stringify(first.payload.style));
+  assert.match(first.payload.style.fill_color, /^#[0-9a-f]{6}$/i);
+  // 没有 resolveFont（或字体没登记）时绝不能凭空写 family/fontUrl。
+  assert.equal('family' in first.payload.style, false);
+  assert.equal('fontUrl' in first.payload, false);
+  const fontWarnings = plan.warnings.filter(item => item.code === 'FONT_UNAVAILABLE');
+  assert.ok(fontWarnings.length >= 1, '未登记字体必须登记 warning');
+  assert.equal(plan.summary.fontsMissing, fontWarnings.length);
+  assert.match(fontWarnings[0].fontName, /Poppins/);
+  assert.match(first.note, /字体未登记/);
+});
+
+test('登记过字体之后：文字命令带上 family + fontUrl，且不再报缺失', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  // 模拟字体库命中：PSD 里是 Poppins-Medium / Poppins-Regular。
+  const resolveFont = name => (/^Poppins/i.test(String(name))
+    ? { id: 'f'.repeat(48), family: 'Poppins', url: `/media-image/fonts/${'f'.repeat(48)}`, match: 'family' }
+    : null);
+  const plan = planTemplateApply(template, { product: { assetRef: ASSET }, resolveFont });
+  const textCommands = plan.commands.filter(command => command.type === 'layer.add_text');
+  assert.ok(textCommands.length >= 1);
+  for (const command of textCommands) {
+    assert.equal(command.payload.style.family, 'Poppins');
+    assert.equal(command.payload.fontUrl, `/media-image/fonts/${'f'.repeat(48)}`);
+  }
+  assert.equal(plan.warnings.length, 0, JSON.stringify(plan.warnings));
+  assert.equal(plan.summary.fontsMissing, 0);
+});
+
+test('字体解析只认"能给出可加载 URL"的匹配：解析器返回 null 就退化成缺失', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const plan = planTemplateApply(template, { product: { assetRef: ASSET }, resolveFont: () => null });
+  const textCommands = plan.commands.filter(command => command.type === 'layer.add_text');
+  assert.ok(textCommands.every(command => !('family' in command.payload.style)));
+  assert.ok(plan.warnings.some(item => item.code === 'FONT_UNAVAILABLE'));
+  // 解析器抛错也不能让整个规划炸掉。
+  const throwing = planTemplateApply(template, { product: { assetRef: ASSET }, resolveFont: () => { throw new Error('boom'); } });
+  assert.ok(throwing.commands.some(command => command.type === 'layer.add_text'));
+  assert.ok(throwing.warnings.some(item => item.code === 'FONT_UNAVAILABLE'));
+});
+
+test('批量套版把 resolveFont 透传给每一份规划', async t => {
+  const template = realTemplate();
+  if (!template) return t.skip('缺少样例 aplus01.psd');
+  const resolveFont = () => ({ id: 'e'.repeat(48), family: 'Poppins', url: `/media-image/fonts/${'e'.repeat(48)}` });
+  const batch = planTemplateBatch(template, { products: [{ assetRef: ASSET, name: 'A' }, { assetRef: `asset:${'b'.repeat(48)}`, name: 'B' }], resolveFont });
+  assert.equal(batch.variants.length, 2);
+  for (const variant of batch.variants) {
+    const texts = variant.plan.commands.filter(command => command.type === 'layer.add_text');
+    assert.ok(texts.length >= 1);
+    assert.ok(texts.every(command => command.payload.style.family === 'Poppins'), JSON.stringify(texts.map(c => c.payload.style)));
+  }
+});
+
 test('HTTP /template/plan：鉴权 + 返回可执行命令 + 非法模板 400', async () => {
   const token = 'plan-token';
   const router = createMediaRouter({ relay: { request: async () => ({}) }, editorKind: 'image', prefix: '/media-image', token, publicDir: '.', assets: null });

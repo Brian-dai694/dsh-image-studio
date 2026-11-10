@@ -173,16 +173,60 @@ detail01 解析出 2 组「细节图」（4 个图片层）与「文案」（3 �
 
 ### B2. 写得出来（新）
 
-- `lib/psd-write.js`：从**当前 miniPaint 文档**生成 `.psd`（图层顺序、blend、opacity、图层蒙版、组）。
-  参考 `openfill/patchy/psd.py` 的结构（layer records + 通道 plane + `lsct` + `luni`/`pascal` 双名）。
-- 新能力：`media_image_export_start { format: 'psd' }`；导出后回执里给图层数、是否有蒙版、是否烤平。
-- 明确边界：**只写我们自己合成出来的东西**；不承诺"完美往返 Photoshop 的智能对象/图层样式"。
+**实现位置改了（重要）**：计划里写的是宿主侧 `lib/psd-write.js`，实际做成了
+`miniPaint/src/js/dsh-psd-write.js`。原因是宿主的 relay 有 **64 KiB 消息 / 256 KiB 响应**上限，
+整层像素根本过不去；而画布与图层像素本来就在编辑器页面里。导出沿用现有链路
+（`editor.export_start` 产出 blob URL），所以不需要新开二进制通道。
+
+- `buildPsd({width,height,layers,composite})`：纯 ESM、**不依赖任何浏览器 API**（只吃 RGBA 数组），
+  因此宿主侧测试可以直接 import 它、再用 `lib/psd.js` 读回来做往返验证。
+- 写入内容：图层记录（矩形 / 4 通道 alpha+R+G+B / 混合模式键 / 不透明度 / 可见 flags）、
+  Pascal 名 + `luni`（中文名正确往返）、PackBits RLE 通道数据、合成图平面。
+- `media_image_export_start { format: 'psd' }` 已开放（`png`/`jpeg` 仍是拼平位图）。
+- **回执里如实登记降级项**（`approximations[]`：`rasterized` / `mask-baked` / `clipped` / `off-canvas`），
+  导出结果还带 `layerCount`。页面下载也把这两项回传给调用方——否则用户会以为拿到了完全可编辑的工程文件。
+- 边界：**只写我们自己合成出来的东西**。文字/矢量层栅格化，活蒙版烤进像素，图层矩形夹到画布内，
+  不写智能对象/图层样式/调整层。
+
+**验收证据**：往返测试 6 条——头部/图层数/名称/矩形/不透明度/混合模式/可见性全部一致；
+中文图层名经 `luni` 往返正确；RLE 通道解码后的 R 平面与写入值逐像素相等（用独立写的解码器，不复用写入器代码路径）；
+空图层列表也能产出可解析文件；以及**用真实 aplus01.psd 的图层元数据重写一份、读回后与原文件逐层一致**。
+
+**踩到的真 bug（值得记住）**：第一版用 `push(...bigArray)` 拼接通道数据。
+单元测试最大只到 64×48，全部通过；但生成一份 970×600 的真实测试文件时立刻
+`RangeError: Maximum call stack size exceeded` —— **任何实际尺寸的导出都会直接崩**。
+改成 `Uint8Array` 分块 + `concatBytes()` 顺序拼接，并补了一条 800×600 的回归测试：
+它断言文件达到真实量级、能解析、且抽三行像素核对通道位置正确。
+教训是：小尺寸夹具只能证明算法对，证明不了能跑真实规模。
+
+**没验证的**：Photoshop 能否打开我们写出的文件——这一步需要人工点开一次，测试里不假装。
 
 ### B3. 套版链路用上新 PSD
 
 - 从 PSD 读到文本层 → 生成"可替换文字槽位"清单（字号/对齐/颜色已知），
   套版时用 `layer.update_text` 直接改字，**不再把文字烤成图片**。
 - 从 PSD 读到调整层 → 转成 `layer.set_effect` 的非破坏效果栈（而不是烤进像素）。
+
+#### B3 进度（v0.46.0）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 文字不烤图 | ✅（本来就这样） | `buildTemplateBase` 合成底图时会**排除文字层**，文字由 `layer.add_text` 重新排，不是贴图 |
+| 沿用 PSD 字号 | ✅ | `style.size` 默认取 `slot.fontSize`，调用方仍可用 `textStyle.size` 覆盖 |
+| 沿用 PSD 颜色 | ✅ | `style.fill_color` 默认取 `slot.fillColor`（之前只有调用方显式传才生效，PSD 里量到的颜色被丢掉了） |
+| 字体解析 | ✅ | `fonts.matchFontName()`：整串精确 → 拆 `Family-Style` 取家族 → 前缀匹配；命中才给 `family` + `fontUrl` |
+| 字体缺失时如实告知 | ✅ | 没命中就不写 `family`/`fontUrl`，并登记 `FONT_UNAVAILABLE` warning；`summary.fontsMissing` 计数，命令 `note` 也标"字体未登记，已回退" |
+| 调整层 → `set_effect` | ⛔ | 仍缺含调整层的真实 PSD（见 B1 说明） |
+
+**为什么字体这件事必须显式做**：把 PSD 里的 `Poppins-Medium` 直接当 `family` 传给编辑器，
+在字体没登记时 canvas 会**静默回退**到默认字体——画面看起来"成功"了，字体其实已经丢了。
+那不是保真，是假装保真。所以：能给可加载 URL 才写，给不出就报缺失。
+
+`/template/apply`、`/template/plan`、`/template/batch` 三条路由都已接上 `resolveFont`；
+批量套版把解析器透传给每一份规划。
+
+**没验证的**：`fontUrl` 真正加载后的**字形**是否与 Photoshop 一致——这需要真实字体文件与人工目视比对。
+测试验证的是"命中/未命中/URL 形状/命令里带没带"这些可核对的事实。
 
 **Phase B 验收证据**：一个带文本层 + 组 + 图层面板的真实 PSD，读出的 `text` 与 Photoshop 里一致（人工比对一次）；
 我们导出的 PSD 能被 Photoshop 打开且图层数/名称/蒙版与 `read_state` 一致；`approximated` 里每项都有 layerId+reason。

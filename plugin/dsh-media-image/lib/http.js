@@ -391,7 +391,7 @@ async function handleBackgroundRemoval(req, res, { backgroundRemoval, token, pre
   return true;
 }
 
-async function handleTemplatePlan(req, res, { token }) {
+async function handleTemplatePlan(req, res, { token, fonts = null }) {
   const rejection = authorizeSameOrigin(req, token, ['POST']);
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
   try {
@@ -402,6 +402,8 @@ async function handleTemplatePlan(req, res, { token }) {
       product: body.product,
       texts: body.texts || {},
       textStyle: body.textStyle || {},
+      // PSD 里的字体名只有"真的登记过"才会变成 family/fontUrl；否则登记 warning。
+      resolveFont: typeof fonts?.matchFontName === 'function' ? fontName => fonts.matchFontName(fontName) : null,
     });
     send(res, 200, { ok: true, plan });
   } catch (error) {
@@ -440,7 +442,7 @@ function buildTemplateBase(bytes, template, slotId, assets) {
  * 批量套版：一次上传 PSD，合成一次底图，为多个商品各出一份规划。
  * 只返回规划，不写画布；页面逐份执行并导出，保证可回退。
  */
-async function handleTemplateBatch(req, res, { token, assets }) {
+async function handleTemplateBatch(req, res, { token, assets, fonts = null }) {
   const rejection = authorizeSameOrigin(req, token, ['POST'], { requireJson: false });
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
   if (!assets) { send(res, 501, { code: 'ASSET_UNAVAILABLE', message: 'This deployment has no asset store.' }); return true; }
@@ -458,7 +460,10 @@ async function handleTemplateBatch(req, res, { token, assets }) {
     if (textsRaw) { try { texts = JSON.parse(textsRaw); } catch { send(res, 400, { code: 'TEMPLATE_BAD_TEXTS', message: 'x-psd-texts 必须是 JSON 对象' }); return true; } }
 
     const built = buildTemplateBase(body, template, slotId, assets);
-    const batch = planTemplateBatch(template, { baseAssetRef: built.base?.assetRef, background, products, texts, textStyle: { fill_color: '#15181f' } });
+    const batch = planTemplateBatch(template, {
+      baseAssetRef: built.base?.assetRef, background, products, texts, textStyle: { fill_color: '#15181f' },
+      resolveFont: typeof fonts?.matchFontName === 'function' ? fontName => fonts.matchFontName(fontName) : null,
+    });
     send(res, 200, { ok: true, base: built.base, baseError: built.baseError, variants: batch.variants, summary: batch.summary,
       template: { name: template.name, canvas: template.canvas, summary: template.summary } });
   } catch (error) {
@@ -469,7 +474,7 @@ async function handleTemplateBatch(req, res, { token, assets }) {
   return true;
 }
 
-async function handleTemplateApply(req, res, { token, assets }) {
+async function handleTemplateApply(req, res, { token, assets, fonts = null }) {
   const rejection = authorizeSameOrigin(req, token, ['POST'], { requireJson: false });
   if (rejection) { send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed }); return true; }
   if (!assets) { send(res, 501, { code: 'ASSET_UNAVAILABLE', message: 'This deployment has no asset store.' }); return true; }
@@ -509,6 +514,7 @@ async function handleTemplateApply(req, res, { token, assets }) {
       product: productAsset ? { assetRef: productAsset, ...(slotId ? { slotId } : {}) } : undefined,
       texts,
       textStyle: { fill_color: '#15181f' },
+      resolveFont: typeof fonts?.matchFontName === 'function' ? fontName => fonts.matchFontName(fontName) : null,
     });
     send(res, 200, { ok: true, plan, base, baseError, template: { name: template.name, canvas: template.canvas, summary: template.summary } });
   } catch (error) {
@@ -614,13 +620,13 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
       return handleFonts(req, res, { fonts, token, prefix, pathname, remoteFetch });
     }
     if (pathname === `${prefix}/template/plan`) {
-      return handleTemplatePlan(req, res, { token });
+      return handleTemplatePlan(req, res, { token, fonts });
     }
     if (pathname === `${prefix}/template/apply`) {
-      return handleTemplateApply(req, res, { token, assets });
+      return handleTemplateApply(req, res, { token, assets, fonts });
     }
     if (pathname === `${prefix}/template/batch`) {
-      return handleTemplateBatch(req, res, { token, assets });
+      return handleTemplateBatch(req, res, { token, assets, fonts });
     }
     if (pathname === `${prefix}/psd/slots`) {
       return handlePsdSlots(req, res, { token, assets });

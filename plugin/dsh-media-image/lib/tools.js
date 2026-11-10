@@ -135,7 +135,7 @@ const EXPORT_START_PARAMS = kind => ({
   instanceId: { type: 'string', required: true },
   commandId: { type: 'string', required: true, description: 'Idempotency key for the export request.' },
   expectedRevision: { type: 'integer', required: true, description: 'The exported artifact is traceable to this revision.' },
-  format: { type: 'string', required: true, enum: ['png', 'jpeg'] },
+  format: { type: 'string', required: true, enum: ['png', 'jpeg', 'psd'], description: 'png/jpeg flatten the document; psd keeps the layers (text/vector rasterized, live masks baked — the result lists what was approximated).' },
 });
 
 const EXPORT_STATUS_PARAMS = kind => ({

@@ -45,7 +45,7 @@ export function solidColorDataUrl(hex = '#ffffff') {
  * 只做规划，不执行；调用方逐份确认并导出，避免一次写入无法回退。
  * @param products [{assetRef, name?, texts?, slotId?}]，1..20 个
  */
-export function planTemplateBatch(template, { baseAssetRef, background, products = [], texts = {}, textStyle = {} } = {}) {
+export function planTemplateBatch(template, { baseAssetRef, background, products = [], texts = {}, textStyle = {}, resolveFont = null } = {}) {
   if (!template || !template.canvas || !Array.isArray(template.slots)) throw Object.assign(new Error('模板缺少 canvas/slots'), { code: 'TEMPLATE_INVALID' });
   if (!Array.isArray(products) || products.length === 0) throw Object.assign(new Error('批量套版至少需要一个商品素材'), { code: 'TEMPLATE_NO_PRODUCTS' });
   if (products.length > 20) throw Object.assign(new Error('批量套版一次最多 20 个商品'), { code: 'TEMPLATE_TOO_MANY_VARIANTS' });
@@ -62,6 +62,7 @@ export function planTemplateBatch(template, { baseAssetRef, background, products
         product: { assetRef, ...(product?.name ? { name: product.name } : {}), ...(product?.slotId ? { slotId: product.slotId } : {}) },
         texts: product?.texts || texts,
         textStyle,
+        resolveFont,
       }),
     };
   });
@@ -83,8 +84,11 @@ export function planTemplateBatch(template, { baseAssetRef, background, products
  * @param options.product {assetRef, slotId?} 商品图放哪个槽（默认挑面积最大且非整幅的图片槽）
  * @param options.texts {slotId: 文案} 覆盖文字槽文案（默认沿用 PSD 原文）
  * @param options.textStyle {size?, fill_color?, family?, bold?}
+ * @param options.resolveFont (fontName) => {family, url}|null
+ *   把 PSD 里的字体名解析成"已登记可加载"的字体。**没给就一律不写 family/fontUrl**，
+ *   并把缺失如实登记到 warnings —— 让编辑器去猜字体会静默回退，那等于假装保真。
  */
-export function planTemplateApply(template, { background, baseAssetRef, product, texts = {}, textStyle = {} } = {}) {
+export function planTemplateApply(template, { background, baseAssetRef, product, texts = {}, textStyle = {}, resolveFont = null } = {}) {
   if (!template || !template.canvas || !Array.isArray(template.slots)) {
     throw Object.assign(new Error('模板缺少 canvas/slots'), { code: 'TEMPLATE_INVALID' });
   }
@@ -93,6 +97,7 @@ export function planTemplateApply(template, { background, baseAssetRef, product,
 
   const commands = [];
   const skipped = [];
+  const warnings = [];
   const clampRect = rect => ({
     x: clamp(Math.round(rect.x), 0, Math.max(0, canvasWidth - 1)),
     y: clamp(Math.round(rect.y), 0, Math.max(0, canvasHeight - 1)),
@@ -194,20 +199,33 @@ export function planTemplateApply(template, { background, baseAssetRef, product,
     // 缺文案已在 mapping 阶段登记过 skipped，这里只跳过、不重复登记。
     if (!text || !String(text).trim()) continue;
     const rect = clampRect(slot.rect);
+    // 字体：只有真的登记过、能给出可加载 URL 时才写 family/fontUrl；
+    // 否则整条 warning 记下来 —— 画面上会回退到默认字体，这件事必须让调用方知道。
+    let font = null;
+    if (typeof resolveFont === 'function' && slot.fontName) {
+      try { font = resolveFont(slot.fontName); } catch { font = null; }
+    }
+    if (!font && slot.fontName) {
+      warnings.push({ code: 'FONT_UNAVAILABLE', slotId: String(slot.id), fontName: String(slot.fontName), message: `模板字体 ${slot.fontName} 未登记，套版会用默认字体（字号/颜色/位置仍然按 PSD 写）` });
+    }
+    const family = textStyle.family || font?.family || null;
+    const fontUrl = font?.url || null;
     commands.push({
       type: 'layer.add_text',
       payload: {
         text: String(text),
         x: rect.x,
         y: rect.y,
+        ...(fontUrl ? { fontUrl } : {}),
         style: {
+          // 字号/颜色是 PSD 里量出来的事实，调用方可覆盖。
           size: Math.max(8, Math.min(256, Math.round(textStyle.size || slot.fontSize || Math.min(48, canvasHeight / 12)))),
-          ...(textStyle.fill_color ? { fill_color: textStyle.fill_color } : {}),
-          ...(textStyle.family ? { family: textStyle.family } : {}),
+          fill_color: textStyle.fill_color || slot.fillColor || undefined,
+          ...(family ? { family } : {}),
           ...(textStyle.bold ? { bold: true } : {}),
         },
       },
-      note: `文案填入槽位 ${slot.id}（${slot.name}）`,
+      note: `文案填入槽位 ${slot.id}（${slot.name}）${font ? '' : slot.fontName ? ' · 字体未登记，已回退' : ''}`,
       // 页面据此调用 editor.measure_text，把字号收缩到槽宽内；payload 本身不带这些字段。
       meta: { slotId: String(slot.id), slotWidth: rect.width, slotHeight: rect.height },
     });
@@ -217,6 +235,8 @@ export function planTemplateApply(template, { background, baseAssetRef, product,
     canvas: { width: canvasWidth, height: canvasHeight },
     commands,
     skipped,
+    // 字体未登记之类的"保真度损失"，必须在执行前就让调用方看到。
+    warnings,
     // 预览用：哪些槽能放商品图、每个槽最终会被怎么处理。页面先展示这个再执行。
     candidates,
     mapping,
@@ -225,6 +245,8 @@ export function planTemplateApply(template, { background, baseAssetRef, product,
       images: commands.filter(command => command.type === 'layer.add_image').length,
       texts: commands.filter(command => command.type === 'layer.add_text').length,
       skipped: skipped.length,
+      warnings: warnings.length,
+      fontsMissing: warnings.filter(item => item.code === 'FONT_UNAVAILABLE').length,
       productSlot: productSlot?.id || null,
       productSlotIndex: candidates.find(item => item.id === String(productSlot?.id ?? ''))?.index ?? null,
     },

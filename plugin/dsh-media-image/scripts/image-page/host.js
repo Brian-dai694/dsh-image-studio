@@ -153,7 +153,9 @@ window.addEventListener('message', async event => {
   // Real save entry for an agent export: the Host keeps only a synthetic artifact ref, so the
   // file can only be produced here, inside the page that holds the editor.
   if (event.data.type === 'media.export.download') {
-    const requestId = event.data.requestId, format = event.data.format === 'jpeg' ? 'jpeg' : 'png';
+    const requestId = event.data.requestId;
+    const requested = String(event.data.format || 'png');
+    const format = ['png', 'jpeg', 'psd'].includes(requested) ? requested : 'png';
     try {
       const connection = await connect();
       const state = await transport.request({ type: 'editor.read_state', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId });
@@ -163,9 +165,16 @@ window.addEventListener('message', async event => {
       });
       if (!result || result.status !== 'completed' || !result.artifactRef) throw new Error('导出未完成，无法保存');
       const link = document.createElement('a');
-      link.href = result.artifactRef; link.download = 'image.' + (format === 'jpeg' ? 'jpg' : 'png');
+      link.href = result.artifactRef;
+      link.download = format === 'psd' ? 'image.psd' : 'image.' + (format === 'jpeg' ? 'jpg' : 'png');
       link.click();
-      parent.postMessage({ type: 'media.export.result', requestId, ok: true, artifactRef: result.artifactRef, bytes: result.bytes ?? null }, location.origin);
+      // PSD 的降级项（栅格化/烤蒙版/夹裁）必须一起回给调用方，否则用户以为拿到了完全可编辑的工程文件。
+      parent.postMessage({
+        type: 'media.export.result', requestId, ok: true,
+        artifactRef: result.artifactRef, bytes: result.bytes ?? null,
+        ...(result.layerCount === undefined ? {} : { layerCount: result.layerCount }),
+        ...(Array.isArray(result.approximations) && result.approximations.length ? { approximations: result.approximations } : {}),
+      }, location.origin);
     } catch (error) {
       parent.postMessage({ type: 'media.export.result', requestId, ok: false, error: error.message }, location.origin);
     }

@@ -70,6 +70,7 @@ description: Use when editing images inside the DSH image studio (miniPaint edit
 | 显隐排序 | `layer.set_visibility`、`layer.reorder` |
 | 像素微调 | `layer.feather`、`layer.color_match` |
 | 画布 | `canvas.resize`、`canvas.crop` |
+| 导出 | `media_image_export_start`：`format:"png"|"jpeg"` 拼平位图；`format:"psd"` 保留图层（文字/矢量已栅格化、活蒙版已烤进像素、超出画布的矩形已夹紧 —— 回执 `approximations[]` 逐条说明降级了什么） |
 | 历史 | `history.undo`、`history.redo` |
 
 ## 生成 → 落层的正路
