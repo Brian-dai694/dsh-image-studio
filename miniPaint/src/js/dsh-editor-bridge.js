@@ -296,6 +296,23 @@ export class DshEditorBridge {
     const counted = histogram.reduce((a, b) => a + b, 0);
     const denom = counted || 1;
 
+    // 主色统计：按 4 位/通道量化，累计每个桶的真实均值，避免量化后的色值失真。
+    const buckets = new Map();
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] / 255 < 0.05) continue;
+      const key = ((data[i] >> 4) << 8) | ((data[i + 1] >> 4) << 4) | (data[i + 2] >> 4);
+      const bucket = buckets.get(key);
+      if (bucket) { bucket.count += 1; bucket.r += data[i]; bucket.g += data[i + 1]; bucket.b += data[i + 2]; }
+      else buckets.set(key, { count: 1, r: data[i], g: data[i + 1], b: data[i + 2] });
+    }
+    const palette = [...buckets.values()]
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 6)
+      .map(item => {
+        const r = Math.round(item.r / item.count), g = Math.round(item.g / item.count), b = Math.round(item.b / item.count);
+        return { hex: `#${[r, g, b].map(value => value.toString(16).padStart(2, '0')).join('')}`, share: Number((item.count / denom).toFixed(4)) };
+      });
+
     // Laplacian 方差：在灰度采样上算，衡量边缘能量（糊/锐）。
     let lapSum = 0, lapSq = 0, lapCount = 0;
     for (let y = 1; y < sh - 1; y += 1) {
@@ -430,6 +447,10 @@ export class DshEditorBridge {
       regions,
       regionsTruncated: Math.max(0, sortedRegions.length - regions.length),
       opaqueRatio: Number((counted / (sw * sh)).toFixed(4)),
+      // 主色：把采样像素按 4 位/通道量化后统计，取占比最高的几种。
+      // 给"没看见画布"的调用方（尤其纯文本模型）回答"这图什么色调"，
+      // 所以只给覆盖率与十六进制值，不编造"暖橙""奶油白"这类语义名称。
+      palette,
     };
   }
 

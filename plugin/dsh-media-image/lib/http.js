@@ -594,7 +594,7 @@ async function handleAssist(req, res, { assist, ctx, token, prefix, photoshop = 
   const body = await readJsonBody(req).catch(() => null);
   if (!body || typeof body !== 'object') { send(res, 400, { code: 'ASSIST_INVALID', message: 'JSON body is required.' }); return true; }
   try {
-    const result = await assist.chat({ message: body.message, history: body.history, context: body.context, photoshop: photoshop?.describe?.() || { enabled: false, actions: [] } });
+    const result = await assist.chat({ message: body.message, history: body.history, context: body.context, observation: body.observation, photoshop: photoshop?.describe?.() || { enabled: false, actions: [] } });
     send(res, 200, { ok: true, ...result });
   } catch (error) {
     const code = error?.code || 'ASSIST_FAILED';

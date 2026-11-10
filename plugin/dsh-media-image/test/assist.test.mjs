@@ -32,6 +32,46 @@ function fakeCtx({ chunks = [], failWith = null, selection = { provider: 'deepse
   return { ctx: { get: name => services[name] }, seen };
 }
 
+test('画面实测进入提示词，并明确它不是视觉（不能声称"看到了"）', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [{ type: 'text-delta', text: '{"reply":"偏暗","ops":[]}' }] });
+  await chatTurn(ctx, {
+    message: '图里有什么',
+    observation: {
+      luminance: { mean: 32.5, stdDev: 12.1 },
+      clipping: { highlights: 0, shadows: 0.082 },
+      colourCast: { r: 40, g: 38, b: 36, spread: 4 },
+      sharpness: { laplacianVariance: 180.4 },
+      opaqueRatio: 0.97,
+      palette: [{ hex: '#2a2a2a', share: 0.61 }, { hex: '#8c8c8c', share: 0.22 }],
+    },
+  });
+  const prompt = seen.streamArgs.messages[0].content[0].text;
+  assert.match(prompt, /画面实测/, prompt);
+  assert.match(prompt, /32\.5/);
+  assert.match(prompt, /8\.2%/, '暗部裁切要按百分比写出来');
+  assert.match(prompt, /#2a2a2a\(61\.0%\)/, '主色带占比');
+  assert.match(prompt, /180\.4/);
+  // 关键约束：不能把测量值说成视觉理解。
+  assert.match(prompt, /不是视觉/);
+  assert.match(prompt, /不要猜/);
+});
+
+test('没有实测时不得编造画面信息，提示词里要明说没有像素', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [{ type: 'text-delta', text: '{"reply":"ok","ops":[]}' }] });
+  await chatTurn(ctx, { message: '这图怎么样' });
+  const prompt = seen.streamArgs.messages[0].content[0].text;
+  assert.equal(prompt.includes('画面实测'), false);
+  assert.match(prompt, /没有画面像素信息/);
+});
+
+test('实测数值缺失时写"未知"，不补 0 冒充测量结果', async () => {
+  const { ctx, seen } = fakeCtx({ chunks: [{ type: 'text-delta', text: '{"reply":"ok","ops":[]}' }] });
+  await chatTurn(ctx, { message: '亮度多少', observation: { luminance: { mean: null, stdDev: undefined }, palette: [] } });
+  const prompt = seen.streamArgs.messages[0].content[0].text;
+  assert.match(prompt, /未知/);
+  assert.equal(/平均亮度 0(\.0)?（/.test(prompt), false, '不能把缺失值写成 0');
+});
+
 test('modelInfo 如实反映宿主选择；没有 llm 或选择时返回 null', () => {
   assert.equal(modelInfo(fakeCtx().ctx).label, 'deepseek-flash');
   assert.equal(modelInfo(fakeCtx({ llm: false }).ctx), null);

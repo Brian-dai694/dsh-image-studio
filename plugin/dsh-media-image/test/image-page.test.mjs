@@ -334,6 +334,25 @@ test('筹码表的每一项都必须是二元组：双逗号造成的数组空�
   }
 });
 
+test('对话必须带画面实测：纯文本模型拿不到像素，但能拿到量出来的数字', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  const start = code.indexOf('async function assistObservation');
+  assert.ok(start > 0, '必须有实测收集函数');
+  const block = code.slice(start, code.indexOf('async function refreshEngineLabel', start));
+  // 实测来自编辑器的真实测量，不是页面自己估的
+  assert.match(block, /editor\.analyze/, '实测必须来自 editor.analyze');
+  assert.match(block, /palette/, '要带主色');
+  assert.match(block, /clipping/, '要带裁切');
+  assert.match(block, /Number\.isFinite/, '缺值要留空，不能补 0 冒充测量');
+
+  // 对话请求必须把它带上
+  const turn = code.slice(code.indexOf('async function modelTurn'), code.indexOf('async function modelTurn') + 1200);
+  assert.match(turn, /assistObservation\(/, 'modelTurn 要调用实测');
+  assert.match(turn, /history: assistHistory\.slice\(-6\), context, observation/, '请求体要带 observation');
+});
+
 test('页面里用到的样式类名必须在 CSS 里存在（否则组件会退回浏览器默认样式）', () => {
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const page = readFileSync(join(publicImage, 'host.html'), 'utf8');

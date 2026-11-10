@@ -86,6 +86,10 @@ command 命令名必须属于编辑器白名单。参数契约：
 
 const JSON_HINT = '只输出 JSON：{"reply":"…","ops":[…]}.';
 
+/** 实测数值的打印：缺值就写"未知"，绝不补 0 冒充测量结果。 */
+const num = value => (Number.isFinite(value) ? String(value) : '未知');
+const percent = value => (Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '未知');
+
 /** 读取当前可用的默认模型；没有就返回 null（不抛错，便于 UI 显示"未连接"）。 */
 export function modelInfo(ctx) {
   try {
@@ -203,7 +207,7 @@ export function parsePlan(text, { photoshop = { enabled: false, actions: [] } } 
  * 一轮对话：给定用户消息 + 可选上下文（画布摘要、最近对话），拿到 reply 与 ops。
  * 不落任何状态 —— 执行由页面负责，这样"提议"和"已执行"不会混为一谈。
  */
-export async function chatTurn(ctx, { message, history = [], context = null, photoshop = { enabled: false, actions: [] }, timeoutMs = 90_000 } = {}) {
+export async function chatTurn(ctx, { message, history = [], context = null, observation = null, photoshop = { enabled: false, actions: [] }, timeoutMs = 90_000 } = {}) {
   const text = String(message || '').trim();
   if (!text) throw new AssistError('ASSIST_INVALID', '消息为空');
   if (text.length > 4000) throw new AssistError('ASSIST_INVALID', '消息过长（上限 4000 字符）');
@@ -219,13 +223,30 @@ export async function chatTurn(ctx, { message, history = [], context = null, pho
   const contextLine = context
     ? `画布：${context.width}×${context.height}；图层 ${context.layers} 个；有选区 ${context.hasSelection ? '是' : '否'}；最近可插入素材 ${context.lastAssetRef || '无'}。${layerLine}${assetLine}`
     : '画布信息未知（页面还没连上编辑器）。';
-  const historyLine = history.length
-    ? `最近对话：${history.slice(-6).map(row => `${row.role === 'user' ? '用户' : '助手'}：${row.text}`).join(' / ')}`
+  const historyLine = history.length    ? `最近对话：${history.slice(-6).map(row => `${row.role === 'user' ? '用户' : '助手'}：${row.text}`).join(' / ')}`
     : '';
+  // 画面实测：页面用 editor.analyze 在真实像素上量出来的数字。
+  // 这不是"看见了图"，是"量过了图" —— 措辞上必须区分，不能让它冒充视觉理解。
+  const observed = observation && typeof observation === 'object' ? observation : null;
+  const observationLine = observed
+    ? [
+      `画面实测（来自画布像素，非猜测）：平均亮度 ${num(observed.luminance?.mean)}（标准差 ${num(observed.luminance?.stdDev)}）`,
+      `高光裁切 ${percent(observed.clipping?.highlights)} / 暗部裁切 ${percent(observed.clipping?.shadows)}`,
+      `主色 ${(Array.isArray(observed.palette) ? observed.palette : []).slice(0, 4).map(item => `${item.hex}(${percent(item.share)})`).join(' ') || '无'}`,
+      `平均 RGB ${num(observed.colourCast?.r)}/${num(observed.colourCast?.g)}/${num(observed.colourCast?.b)}（色偏 ${num(observed.colourCast?.spread)}）`,
+      `清晰度 Laplacian 方差 ${num(observed.sharpness?.laplacianVariance)}`,
+      `不透明像素占比 ${percent(observed.opaqueRatio)}`,
+    ].join('；')
+    : '';
+  const observationRule = observed
+    ? '上一条"画面实测"是你唯一关于画面内容的依据：可以据此回答亮度/对比/色偏/裁切/清晰度/主色/留白这类问题，并给出具体数值与改动建议。'
+      + '但它**不是视觉**——你无法识别画面里的物体、人物、文字、场景或构图含义。'
+      + '用户问"图里有什么/画的是什么"时，直说你能给的是实测数值，请对方说明画面内容或上传原图，不要猜，也不要说"我看到了"。'
+    : '你没有画面像素信息；涉及画面内容时不要猜测，请对方说明或上传原图。';
   const photoshopLine = photoshop?.enabled === true && Array.isArray(photoshop.actions) && photoshop.actions.length
     ? `Photoshop COM 已启用（Windows）；可用固定 action：${photoshop.actions.join('、')}。它操作 Photoshop 独立活动文档。写操作由页面预览目标文档并确认，再经 DSH 原生审批。每轮只提议一个 Photoshop action，不与 miniPaint 命令混成事务。`
     : 'Photoshop COM 未启用；不要提议 Photoshop action。';
-  const user = `${photoshopLine}\n${contextLine}${historyLine ? `\n${historyLine}` : ''}\n用户说：${text}`;
+  const user = `${photoshopLine}\n${contextLine}${observationLine ? `\n${observationLine}` : ''}\n${observationRule}${historyLine ? `\n${historyLine}` : ''}\n用户说：${text}`;
 
   const { text: answer, model } = await callModel(ctx, {
     system: `${SYSTEM}\n${JSON_HINT}`,

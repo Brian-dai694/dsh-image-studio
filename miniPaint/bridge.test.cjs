@@ -1639,5 +1639,45 @@ async function send(command, revision = bridge.revision, commandId = `cmd-${++id
       bridge.refreshRevision();
     }
   });
+  await test('analyze 给出主色（占比 + 十六进制），让没看见画布的调用方能回答色调问题', async () => {
+    const savedLayers = config.layers.slice();
+    const savedW = config.WIDTH, savedH = config.HEIGHT;
+    config.WIDTH = 40; config.HEIGHT = 40;
+    // 左半纯红、右半纯蓝：主色应恰好覆盖这两种颜色，且占比各约 50%。
+    const makeHalf = fill => {
+      const canvas = makeCanvas(40, 40, fill);
+      const ctx = canvas.getContext('2d');
+      if (ctx && typeof ctx.__fill === 'function') ctx.__fill(fill);
+      return canvas;
+    };
+    config.layers = [
+      { id: 9701, name: '左红', type: 'image', link: makeHalf('#ff0000'), x: 0, y: 0, width: 20, height: 40, order: 10, visible: true, composition: 'source-over' },
+      { id: 9702, name: '右蓝', type: 'image', link: makeHalf('#0000ff'), x: 20, y: 0, width: 20, height: 40, order: 20, visible: true, composition: 'source-over' },
+    ];
+    bridge.pixelMutation += 1;
+    bridge.refreshRevision();
+    await bridge.prepareDigest();
+    try {
+      const analysis = await callEditor({ type: 'editor.analyze', requestId: 'an-palette', editorInstanceId: bridge.editorInstanceId, maxSide: 64 });
+      assert.equal(analysis.ok, true, JSON.stringify(analysis));
+      const palette = analysis.result.palette;
+      assert.ok(Array.isArray(palette) && palette.length >= 1, JSON.stringify(analysis.result));
+      for (const entry of palette) {
+        assert.match(entry.hex, /^#[0-9a-f]{6}$/);
+        assert.ok(entry.share > 0 && entry.share <= 1, JSON.stringify(entry));
+      }
+      // 占比之和不得超过 1（按不透明像素算），且应接近 1（这张图全不透明）。
+      const total = palette.reduce((sum, entry) => sum + entry.share, 0);
+      assert.ok(total <= 1.0001, `占比之和不能超过 1，实际 ${total}`);
+      assert.ok(total > 0.9, `全不透明图的主色应覆盖绝大部分，实际 ${total}`);
+      // 不能再多给"语义名称"这类没法核对的东西。
+      assert.equal(palette.every(entry => Object.keys(entry).sort().join(',') === 'hex,share'), true, JSON.stringify(palette[0]));
+    } finally {
+      config.layers = savedLayers;
+      config.WIDTH = savedW; config.HEIGHT = savedH;
+      bridge.pixelMutation += 1;
+      bridge.refreshRevision();
+    }
+  });
   console.log(JSON.stringify({passed:count,scope:'real bridge + real native action/state methods; DOM/rendering stubbed, not browser acceptance'}));
 })().catch(error => { console.error(error); process.exitCode=1; });

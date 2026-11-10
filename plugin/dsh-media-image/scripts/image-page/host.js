@@ -839,6 +839,37 @@ async function assistContext() {
   }
 }
 
+/**
+ * 画面实测：把 editor.analyze 的数字带给模型。
+ *
+ * 为什么需要它：模型是纯文本的，拿不到像素也会被 DSH 降级成占位文本，
+ * 问"图里有什么"时只能说"我看不到"。但"看不到"和"量不到"是两件事 ——
+ * 亮度/对比/色偏/裁切/清晰度/主色/留白这些都能真实量出来，够回答大半修图问题。
+ *
+ * 边界写在数据里：这些是**测量值**，不是视觉理解；识别物体/文字/场景做不到。
+ */
+async function assistObservation(connection) {
+  try {
+    const analysis = await transport.request({ type: 'editor.analyze', requestId: crypto.randomUUID(), editorInstanceId: connection.editorInstanceId }, { timeoutMs: 10000 });
+    if (!analysis || typeof analysis !== 'object') return null;
+    const pick = value => (Number.isFinite(value) ? value : null);
+    return {
+      luminance: { mean: pick(analysis.luminance?.mean), stdDev: pick(analysis.luminance?.stdDev) },
+      clipping: { highlights: pick(analysis.clipping?.highlights), shadows: pick(analysis.clipping?.shadows) },
+      colourCast: { r: pick(analysis.colourCast?.r), g: pick(analysis.colourCast?.g), b: pick(analysis.colourCast?.b), spread: pick(analysis.colourCast?.spread) },
+      sharpness: { laplacianVariance: pick(analysis.sharpness?.laplacianVariance) },
+      opaqueRatio: pick(analysis.opaqueRatio),
+      palette: Array.isArray(analysis.palette) ? analysis.palette.slice(0, 4).map(item => ({ hex: item.hex, share: pick(item.share) })) : [],
+      layerIssues: {
+        offCanvas: Array.isArray(analysis.layers?.offCanvas) ? analysis.layers.offCanvas.length : 0,
+        zeroSize: Array.isArray(analysis.layers?.zeroSize) ? analysis.layers.zeroSize.length : 0,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function refreshEngineLabel() {
   const who = $('assist-who');
   if (!who) return;
@@ -1068,9 +1099,15 @@ async function execOps(ops) {
 async function modelTurn(text) {
   const pending = bubble('bot', '…');
   try {
+    // 上下文与实测一起取：模型是纯文本的，没有实测就只能说"我看不到"。
+    const connection = await connect().catch(() => null);
+    const [context, observation] = await Promise.all([
+      assistContext(),
+      connection ? assistObservation(connection) : Promise.resolve(null),
+    ]);
     const value = await api('/media-image/assist', {
       method: 'POST',
-      body: { message: text, history: assistHistory.slice(-6), context: await assistContext() },
+      body: { message: text, history: assistHistory.slice(-6), context, observation },
     });
     pending.remove();
     bubble('bot', value.reply || '（模型没有给回复）');
