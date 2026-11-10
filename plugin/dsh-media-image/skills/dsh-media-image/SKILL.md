@@ -69,6 +69,7 @@ description: Use when editing images inside the DSH image studio (miniPaint edit
 | 外观 | `layer.set_appearance`（`opacity` / `blendMode` / `name`） |
 | 显隐排序 | `layer.set_visibility`、`layer.reorder` |
 | 像素微调 | `layer.feather`、`layer.color_match` |
+| 看图 | media_image_preview：给 savePath 时会写出真实 PNG 并返回 savedPath，用你的看图工具打开它就能看到画面（宿主不渲染图片块时这是唯一可靠路径） |
 | 画布 | `canvas.resize`、`canvas.crop` |
 | 导出 | `media_image_export_start`：`format:"png"|"jpeg"` 拼平位图；`format:"psd"` 保留图层（文字/矢量已栅格化、活蒙版已烤进像素、超出画布的矩形已夹紧 —— 回执 `approximations[]` 逐条说明降级了什么） |
 | 历史 | `history.undo`、`history.redo` |

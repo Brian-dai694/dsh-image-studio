@@ -5,6 +5,7 @@ import { MediaBridgeError, HIGH_RISK_COMMANDS } from './bridge.js';
 import { describeCommands, summarize, suggestOperation } from './commands.js';
 import { validateRecipeSteps, fillRecipeParams, recipeParamsOf } from './recipes.js';
 import { reviewMeasurements, summarizeMeasurements } from './analyze.js';
+import { writePreviewPng } from './preview-file.js';
 import {
   HIGH_RISK_OPERATIONS, digestOf, requestHumanApproval, createSessionBindings, trustedSessionId, APPROVAL_WAIT_MS,
   AUTONOMOUS_CAPABILITIES, NEVER_AUTONOMOUS,
@@ -827,6 +828,18 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         ...(args.crop === undefined ? {} : { crop: args.crop }),
         ...(args.overlayLayerId === undefined && args.overlaySelection !== true ? {} : { overlay: { ...(args.overlayLayerId === undefined ? {} : { layerId: args.overlayLayerId }), ...(args.overlaySelection === true ? { selection: true } : {}), ...(args.overlayColor === undefined ? {} : { color: args.overlayColor }), ...(args.overlayOpacity === undefined ? {} : { opacity: args.overlayOpacity }) } }),
       });
+      // 落盘：给调用方一条**今天就能用**的看图路径（宿主附件写入接口没有公开声明）。
+      // 失败不掩盖预览本身：照样返回 dataUrl，并如实带上写文件失败的原因。
+      let saved = null;
+      let saveError = null;
+      if (typeof args.savePath === 'string' && args.savePath.trim()) {
+        try {
+          const written = writePreviewPng({ dataUrl: image.dataUrl, savePath: args.savePath });
+          saved = written;
+        } catch (error) {
+          saveError = { code: error.code || 'PREVIEW_SAVE_FAILED', message: error.message };
+        }
+      }
       return {
         status: 'applied', commandId: 'preview', editorKind: kind,
         projectId: state.documentId, revision: state.revision,
@@ -837,8 +850,12 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
           ...(image.scale !== undefined ? { scale: image.scale } : {}),
           ...(image.layerId ? { layerId: image.layerId } : {}),
           ...(image.gridStep ? { gridStep: image.gridStep } : {}),
+          ...(saved ? { savedPath: saved.path, savedBytes: saved.bytes } : {}),
+          ...(saveError ? { saveError } : {}),
         },
-        note: '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。crop/scale 是把预览上的位置换算回画布坐标的依据。',
+        note: saved
+          ? `已把这份预览写成 PNG：${saved.path}（${saved.bytes} 字节）。用你的看图工具打开这个路径就能真的看到画面；它是降采样缩略图，不推进 revision。crop/scale 是把预览位置换算回画布坐标的依据。`
+          : '这是降采样缩略图，不推进 revision；能否看到画面取决于宿主是否渲染 tool 结果里的图片。传 savePath 可以把它写成真实 PNG 文件，再用看图工具打开。crop/scale 是把预览上的位置换算回画布坐标的依据。',
       };
     } catch (error) {
       return failure(kind, 'preview', error);
@@ -869,6 +886,9 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       overlaySelection: { type: 'boolean', description: 'Tint the current marquee selection over the preview (used when an edit is scoped to a selection).' },
       overlayColor: { type: 'string', description: 'Overlay tint as #rrggbb (default #ff00ff).' },
       overlayOpacity: { type: 'number', description: 'Overlay opacity 0.05..0.85 (default 0.35).' },
+      // 落盘是"今天就能用"的看图路径：宿主附件写入接口没有公开声明，
+      // 但写出一份真实 PNG 之后，调用方用自己的看图工具打开它就能真的看到画面。
+      savePath: { type: 'string', description: 'Write the preview PNG to this path (.png required; absolute, or relative to the process cwd) and return savedPath/savedBytes. Use it when your host does not render images carried in tool results.' },
     },
     output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
     execute: preview('image', bridge),

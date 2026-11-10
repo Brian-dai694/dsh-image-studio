@@ -27,13 +27,40 @@ body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Mic
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 20px;background:var(--bg);box-shadow:inset 0 -1px 0 var(--border)}
 header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:-.02em}
 .tag{font-size:11.5px;color:var(--ink-3);background:var(--panel-2);border:1px solid var(--border-soft);border-radius:999px;padding:3px 10px;font-variant-numeric:var(--tab)}
-main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;height:calc(100vh - 55px)}
-/* 面板列按用户要求隐藏：这些能力已经收进悬浮助手，页面只留编辑器。
-   保留 DOM 与处理器（助手仍复用同一条 api() 通路），只是不再占版面。 */
-aside{display:none}
+/* 三栏：左「图层/素材」· 中画布 · 右助手（可折叠成 44px 竖条）。
+   助手从固定浮层改成栅格列：这样它不再盖住画布，也不受窗口缩放影响而跑到画布外。
+   窄屏（<1180px）自动折叠助手栏，只留图标条，把宽度还给画布。 */
+body{--left-pane:250px;--right-pane:356px;--rail:46px}
+body.assist-collapsed{--right-pane:var(--rail)}
+main{display:grid;grid-template-columns:var(--left-pane) minmax(0,1fr) var(--right-pane);gap:12px;padding:12px;height:calc(100vh - 55px - 36px)}
+@media (max-width:1180px){
+  body{--right-pane:var(--rail)}
+  body.assist-expanded{--right-pane:356px}
+}
+@media (max-width:900px){
+  body{--left-pane:0}
+  .layers-pane{display:none}
+}
+/* 面板列按用户要求隐藏：这些能力已经收进助手，页面只留编辑器。 */
+aside:not(.layers-pane){display:none}
 .stage{min-width:0;min-height:0;background:var(--bg);border-radius:var(--r);overflow:hidden;box-shadow:var(--shadow),inset 0 0 0 1px var(--border)}
 iframe{width:100%;height:100%;border:0;display:block}
-aside{display:none;flex-direction:column;gap:10px;min-height:0;overflow:auto;padding-right:2px}
+/* 左栏：图层与素材。数据来自 read_state / 素材库，可点选图层、切显隐。 */
+.layers-pane{display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto;padding-right:2px}
+.layers-pane h2{margin:0;font-size:11.5px;font-weight:600;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:8px}
+.layers-pane h2::after{content:"";flex:1;height:1px;background:var(--border-soft)}
+.layer-list{display:flex;flex-direction:column;gap:3px}
+.layer-row{display:flex;align-items:center;gap:6px;width:100%;text-align:left;font:inherit;font-size:12.5px;
+  padding:5px 7px;border:1px solid transparent;border-radius:var(--r-sm);background:transparent;color:var(--ink-1);cursor:pointer}
+.layer-row:hover{background:var(--panel-2)}
+.layer-row[data-selected="1"]{background:var(--accent-soft);border-color:var(--accent);color:var(--ink-1)}
+.layer-row .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.layer-row .kind{font-size:10.5px;color:var(--ink-3)}
+.layer-row .eye{font-size:12px;line-height:1;padding:2px 4px;border:0;background:transparent;color:var(--ink-3);cursor:pointer;border-radius:6px}
+.layer-row .eye:hover{background:var(--bg);color:var(--ink-1)}
+.layer-row[data-hidden="1"] .name{opacity:.5;text-decoration:line-through}
+.pane-empty{font-size:12px;color:var(--ink-3);padding:8px 7px;line-height:1.5}
+aside.legacy-panels{display:none;flex-direction:column;gap:10px;min-height:0;overflow:auto;padding-right:2px}
 .panel{background:var(--bg);border-radius:var(--r);padding:13px;box-shadow:var(--shadow),inset 0 0 0 1px var(--border)}
 .panel h2{margin:0 0 10px;font-size:11.5px;font-weight:600;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:8px}
 .panel h2::after{content:"";flex:1;height:1px;background:var(--border-soft)}
@@ -72,10 +99,6 @@ ul.list li .item-actions{display:flex;gap:4px;flex-shrink:0}
 .empty{font-size:12px;color:var(--ink-3);background:var(--panel-2);border:1px dashed var(--border);border-radius:var(--r-sm);padding:10px;margin:9px 0 0}
 .empty b{display:block;color:var(--ink-2);font-weight:600;margin-bottom:3px}
 .err{color:var(--fail)}
-.assist-launcher{position:fixed;right:22px;bottom:22px;z-index:40;display:flex;align-items:center;gap:8px;padding:10px 17px;border-radius:999px;border:1px solid var(--accent);cursor:pointer;font:inherit;font-size:13.5px;color:var(--on-accent);background:var(--accent);box-shadow:var(--shadow-lg)}
-.assist-launcher:hover{background:var(--accent-hover)}
-.assist-launcher .dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
-.assist-card{position:fixed;right:22px;bottom:22px;z-index:41;width:353px;max-width:calc(100vw - 32px);height:min(620px,calc(100vh - 44px));display:none;flex-direction:column;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;box-shadow:var(--shadow-lg)}
 .assist-card.open{display:flex}
 .assist-head{display:flex;align-items:center;gap:8px;padding:12px 13px 10px;box-shadow:inset 0 -1px 0 var(--border-soft)}
 .assist-head strong{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
@@ -107,7 +130,7 @@ dialog#confirm-modal h3{margin:0 0 10px;font-size:14px;font-weight:600;letter-sp
 dialog#confirm-modal pre{max-height:200px}
 @media (max-width:980px){
   main{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;height:auto;min-height:calc(100vh - 55px)}
-  aside{overflow:visible}
+  aside.legacy-panels{overflow:visible}
 }
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms!important;transition-duration:.01ms!important}
@@ -140,6 +163,18 @@ main{flex:1 1 auto;min-height:0;height:auto}
 .history-bar{display:flex;gap:8px;align-items:center;overflow-x:auto;padding:7px 14px;background:var(--bg);
   box-shadow:inset 0 1px 0 var(--border-soft)}
 .history-bar .meta{font-size:11.5px;color:var(--ink-3);white-space:nowrap;font-variant-numeric:var(--tab)}
+/* 助手栏：栅格列，不再是浮层。折叠后只剩一条竖条（图标 + 竖排文字）。 */
+.assist-card{position:static;display:flex;flex-direction:column;min-height:0;width:auto;height:auto;max-width:none;
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;box-shadow:var(--shadow)}
+.assist-card.open{display:flex}
+body.assist-collapsed .assist-card{display:none}
+.assist-rail{display:none;flex-direction:column;align-items:center;gap:10px;padding:12px 0;background:var(--bg);
+  border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow);cursor:pointer}
+body.assist-collapsed .assist-rail{display:flex}
+.assist-rail .glyph{font-size:15px;color:var(--accent)}
+.assist-rail .label{writing-mode:vertical-rl;font-size:11.5px;color:var(--ink-3);letter-spacing:.08em}
+.assist-rail .dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.assist-launcher{display:none}
 .history-step{border:1px solid var(--border-soft);background:var(--panel-2);color:var(--ink-2);font:inherit;font-size:11.5px;
   padding:2px 9px;border-radius:999px;white-space:nowrap;cursor:pointer;opacity:.55}
 .history-step[data-applied="1"]{opacity:1;color:var(--ink-1);border-color:var(--border)}
@@ -154,8 +189,66 @@ main{flex:1 1 auto;min-height:0;height:auto}
     <span class="tag">真实插件路由 · 工具由模型会话调用</span>
   </header>
   <main>
+    <aside class="layers-pane" aria-label="图层与素材">
+      <section>
+        <h2>图层 <span class="layer-count" id="layer-count"></span></h2>
+        <div class="layer-list" id="layer-list"></div>
+        <p class="pane-empty" id="layer-empty">未连接编辑器。</p>
+      </section>
+      <section>
+        <h2>素材</h2>
+        <div class="layer-list" id="asset-list-pane"></div>
+        <p class="pane-empty" id="asset-empty-pane">还没有上传或生成的素材。</p>
+      </section>
+    </aside>
     <div class="stage"><iframe id="editor" src="index.html" title="miniPaint 图片编辑器"></iframe></div>
-    <aside>
+
+    <button class="assist-rail" id="assist-rail" aria-label="展开助手">
+      <span class="glyph">✳</span>
+      <span class="dot" id="assist-rail-dot"></span>
+      <span class="label">助手</span>
+    </button>
+
+    <section class="assist-card" id="assist-card" aria-label="助手">
+    <div class="assist-head">
+      <span class="dot"></span>
+      <strong>助手</strong>
+      <span class="who" id="assist-who">本地指令</span>
+      <span class="spacer"></span>
+      <button class="assist-icon" id="palette-open" title="命令面板 (Ctrl/⌘+K)">⌘K</button>
+      <button class="assist-icon" id="assist-reset" title="清空对话">⟳</button>
+      <button class="assist-icon" id="assist-close" title="关闭">✕</button>
+    </div>
+    <div class="cmd-panel" id="cmd-panel" hidden>
+      <input id="palette-q" type="search" placeholder="搜索命令：layer.align / 对齐 / 蒙版…" autocomplete="off">
+      <div class="cmd-meta" id="palette-count">命令目录</div>
+      <div class="cmd-list" id="palette-list"></div>
+      <textarea id="palette-params" spellcheck="false" placeholder="参数（JSON）：选中一条命令后在这里填"></textarea>
+      <div class="cmd-actions">
+        <button id="palette-run" class="primary">执行</button>
+        <button id="palette-close" class="ghost">收起</button>
+        <span class="cmd-hint">执行走与 Agent 同一条 apply_command：一次确认、一步撤销</span>
+      </div>
+    </div>
+    <div class="assist-log" id="assist-log" aria-live="polite"></div>
+    <div class="assist-controls">
+      <div class="row" style="gap:6px">
+        <select id="assist-provider" aria-label="生成后端" style="flex:1 1 120px"><option value="">后端：点刷新</option></select>
+        <button class="ghost" id="assist-refresh" title="刷新后端">刷新</button>
+        <input type="number" id="assist-width" value="1024" min="16" max="8192" aria-label="宽" style="flex:0 0 66px">
+        <input type="number" id="assist-height" value="1024" min="16" max="8192" aria-label="高" style="flex:0 0 66px">
+      </div>
+      <input type="file" id="assist-file" accept="image/png,image/jpeg,image/webp" hidden>
+      <input type="file" id="assist-psd" accept=".psd,application/octet-stream" hidden>
+    </div>
+    <div class="assist-chips" id="assist-chips"></div>
+    <div class="assist-input">
+      <input id="assist-text" type="text" placeholder="想改什么，直接说" autocomplete="off">
+      <button class="assist-send" id="assist-send" title="发送">↑</button>
+    </div>
+    </section>
+    <!-- 旧的功能面板列：能力已收进助手，这里保留 DOM 与处理器但不上版面（见 aside.legacy-panels）。 -->
+    <aside class="legacy-panels">
       <section class="panel">
         <h2>连接</h2>
         <div class="row"><button class="primary" id="connect">连接编辑器</button><button id="reconnect">重新连接</button><button class="ghost" id="read">读取状态</button></div>
@@ -242,45 +335,7 @@ main{flex:1 1 auto;min-height:0;height:auto}
     <span class="meta" id="history-meta">历史</span>
     <div id="history-steps" style="display:flex;gap:6px;align-items:center"></div>
   </div>
-  <button class="assist-launcher" id="assist-open"><span class="dot"></span>助手</button>
-  <section class="assist-card" id="assist-card" aria-label="助手">
-    <div class="assist-head">
-      <span class="dot"></span>
-      <strong>助手</strong>
-      <span class="who" id="assist-who">本地指令</span>
-      <span class="spacer"></span>
-      <button class="assist-icon" id="palette-open" title="命令面板 (Ctrl/⌘+K)">⌘K</button>
-      <button class="assist-icon" id="assist-reset" title="清空对话">⟳</button>
-      <button class="assist-icon" id="assist-close" title="关闭">✕</button>
-    </div>
-    <div class="cmd-panel" id="cmd-panel" hidden>
-      <input id="palette-q" type="search" placeholder="搜索命令：layer.align / 对齐 / 蒙版…" autocomplete="off">
-      <div class="cmd-meta" id="palette-count">命令目录</div>
-      <div class="cmd-list" id="palette-list"></div>
-      <textarea id="palette-params" spellcheck="false" placeholder="参数（JSON）：选中一条命令后在这里填"></textarea>
-      <div class="cmd-actions">
-        <button id="palette-run" class="primary">执行</button>
-        <button id="palette-close" class="ghost">收起</button>
-        <span class="cmd-hint">执行走与 Agent 同一条 apply_command：一次确认、一步撤销</span>
-      </div>
-    </div>
-    <div class="assist-log" id="assist-log" aria-live="polite"></div>
-    <div class="assist-controls">
-      <div class="row" style="gap:6px">
-        <select id="assist-provider" aria-label="生成后端" style="flex:1 1 120px"><option value="">后端：点刷新</option></select>
-        <button class="ghost" id="assist-refresh" title="刷新后端">刷新</button>
-        <input type="number" id="assist-width" value="1024" min="16" max="8192" aria-label="宽" style="flex:0 0 66px">
-        <input type="number" id="assist-height" value="1024" min="16" max="8192" aria-label="高" style="flex:0 0 66px">
-      </div>
-      <input type="file" id="assist-file" accept="image/png,image/jpeg,image/webp" hidden>
-      <input type="file" id="assist-psd" accept=".psd,application/octet-stream" hidden>
-    </div>
-    <div class="assist-chips" id="assist-chips"></div>
-    <div class="assist-input">
-      <input id="assist-text" type="text" placeholder="想改什么，直接说" autocomplete="off">
-      <button class="assist-send" id="assist-send" title="发送">↑</button>
-    </div>
-  </section>
+
   <dialog id="confirm-modal">
     <form method="dialog">
       <h3 id="confirm-title">确认插入图层</h3>

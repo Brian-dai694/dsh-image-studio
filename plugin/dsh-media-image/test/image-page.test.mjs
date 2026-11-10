@@ -197,39 +197,72 @@ test('面板插入图层走真实编辑器命令，且未知结果只查不重�
   assert.equal(/for\s*\(.*retry/i.test(script), false, '插入路径不得含自动重试循环');
 });
 
-test('面板列按用户要求隐藏，能力全部收进助手（取代旧的"面板必须可见"契约）', () => {
+test('三栏布局：左图层/素材 · 中画布 · 右助手（助手是栅格列，不再压住画布）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   const raw = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
   const css = raw.replace(/\/\*[\s\S]*?\*\//g, '');
-  // 用户明确要求：下方版块直接隐藏，这些功能助手就能解决
-  assert.match(css, /aside\s*\{\s*display:\s*none/, 'aside 必须隐藏');
-  assert.match(css, /main\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;/, '主区应只剩一列');
-  // 助手自己持有后端与尺寸，不能依赖已隐藏的控件
+
+  // 主区必须是三列，且三栏都有容器
+  assert.match(css, /main\{display:grid;grid-template-columns:var\(--left-pane\) minmax\(0,1fr\) var\(--right-pane\)/, 'main 必须是三列栅格');
+  assert.match(html, /<aside class="layers-pane"/, '左栏容器存在');
+  assert.match(html, /id="layer-list"/, '左栏要能列图层');
+  assert.match(html, /id="asset-list-pane"/, '左栏要能列素材');
+  assert.match(html, /id="assist-rail"/, '折叠后要有竖条入口');
+
+  // 助手卡片必须在 main 内部，且不再是 fixed 浮层
+  const mainStart = html.indexOf('<main>'), mainEnd = html.indexOf('</main>');
+  const cardAt = html.indexOf('id="assist-card"');
+  assert.ok(cardAt > mainStart && cardAt < mainEnd, '助手卡片必须在 main 内');
+  const cardRule = css.match(/\.assist-card\{[^}]*\}/);
+  assert.ok(cardRule, '必须有 .assist-card 规则');
+  assert.equal(/position:\s*fixed/.test(cardRule[0]), false, '助手不能再是 fixed 浮层（会压住画布）');
+
+  // 折叠：body 上的类切换栅格宽度
+  assert.match(css, /body\.assist-collapsed\{--right-pane:var\(--rail\)\}/, '折叠要让右栏变成竖条宽度');
+  assert.match(script, /classList\.toggle\('assist-collapsed'/, '折叠要切 body 类');
+  assert.match(script, /openAssist\(window\.innerWidth >= 1181\)/, '窄屏默认折叠');
+
+  // 旧的隐藏面板列保留 DOM 但不上版面，且不再连带隐藏左栏
+  assert.match(css, /aside\.legacy-panels\{display:none/, '旧面板列仍要隐藏');
+  assert.match(css, /aside:not\(\.layers-pane\)\{display:none\}/, '隐藏规则只能作用于非左栏的 aside');
+
+  // 左栏数据必须来自编辑器真实状态，不许自己编图层
+  assert.match(script, /const layersPane = /, '必须有左栏实现');
+  const pane = script.slice(script.indexOf('const layersPane = '));
+  assert.match(pane, /fetchEditorState\(\)/, '左栏必须读真实状态');
+  assert.match(pane, /layer\.set_visibility/, '显隐切换要走既有命令');
+  assert.equal(/name:\s*'图层 \d+'/.test(pane), false, '不得伪造图层名');
+});
+
+test('旧契约作废旧记录：能力仍在助手内（隐藏面板不等于能力消失）', () => {
+  const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
   for (const id of ['assist-provider', 'assist-refresh', 'assist-width', 'assist-height', 'assist-file']) {
     assert.match(html, new RegExp(`id="${id}"`), `助手缺少控件 ${id}`);
   }
   for (const id of ['assist-provider', 'assist-refresh', 'assist-file']) {
     assert.ok(script.includes(`'${id}'`), `${id} 必须在脚本里被使用`);
   }
-  // 面板隐藏后助手必须覆盖原先把能力
   for (const capability of ['生成[:：]', '批量[:：]', '导入[:：]', '字体[:：]', '字体列表', '状态', '插入图层']) {
     assert.ok(script.includes(capability), `助手缺少能力：${capability}`);
   }
-  // 本地文件上传入口不能在隐藏面板里断掉
   assert.match(script, /assist-file'\)\?\.addEventListener\('change'/, '助手要接管本地文件上传');
 });
-// 2026-11-06：用户要求隐藏下方版块并把能力收进助手，旧断言"面板必须可见"随之作废。
+// 2026-11-06：用户要求隐藏下方版块并把能力收进助手。
+// 2026-11-10：用户要求改三栏布局 —— 助手从浮层变成栅格列，旧「浮层必须有 assist-open」断言随之作废。
 
-test('悬浮助手：浮层齐全、只走已有路由、且明确标注当前是本地指令', () => {
+test('助手栏：控件齐全、只走已有路由、且明确标注当前是本地指令', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
-  for (const id of ['assist-open', 'assist-card', 'assist-log', 'assist-chips', 'assist-text', 'assist-send', 'assist-close', 'assist-reset']) {
-    assert.match(html, new RegExp(`id="${id}"`), `浮层缺少 ${id}`);
+  // 三栏后入口是「竖条 assist-rail」，不再是浮层按钮；其余控件不变。
+  for (const id of ['assist-rail', 'assist-card', 'assist-log', 'assist-chips', 'assist-text', 'assist-send', 'assist-provider']) {
+    assert.match(html, new RegExp(`id="${id}"`), `助手栏缺少 ${id}`);
   }
   assert.match(html, /想改什么，直接说/, '输入框占位与工作台一致');
+  assert.match(html, /想改什么，直接说/, '输入框占位与工作台一致');
   // 交互控件都要有处理器（发送既认点击也认回车）
-  for (const id of ['assist-open', 'assist-send', 'assist-close', 'assist-reset']) {
+  for (const id of ['assist-rail', 'assist-send', 'assist-close', 'assist-reset']) {
     assert.ok(script.split('\n').some(line => line.includes(`'${id}'`) && line.includes('addEventListener')), `${id} 没有绑定处理器`);
   }
   assert.ok(/keydown/.test(script) && /Enter/.test(script), '回车要能发送');

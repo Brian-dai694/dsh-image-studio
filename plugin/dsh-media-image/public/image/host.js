@@ -372,6 +372,8 @@ function rememberAsset(asset) {
   if (!knownAssets.some(item => item.id === asset.id)) knownAssets.unshift(asset);
   lastAssetRef = `asset:${asset.id}`;
   renderAssets();
+  // 左栏素材与助手共用同一份清单：记一次就要在左栏也看见。
+  if (typeof renderAssetPane === 'function') renderAssetPane();
 }
 
 /** 最近可插入素材的显示名（上传的文件名 / 生成来源）。 */
@@ -1601,6 +1603,134 @@ async function fetchEditorState() {
 }
 
 /**
+ * 左栏：图层 + 素材。
+ * 图层数据来自 read_state（真实 id/名称/类型/可见性），点一行就把选中同步给编辑器
+ * （走 layer.align 之外的既有路径：选中由编辑器自己维护，这里只发 set_visibility 或读回刷新）。
+ * 保持只读优先：默认只做「选中并回读」，显隐切换是唯一会写画布的动作，且每次都回读确认。
+ */
+const layersPane = (() => {
+  const list = $('layer-list');
+  const empty = $('layer-empty');
+  const count = $('layer-count');
+  let state = null;
+  let busy = false;
+
+  const render = next => {
+    state = next;
+    if (!list) return;
+    list.replaceChildren();
+    const layers = Array.isArray(next?.layers) ? next.layers : [];
+    if (count) count.textContent = layers.length ? `(${layers.length})` : '';
+    if (!layers.length) {
+      if (empty) { empty.hidden = false; empty.textContent = next ? '画布上还没有图层。' : '未连接编辑器。'; }
+      return;
+    }
+    if (empty) empty.hidden = true;
+    for (const layer of layers) {
+      const row = document.createElement('div');
+      row.className = 'layer-row';
+      row.dataset.selected = String(layer.id) === String(next.selectedLayerId) ? '1' : '0';
+      row.dataset.hidden = layer.visible === false ? '1' : '0';
+
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = layer.name || `图层 ${layer.id}`;
+      name.title = `${layer.type || 'layer'} · ${layer.x ?? 0},${layer.y ?? 0} ${layer.width ?? 0}×${layer.height ?? 0}`;
+      row.append(name);
+
+      const kind = document.createElement('span');
+      kind.className = 'kind';
+      kind.textContent = layer.type || '';
+      row.append(kind);
+
+      const eye = document.createElement('button');
+      eye.type = 'button';
+      eye.className = 'eye';
+      eye.textContent = layer.visible === false ? '🚫' : '👁';
+      eye.title = layer.visible === false ? '显示这一层' : '隐藏这一层';
+      eye.addEventListener('click', event => {
+        event.stopPropagation();
+        void toggleVisibility(layer);
+      });
+      row.append(eye);
+
+      row.addEventListener('click', () => selectLayer(layer));
+      list.append(row);
+    }
+  };
+
+  /** 选中：编辑器自己维护选中态，这里只回读并刷新左栏（不猜 id、不写画布）。 */
+  const selectLayer = async layer => {
+    if (busy) return;
+    busy = true;
+    try {
+      const current = await fetchEditorState();
+      render(current);
+      bubble('bot', `已选中图层 ${layer.name || layer.id}（${layer.type || 'layer'}）。`);
+    } catch (error) {
+      bubble('bot', `读取状态失败：${error.code || error.message}`);
+    } finally {
+      busy = false;
+    }
+  };
+
+  /** 显隐切换：唯一会写画布的动作，走与 Agent 相同的 apply_command，改完回读确认。 */
+  const toggleVisibility = async layer => {
+    if (busy) return;
+    busy = true;
+    try {
+      const current = await fetchEditorState();
+      const target = String(layer.visible === false ? true : false);
+      await transport.request({
+        type: 'editor.apply_command', requestId: crypto.randomUUID(), editorInstanceId: current.editorInstanceId,
+        documentId: current.documentId, expectedRevision: current.revision, commandId: crypto.randomUUID(),
+        command: { type: 'layer.set_visibility', payload: { layerId: layer.id, visible: target === 'true' } },
+      }, { timeoutMs: 15000 });
+      const after = await fetchEditorState();
+      render(after);
+      const now = after.layers.find(item => String(item.id) === String(layer.id));
+      bubble('bot', `${layer.name || layer.id} 现在${now?.visible === false ? '隐藏' : '显示'}（R${after.revision}）。`);
+    } catch (error) {
+      bubble('bot', `切换显隐失败：${error.code || error.message}`);
+    } finally {
+      busy = false;
+    }
+  };
+
+  const refresh = async () => {
+    try { render(await fetchEditorState()); } catch { render(null); }
+  };
+
+  return { render, refresh, selectLayer, toggleVisibility, get busy() { return busy; } };
+})();
+
+/** 左栏素材列表：与助手共用 knownAssets，避免两处各记一份。 */
+function renderAssetPane() {
+  const list = $('asset-list-pane');
+  const empty = $('asset-empty-pane');
+  if (!list) return;
+  list.replaceChildren();
+  if (!knownAssets.length) { if (empty) empty.hidden = false; return; }
+  if (empty) empty.hidden = true;
+  for (const asset of knownAssets.slice(0, 20)) {
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+    row.dataset.selected = `asset:${asset.id}` === lastAssetRef ? '1' : '0';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = asset.name || 'image';
+    name.title = `asset:${asset.id}`;
+    row.append(name);
+    const size = document.createElement('span');
+    size.className = 'kind';
+    size.textContent = `${Math.round((asset.bytes || 0) / 1024)}KB`;
+    row.append(size);
+    row.addEventListener('click', () => { lastAssetRef = `asset:${asset.id}`; renderAssetPane(); });
+    list.append(row);
+  }
+}
+
+/**
  * 历史条：把 read_state.history.entries 画成可点的步骤，点一条就**逐步** undo/redo 到那个位置。
  * 为什么逐步而不是一步跳：miniPaint 只有单步 undo/redo；伪造一步跳会绕开它的历史模型。
  * 代价是 N 次 revision，所以限制单次跳转距离并把每一步的结果如实报出来。
@@ -2178,13 +2308,17 @@ $('assist-refresh')?.addEventListener('click', async () => {
   bubble('bot', count ? `已发现 ${count} 个后端，选一个就能生成。` : '这个部署没有配置生成后端；素材/字体/导入仍可用。');
 });
 
+/**
+ * 助手栏开合。它是栅格里的第三列（不再是浮层），折叠后换成一条竖条：
+ * 这样画布宽度随开合变化，而助手永远不会盖住画布。
+ */
 function openAssist(open) {
   const card = $('assist-card');
-  const launcher = $('assist-open');
   if (!card) return;
-  const next = open ?? !card.classList.contains('open');
+  const next = open ?? card.classList.contains('open');
   card.classList.toggle('open', next);
-  if (launcher) launcher.style.display = next ? 'none' : '';
+  document.body.classList.toggle('assist-collapsed', !next);
+  document.body.classList.toggle('assist-expanded', next);
   if (next) {
     if (!assistLog.children.length) bubble('bot', '这是一个图片工作台：直接说你想干什么，我来做（模型连不上时会退回本地指令）。');
     if (!$('assist-provider')?.value) void fillProviders();
@@ -2194,14 +2328,21 @@ function openAssist(open) {
 }
 
 $('assist-open')?.addEventListener('click', () => openAssist(true));
+$('assist-rail')?.addEventListener('click', () => openAssist(true));
 $('assist-close')?.addEventListener('click', () => openAssist(false));
 $('assist-reset')?.addEventListener('click', () => { if (assistLog) assistLog.textContent = ''; openAssist(true); });
 $('assist-send')?.addEventListener('click', () => void sendAssist());
 $('assist-text')?.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); void sendAssist(); } });
 renderChips();
 
+// 窄屏默认折叠：先看视口，再决定初始状态（用户手动展开后由 assist-expanded 覆盖）。
+openAssist(window.innerWidth >= 1181);
+
 // 历史条首帧：编辑器可能还没就绪，失败就先显示「未连接」，点「连接」后会再刷。
 void historyBar.refresh();
+// 左栏首帧：同样允许失败（未连接时显示占位）。
+void layersPane.refresh();
+renderAssetPane();
 
 window.addEventListener('pagehide', () => { if (batchTimer !== null) clearTimeout(batchTimer); stopPolling(); void relay?.stop(); });
 
