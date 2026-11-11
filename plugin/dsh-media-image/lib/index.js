@@ -18,7 +18,7 @@ import { createFontStore } from './fonts.js';
 import { chatTurn, modelInfo } from './assist.js';
 import { createBackgroundRemovalService } from './background-removal.js';
 import { createPhotoshopService } from './photoshop-com.js';
-import { ensureHeadlessEditor, closeAllHeadlessEditors } from './headless-registry.js';
+import { ensureHeadlessEditor, closeAllHeadlessEditors, setKnownOrigin, isHeadlessInstance } from './headless-registry.js';
 import { createArtifactStore } from './artifacts.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
@@ -137,6 +137,8 @@ export function apply(ctx, config = {}) {
     photoshop,
     artifacts,
     ctx,
+    // 记录真实 Host，供无头实例复用同一个 origin（端口每次重启都会变）。
+    onOrigin: origin => setKnownOrigin(origin),
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,
   });
@@ -149,6 +151,11 @@ export function apply(ctx, config = {}) {
       ? {
         enabled: true,
         origin: typeof config.headless.origin === 'string' ? config.headless.origin : '',
+        // 本人 2026-11-11 明确同意：无头实例可执行高危命令（含 layer.add_image），
+        // 因为这类实例没有人能点审批。仅对**由本插件拉起的无头实例**生效，
+        // 人打开的面板页仍然逐次审批；执行结果会带 autonomous:true 并进审计。
+        allowHighRisk: config.headless.allowHighRisk === true,
+        isHeadless: isHeadlessInstance,
         ensure: options => ensureHeadlessEditor(options),
       }
       : null,

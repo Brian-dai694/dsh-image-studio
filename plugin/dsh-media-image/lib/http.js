@@ -704,7 +704,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, photoshop = null, artifacts = null, ctx = null, remoteFetch = undefined }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, photoshop = null, artifacts = null, ctx = null, remoteFetch = undefined, onOrigin = null }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const assetsPrefix = `${prefix}/assets/`;
@@ -720,6 +720,11 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
     const url = new URL(req.url ?? '/', 'http://dsh.local');
     const pathname = url.pathname;
     if (!pathname.startsWith(prefix)) return false;
+    // 记下这个 DSH 网页真实的 Host：无头实例要用同一个 origin 打开页面，
+    // 而端口每次重启都会变，靠配置写死迟早过期。
+    if (typeof onOrigin === 'function' && typeof req.headers?.host === 'string') {
+      onOrigin(`http://${req.headers.host}`);
+    }
 
     if (pathname.startsWith(assetsPrefix)) {
       if (pathname === `${assetsPrefix}import` && req.method === 'POST') {

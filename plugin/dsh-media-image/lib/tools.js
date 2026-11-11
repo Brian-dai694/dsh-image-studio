@@ -32,6 +32,8 @@ const RESULT_SCHEMA = {
     canRedo: { type: 'boolean' },
     approvalId: { type: 'string' },
     auditRef: { type: 'string' },
+    // 高危命令在没有人工审批的情况下被执行（本人授权的 autonomous / 无头实例策略）。
+    autonomous: { type: 'boolean' },
     exportId: { type: 'string' },
     artifactRef: { type: 'string' },
     artifactId: { type: 'string' },
@@ -473,7 +475,11 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       const highRisk = HIGH_RISK_OPERATIONS[kind]?.has(operation) === true;
       // 本人已授权 autonomous 模式执行全部内置命令（含破坏性/烤平/外部像素类），
       // 因此自主模式下不再等人工审批；assist 模式保持原样（逐次审批）。
-      const autonomous = exec?.mode === 'autonomous' || exec?.autonomous === true;
+      // 额外一条：由本插件拉起的**无头实例**没有人能点审批，部署侧显式开启
+      // headless.allowHighRisk 后同样不再等审批——但只对无头实例生效，
+      // 结果会带 autonomous:true，账目清楚。
+      const headlessAutonomy = highRisk && headless?.allowHighRisk === true && headless?.isHeadless?.(args.instanceId) === true;
+      const autonomous = exec?.mode === 'autonomous' || exec?.autonomous === true || headlessAutonomy;
       let approvalId;
 
       if (highRisk && !autonomous) {

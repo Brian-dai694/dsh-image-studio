@@ -10,6 +10,20 @@ import { createHeadlessEditor } from './headless-editor.js';
 
 const instances = new Map();
 
+// 无头启动需要知道"当前这个 DSH 网页跑在哪个 origin"。端口每次重启都会变，
+// 所以写死配置不可靠。这里记住最近一次真实页面请求的 Host（同源路由一定会经过它），
+// 让无头实例复用同一个 origin；配置里显式给了 origin 时以配置为准。
+let knownOrigin = null;
+export function setKnownOrigin(origin) {
+  if (typeof origin === 'string' && /^https?:\/\/[^\s/]+$/.test(origin)) knownOrigin = origin;
+}
+export function currentOrigin() { return knownOrigin; }
+
+/** 该实例是不是由本插件拉起的无头实例（决定能否走"无头自主"策略）。 */
+export function isHeadlessInstance(instanceId) {
+  return typeof instanceId === 'string' && instances.has(instanceId);
+}
+
 /** 当前登记在册的无头实例（只读快照，给工具回执与状态用）。 */
 export function listHeadlessEditors() {
   return [...instances.values()].map(item => ({
@@ -31,20 +45,22 @@ export function listHeadlessEditors() {
  * @returns {Promise<{instanceId:string,pageId:string,projectId:string,ticketId:string,reused:boolean}>}
  */
 export async function ensureHeadlessEditor({ origin, reuse = true, timeoutMs } = {}) {
+  const target = origin || knownOrigin;
+  if (!target) throw Object.assign(new Error('还不知道 DSH 网页地址：先打开一次插件面板，或在 config.headless.origin 里显式配置'), { code: 'HEADLESS_ORIGIN_REQUIRED' });
   if (reuse) {
     for (const item of instances.values()) {
-      if (item.origin === origin) {
+      if (item.origin === target) {
         return { instanceId: item.instanceId, pageId: item.pageId, projectId: item.projectId, ticketId: item.ticketId, reused: true };
       }
     }
   }
-  const editor = await createHeadlessEditor({ origin, ...(timeoutMs ? { timeoutMs } : {}) });
+  const editor = await createHeadlessEditor({ origin: target, ...(timeoutMs ? { timeoutMs } : {}) });
   instances.set(editor.instanceId, {
     instanceId: editor.instanceId,
     pageId: editor.pageId,
     projectId: editor.projectId,
     ticketId: editor.ticketId,
-    origin,
+    origin: target,
     startedAt: new Date().toISOString(),
     dispose: editor.dispose,
   });
