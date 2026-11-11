@@ -23,29 +23,41 @@ export function trustedSessionId(exec) {
 export function createSessionBindings({ resolvePage, tickets = null, now = () => Date.now() } = {}) {
   const bindings = new Map();
   const invalid = new Set();
+  // 会话级作废：宿主判定"这个会话的所有链路都不再可信"时置上（例如页面/工程被换掉）。
+  // 与逐链路 invalid 分开：assert 两个都要看，显式重绑时一起清。
+  const invalidSessions = new Set();
   const pending = new Set();
   const audit = [];
+  // 绑定键是 (会话, 实例) 二元组，不再只是会话。
+  // 为什么：一个会话可能同时连两条链路——人打开的面板页 + Host 拉起的无头页；
+  // 它们共享会话身份，但各自是独立授权、独立生命周期。只按会话做键会让第二条链路
+  // 直接 SESSION_BINDING_MISMATCH，也会让任何一条断开把整个会话打成 stale。
+  const linkKey = (sessionId, instanceId) => `${sessionId}\u0000${instanceId}`;
+  const linksOf = sessionId => [...bindings.entries()].filter(([key]) => key.startsWith(`${sessionId}\u0000`));
   const recordAudit = entry => { audit.push(Object.freeze({ at: now(), ...entry })); if (audit.length > 200) audit.shift(); };
   const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
   const registerGrant = (binding) => {
-    bindings.set(binding.sessionId, Object.freeze(binding));
+    const key = linkKey(binding.sessionId, binding.instanceId);
+    bindings.set(key, Object.freeze(binding));
     recordAudit({ action: 'grant', sessionId: binding.sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, ticketId: binding.ticketId ?? null, expiresAt: binding.expiresAt ?? null });
-    return bindings.get(binding.sessionId);
+    return bindings.get(key);
   };
 
   async function authorizeNative(exec, { editorKind, instanceId, projectId, readState, approve }) {
     // 流程：取可信 session → 锁定 relay 实时页面 → 读文档快照 → 原生审批
     // → 复验信号/失效/页面/工程/快照 → 原子登记。任一步变化都不登记。
     const sessionId = trustedSessionId(exec);
-    if (bindings.has(sessionId) || invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Session already bound or expired; use a new dedicated session.');
-    if (pending.has(sessionId)) fail('SESSION_BINDING_PENDING', 'A binding approval is already in progress.');
+    const key = linkKey(sessionId, instanceId);
+    if (bindings.has(key) || invalid.has(key) || invalidSessions.has(sessionId)) fail('SESSION_BINDING_STALE', 'Session already bound or expired; use a new dedicated session.');
+    if (pending.has(key)) fail('SESSION_BINDING_PENDING', 'A binding approval is already in progress.');
     if (!resolvePage) fail('SESSION_BINDING_UNAVAILABLE', 'Host page resolver is unavailable.');
     const signal = exec.signal;
     const checkActive = () => {
       if (signal?.aborted) fail('APPROVAL_CANCELLED', 'Request cancelled; explicitly start a new approval request.');
-      if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Binding request invalidated; use a new dedicated session.');
+      // 等待审批期间宿主可能撤销整个会话：这一步必须能看见会话级作废。
+      if (invalid.has(key) || invalidSessions.has(sessionId)) fail('SESSION_BINDING_STALE', 'Binding request invalidated; use a new dedicated session.');
     };
-    pending.add(sessionId);
+    pending.add(key);
     try {
       checkActive();
       const page = resolvePage(editorKind, instanceId);
@@ -64,7 +76,7 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
       const currentPage = resolvePage(editorKind, instanceId);
       if (!currentPage || currentPage.pageId !== page.pageId || after.documentId !== before.documentId || after.revision !== before.revision || after.stateDigest !== before.stateDigest) fail('SESSION_BINDING_STALE', 'Page or project changed during approval; no grant was registered.');
       return registerGrant({ sessionId, editorKind, instanceId, projectId, pageId: page.pageId, grantId: globalThis.crypto.randomUUID(), source: 'native', grantedAt: now(), expiresAt: null, ticketId: null });
-    } finally { pending.delete(sessionId); }
+    } finally { pending.delete(key); }
   }
 
   // 面板授权：认领一张本人签发的票据后登记 grant。不调用宿主审批，因此 approval=never 的
@@ -73,8 +85,9 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
   const GRANT_SOFT_TTL_MS = 8 * 60 * 60_000;
   async function bindWithTicket(exec, { editorKind, instanceId, projectId, readState }) {
     const sessionId = trustedSessionId(exec);
-    if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'The project/page binding expired; create a new dedicated session.');
-    if (bindings.has(sessionId)) return bindings.get(sessionId);
+    const key = linkKey(sessionId, instanceId);
+    if (invalid.has(key)) fail('SESSION_BINDING_STALE', 'The project/page binding expired; create a new dedicated session.');
+    if (bindings.has(key)) return bindings.get(key);
     const page = resolvePage?.(editorKind, instanceId);
     if (!page) fail('SESSION_BINDING_REQUIRED', '编辑器页面还没有连上；先打开编辑器，再由本人在面板点“授权此会话读写本工程”。');
     if (!tickets) fail('SESSION_BINDING_REQUIRED', 'This deployment has no panel bind tickets.');
@@ -96,10 +109,11 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
   // 不复用 EDITOR_NOT_READY（那会让人一直去查连接）。
   async function bind(exec, { editorKind, instanceId, projectId, readState, approve }) {
     const sessionId = trustedSessionId(exec);
-    const existing = bindings.get(sessionId);
+    const key = linkKey(sessionId, instanceId);
+    const existing = bindings.get(key);
     if (existing) {
       if (Number.isFinite(existing.expiresAt) && existing.expiresAt <= now()) {
-        bindings.delete(sessionId);
+        bindings.delete(key);
         recordAudit({ action: 'expired', sessionId, editorKind: existing.editorKind, projectId: existing.projectId, instanceId: existing.instanceId, source: existing.source, grantId: existing.grantId, reason: 'grant-soft-ttl' });
         fail('SESSION_BINDING_EXPIRED', '授权已过期（软上限 8 小时）；请本人在面板重新授权。');
       }
@@ -108,8 +122,9 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
     // stale 曾经是一次性死刑：页面重建/实例消失后，本会话再也绑不上，只能开新会话。
     // 这里放开「显式重绑」——调用方必须带 bind:true 走到这个入口，且下面必须真的
     // 认领到一张有效票据才会登记新 grant；静默续用仍然拒绝（票据/页面任一不成立就失败）。
-    if (invalid.has(sessionId)) {
-      invalid.delete(sessionId);
+    if (invalidSessions.has(sessionId) || invalid.has(key)) {
+      invalidSessions.delete(sessionId);
+      invalid.delete(key);
       recordAudit({ action: 'stale-cleared', sessionId, editorKind, instanceId, projectId, reason: 'explicit-rebind' });
     }
     try {
@@ -118,7 +133,7 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
       if (ticketError?.code !== 'SESSION_BINDING_REQUIRED') throw ticketError;
       if (typeof approve !== 'function') {
         // 重绑失败就恢复 stale 标记，避免把"曾经失效"这件事忘掉。
-        if (invalid.has(sessionId) === false && existing === undefined) invalid.add(sessionId);
+        if (invalid.has(key) === false && existing === undefined) invalid.add(key);
         throw ticketError;
       }
       try {
@@ -146,48 +161,69 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
       if (binding.editorKind !== 'image') fail('INVALID_REQUEST', 'Binding editorKind is invalid.');
       const page = resolvePage(binding.editorKind, binding.instanceId);
       if (!page || page.pageId !== binding.pageId || page.sessionId !== sessionId) fail('SESSION_BINDING_MISMATCH', 'Host has not verified session ownership of this page.');
-      if (bindings.has(sessionId) || invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'Create a new dedicated session after changing the project.');
+      const key = linkKey(sessionId, binding.instanceId);
+      if (bindings.has(key) || invalid.has(key)) fail('SESSION_BINDING_STALE', 'Create a new dedicated session after changing the project.');
       return registerGrant({ ...binding, sessionId, source: 'verified-register', grantedAt: now(), expiresAt: null });
     },
     // 每次工具调用前校验：会话已绑定、kind/实例/工程一致、页面仍存活；
     // 页面断开或换页即作废绑定（保活切页不算断开）。
     assert(exec, kind, args) {
       const sessionId = trustedSessionId(exec);
-      const binding = bindings.get(sessionId);
-      if (invalid.has(sessionId)) fail('SESSION_BINDING_STALE', 'The project/page binding expired; create a new dedicated session.');
-      if (!binding) fail('SESSION_BINDING_REQUIRED', 'Host-verified editor/session registration is required.');
+      // 按 (会话, 实例) 找这条链路的授权：同一会话下人和无头实例可以各自有 grant。
+      const key = linkKey(sessionId, args?.instanceId ?? '');
+      const binding = bindings.get(key);
+      if (invalidSessions.has(sessionId) || invalid.has(key)) fail('SESSION_BINDING_STALE', 'The project/page binding expired; create a new dedicated session.');
+      if (!binding) {
+        // 已有同会话的其他链路时，说清"这个实例没被授权"，不要让人误以为整个会话都没连上。
+        const others = linksOf(sessionId);
+        if (others.length) fail('SESSION_BINDING_MISMATCH', `这个实例（${args?.instanceId ?? '未提供'}）没有被授权；本会话已授权的是 ${others.map(([, item]) => item.instanceId).join('、')}。`);
+        fail('SESSION_BINDING_REQUIRED', 'Host-verified editor/session registration is required.');
+      }
       // 授权软上限：8 小时，或页面/工程变化，任一不满足立即作废。
       if (Number.isFinite(binding.expiresAt) && binding.expiresAt <= now()) {
-        bindings.delete(sessionId);
+        bindings.delete(key);
         recordAudit({ action: 'expired', sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, source: binding.source, grantId: binding.grantId, reason: 'grant-soft-ttl' });
         fail('SESSION_BINDING_EXPIRED', '授权已过期（软上限 8 小时）；请本人在面板重新授权。');
       }
       if (kind !== binding.editorKind || args.instanceId !== binding.instanceId || args.projectId !== binding.projectId) fail('SESSION_BINDING_MISMATCH', 'Explicit projectId, instanceId and editor kind must match the Host binding.');
       const page = resolvePage?.(binding.editorKind, binding.instanceId);
       if (!page || page.pageId !== binding.pageId) {
-        invalid.add(sessionId); bindings.delete(sessionId);
+        invalid.add(key); bindings.delete(key);
         recordAudit({ action: 'revoked', sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, reason: 'page-disconnected-or-changed' });
         fail('SESSION_BINDING_STALE', 'The bound page disconnected or changed.');
       }
       if (kind !== binding.editorKind || args.instanceId !== binding.instanceId || args.projectId !== binding.projectId) fail('SESSION_BINDING_MISMATCH', 'Explicit projectId, instanceId and editor kind must match the Host binding.');
       return binding;
     },
-    invalidate(sessionId) {
-      const binding = bindings.get(sessionId);
-      bindings.delete(sessionId); invalid.add(sessionId);
-      recordAudit({ action: 'revoked', sessionId, editorKind: binding?.editorKind ?? null, projectId: binding?.projectId ?? null, instanceId: binding?.instanceId ?? null, source: binding?.source ?? null, grantId: binding?.grantId ?? null, reason: 'invalidated-by-host' });
+    // instanceId 给了就只作废这条链路；没给就作废该会话的全部链路（旧的调用方式）。
+    invalidate(sessionId, instanceId) {
+      // 给了 instanceId 只作废这条链路；没给表示"整个会话不可信"，连尚未登记的绑定请求一起作废
+      // （审批等待期间宿主撤销授权，必须在 approve 返回后仍然失败，这是原有用例要求的语义）。
+      if (!instanceId) invalidSessions.add(sessionId);
+      const keys = instanceId ? [linkKey(sessionId, instanceId)] : linksOf(sessionId).map(([key]) => key);
+      for (const key of keys) {
+        const binding = bindings.get(key);
+        bindings.delete(key); invalid.add(key);
+        recordAudit({ action: 'revoked', sessionId, editorKind: binding?.editorKind ?? null, projectId: binding?.projectId ?? null, instanceId: binding?.instanceId ?? instanceId ?? null, source: binding?.source ?? null, grantId: binding?.grantId ?? null, reason: 'invalidated-by-host' });
+      }
     },
-    bindingOf(sessionId) { return bindings.get(sessionId) ?? null; },
+    bindingOf(sessionId, instanceId) {
+      if (instanceId) return bindings.get(linkKey(sessionId, instanceId)) ?? null;
+      const all = linksOf(sessionId);
+      return all.length === 1 ? all[0][1] : null;
+    },
+    // 该会话当前所有已授权链路（面板要显示"人页 + 无头页"时用）。
+    linksOf(sessionId) { return linksOf(sessionId).map(([, binding]) => binding); },
     // 面板「撤销授权」：按页面+工程撤掉所有相关 grant（本人点击才走到这里）。
     revokeByTarget({ editorKind, projectId, pageId }) {
       let revoked = 0;
-      for (const [sessionId, binding] of [...bindings]) {
+      for (const [key, binding] of [...bindings]) {
         if (binding.editorKind !== editorKind) continue;
         if (binding.projectId !== projectId) continue;
         if (pageId && binding.pageId !== pageId) continue;
-        bindings.delete(sessionId);
+        bindings.delete(key);
         revoked += 1;
-        recordAudit({ action: 'revoked', sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, reason: 'panel-unbind' });
+        recordAudit({ action: 'revoked', sessionId: binding.sessionId, editorKind: binding.editorKind, projectId: binding.projectId, instanceId: binding.instanceId, pageId: binding.pageId, source: binding.source, grantId: binding.grantId, reason: 'panel-unbind' });
       }
       return revoked;
     },

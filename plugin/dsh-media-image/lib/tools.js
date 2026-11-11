@@ -334,7 +334,7 @@ export function toLosslessJson(value) {
 // 注册本包的全部模型工具（图片 5 个 / 视频 5 个）。
 // 每个 execute 先过 toLosslessJson 再做 schema 快照校验，避免 undefined 导致
 // "non-lossless JSON"；binding 校验与审批在各自 execute 内完成。
-export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null, recipes = null, photoshop = null }) {
+export function registerMediaTools(ctx, { bridge, approvals, bindings = createSessionBindings({ resolvePage: (_kind, instanceId) => bridge.getPage?.(instanceId) ?? null }), assets = null, generation = null, recipes = null, photoshop = null, headless = null }) {
   const appliedCommands = new Map();
   const verify = async (kind, bridge, args, exec) => {
     const binding = bindings.assert(exec, kind, args);
@@ -343,7 +343,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       if (state.documentId !== binding.projectId) throw new MediaBridgeError('DOCUMENT_MISMATCH', 'The editor document changed; create a new dedicated session.');
       return state;
     } catch (error) {
-      if (['DOCUMENT_MISMATCH', 'EDITOR_NOT_READY', 'EDITOR_INSTANCE_MISMATCH'].includes(error.code)) bindings.invalidate(binding.sessionId);
+      if (['DOCUMENT_MISMATCH', 'EDITOR_NOT_READY', 'EDITOR_INSTANCE_MISMATCH'].includes(error.code)) bindings.invalidate(binding.sessionId, binding.instanceId);
       throw error;
     }
   };
@@ -375,7 +375,7 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
       });
       const state = await verify(kind, bridge, args, exec);
       if (kind === 'image' && assets) state.assets = assets.list();
-      const binding = bindings.bindingOf?.(agentKey(exec)) ?? null;
+      const binding = bindings.bindingOf?.(agentKey(exec), args.instanceId) ?? null;
       // 契约 §4：grant:{source,grantId,issuedAt,expiresAt,expiresInMs}|null
       const grant = binding ? {
         source: binding.source || 'unknown',
@@ -627,6 +627,50 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
     execute: listCommands('image', bridge),
     timeoutMs: 10_000,
   }));
+
+  // 无头编辑器：Agent 自助入口。只在显式调用时拉起浏览器，不参与普通命令路径。
+  // 授权仍走 gate：拉起后必须再用 read_state{bind:true} 认领票据。
+  if (headless) {
+    register(defineTool({
+      name: 'media_image_ensure_editor',
+      description: 'Start (or reuse) a headless editor instance that no human had to open, then return the instanceId/projectId to bind with. Only this explicit call launches a browser — ordinary commands never do. The binding is still required: call media_image_read_state with bind:true afterwards. Fails with HEADLESS_DISABLED when the deployment did not enable it, and PLAYWRIGHT_UNAVAILABLE when no browser runtime is installed.',
+      parameters: {
+        origin: { type: 'string', description: 'Same-origin base URL of the running DSH web server (e.g. http://127.0.0.1:49852). Omit to use the configured default.' },
+        reuse: { type: 'boolean', description: 'Reuse an already running headless instance for the same origin (default true).' },
+      },
+      output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+      execute: async (args, exec) => {
+        try {
+          trustedSessionId(exec);
+          if (headless.enabled !== true) {
+            return {
+              status: 'rejected', commandId: 'ensure_editor', editorKind: 'image',
+              error: { code: 'HEADLESS_DISABLED', message: '这个部署没有启用无头编辑器（config.headless.enabled=false）。启用后才能在没有人打开页面的情况下由 Agent 拉起实例。' },
+            };
+          }
+          const origin = (typeof args.origin === 'string' && args.origin.trim()) || headless.origin || '';
+          if (!/^https?:\/\//.test(origin)) {
+            return {
+              status: 'rejected', commandId: 'ensure_editor', editorKind: 'image',
+              error: { code: 'HEADLESS_ORIGIN_REQUIRED', message: '需要给出正在运行的 DSH Web 同源地址（config.headless.origin 或本次调用的 origin）。' },
+            };
+          }
+          const started = await headless.ensure({ origin, reuse: args.reuse !== false });
+          return {
+            status: 'applied', commandId: 'ensure_editor', editorKind: 'image',
+            projectId: started.projectId,
+            detail: { instanceId: started.instanceId, pageId: started.pageId, projectId: started.projectId, reused: started.reused, origin },
+            note: started.reused
+              ? `复用已存在的无头实例 ${started.instanceId}。下一步：media_image_read_state { bind: true, instanceId, projectId }。`
+              : `已启动无头实例 ${started.instanceId}。下一步：media_image_read_state { bind: true, instanceId, projectId }。`,
+          };
+        } catch (error) {
+          return failure('image', 'ensure_editor', error);
+        }
+      },
+      timeoutMs: 120_000,
+    }));
+  }
 
   if (photoshop?.describe?.().enabled === true) {
     const photoshopDescription = photoshop.describe();

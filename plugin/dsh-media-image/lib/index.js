@@ -18,6 +18,7 @@ import { createFontStore } from './fonts.js';
 import { chatTurn, modelInfo } from './assist.js';
 import { createBackgroundRemovalService } from './background-removal.js';
 import { createPhotoshopService } from './photoshop-com.js';
+import { ensureHeadlessEditor, closeAllHeadlessEditors } from './headless-registry.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
 // 两者都没有就不注册任何 provider —— /generate 会如实返回 PROVIDER_UNAVAILABLE，而不是假装能生成。
@@ -136,6 +137,24 @@ export function apply(ctx, config = {}) {
   });
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/media-image', handler: router }), 'dsh-media-image: routes');
 
-  registerMediaTools(ctx, { bridge, approvals, bindings, assets, generation, recipes, photoshop });
-  return { dispose() { relay.close(); assets.clear(); fonts.clear(); } };
+  registerMediaTools(ctx, {
+    bridge, approvals, bindings, assets, generation, recipes, photoshop,
+    // 无头编辑器只在显式工具调用时使用；未启用时对象为空，工具根本不注册。
+    headless: config.headless?.enabled === true
+      ? {
+        enabled: true,
+        origin: typeof config.headless.origin === 'string' ? config.headless.origin : '',
+        ensure: options => ensureHeadlessEditor(options),
+      }
+      : null,
+  });
+  return {
+    dispose() {
+      relay.close();
+      assets.clear();
+      fonts.clear();
+      // 无头实例由本插件拉起，卸载时必须自己收尾，否则会留下孤儿浏览器进程。
+      void closeAllHeadlessEditors();
+    },
+  };
 }
