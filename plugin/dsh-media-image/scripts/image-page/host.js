@@ -142,10 +142,20 @@ for (const [id, action] of [['connect', connect], ['reconnect', reconnect], ['re
 
 // Embedded as a sidebar panel there is no one to press "connect": bind on load so the
 // editor is registered with the relay before the user or the model touches it.
+// 必须**等 load 派发结束**再握手：在 load 回调里立刻 postMessage，编辑器侧的 message
+// 监听可能还没装好，实测表现为 EDITOR_TIMEOUT（手工等一会儿再握手就立刻成功）。
+// 失败重试一次，覆盖首帧卡顿；仍失败才把错误交给 fail() 显示。
 $('editor').addEventListener('load', () => {
   if (relay) return;
   $('status').textContent = '编辑器已加载，正在自动连接 image relay…';
-  void connect().catch(fail);
+  const attempt = (retriesLeft) => {
+    connect().catch(error => {
+      if (relay) return;
+      if (retriesLeft > 0) { setTimeout(() => attempt(retriesLeft - 1), 800); return; }
+      fail(error);
+    });
+  };
+  setTimeout(() => attempt(1), 300);
 });
 // Parent client can read identity, never dispatch writes through this channel.
 window.addEventListener('message', async event => {

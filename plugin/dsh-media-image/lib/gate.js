@@ -105,11 +105,22 @@ export function createSessionBindings({ resolvePage, tickets = null, now = () =>
       }
       return existing;
     }
+    // stale 曾经是一次性死刑：页面重建/实例消失后，本会话再也绑不上，只能开新会话。
+    // 这里放开「显式重绑」——调用方必须带 bind:true 走到这个入口，且下面必须真的
+    // 认领到一张有效票据才会登记新 grant；静默续用仍然拒绝（票据/页面任一不成立就失败）。
+    if (invalid.has(sessionId)) {
+      invalid.delete(sessionId);
+      recordAudit({ action: 'stale-cleared', sessionId, editorKind, instanceId, projectId, reason: 'explicit-rebind' });
+    }
     try {
       return await bindWithTicket(exec, { editorKind, instanceId, projectId, readState });
     } catch (ticketError) {
       if (ticketError?.code !== 'SESSION_BINDING_REQUIRED') throw ticketError;
-      if (typeof approve !== 'function') throw ticketError;
+      if (typeof approve !== 'function') {
+        // 重绑失败就恢复 stale 标记，避免把"曾经失效"这件事忘掉。
+        if (invalid.has(sessionId) === false && existing === undefined) invalid.add(sessionId);
+        throw ticketError;
+      }
       try {
         return await authorizeNative(exec, { editorKind, instanceId, projectId, readState, approve });
       } catch (error) {

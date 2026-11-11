@@ -20,7 +20,15 @@ export function createIframeTransport({ iframe, origin, timeoutMs = 10000,
   function onLoad() {
     reset(failure('EDITOR_INSTANCE_MISMATCH', '编辑页面已重新加载；未完成命令的执行结果未知，请勿重放。', { outcomeUnknown: true }));
   }
-  iframe.addEventListener('load', onLoad);
+  // 只有**后续**的 iframe load 才算"页面被重载"。首个 load 是这个 transport 被创建的
+  // 那一次加载本身：调用方通常就在该 load 事件里 connect()，若把它也当重载，
+  // 刚发出的握手会立刻被自己 reset 掉（实测表现为 EDITOR_INSTANCE_MISMATCH，
+  // 页面永远注册不上 relay，Agent 侧只会看到 SESSION_BINDING_REQUIRED）。
+  let seenLoad = false;
+  iframe.addEventListener('load', () => {
+    if (!seenLoad) { seenLoad = true; return; }
+    onLoad();
+  });
 
   function receive(event) {
     const message = event.data;
