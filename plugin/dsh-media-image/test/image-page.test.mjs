@@ -249,6 +249,23 @@ test('XMP 预设入口：只套 miniPaint 真有的调整，还原不了的必�
   assert.equal(/layer\.remove_background|rasterize/.test(block), false, '预设不该烤平图层');
 });
 
+test('导出产物落盘：只在页面里把 blob 传回插件，失败不掩盖导出成功', () => {
+  const script = readFileSync(join(publicImage, 'host.js'), 'utf8');
+  // 必须在页面里做：Host 读不到 blob: URL
+  assert.match(script, /async function persistArtifact\(/, '缺少产物落盘函数');
+  assert.match(script, /fetch\('\/media-image\/artifacts'/, '产物必须 POST 到插件的 artifacts 路由');
+  assert.match(script, /x-dsh-media-artifact': '1'/, '要带产物上传头');
+  // 包装只允许出现在 relay 的 transport 上，且只对 export_start 生效
+  const wrapped = script.slice(script.indexOf('request: async (message, options) => {'));
+  assert.ok(wrapped, '必须包装 transport.request');
+  assert.match(wrapped.slice(0, 600), /message\?\.type !== 'editor\.export_start'/, '只拦截导出请求');
+  // 落盘失败时保留 artifactRef（导出本身是成功的）
+  assert.match(wrapped.slice(0, 900), /artifactPersistError/, '落盘失败要如实标注');
+  assert.match(wrapped.slice(0, 900), /\.\.\.result/, '失败时仍要返回导出结果');
+  // 不允许把整段导出结果替换成只有路径
+  assert.equal(/return saved;/.test(wrapped.slice(0, 900)), false, '不能丢掉导出结果本身');
+});
+
 test('三栏布局：左图层/素材 · 中画布 · 右助手（助手是栅格列，不再压住画布）', () => {
   const html = readFileSync(join(publicImage, 'host.html'), 'utf8');
   const script = readFileSync(join(publicImage, 'host.js'), 'utf8');

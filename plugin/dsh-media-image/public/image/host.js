@@ -104,7 +104,23 @@ async function connect() {
       },
     });
     relay = await startBrowserRelay({
-      transport,
+      transport: {
+        connect: transport.connect,
+        dispose: transport.dispose.bind(transport),
+        // 导出产物在这里落地：blob: URL 只有本页能读，Host 打不开；relay 单帧又装不下几 MB 的 PSD。
+        // 所以统一在这里把字节 POST 回插件（同源 + 页面令牌），Host 才有真实路径可用。
+        request: async (message, options) => {
+          const result = await transport.request(message, options);
+          if (message?.type !== 'editor.export_start' || !result?.artifactRef) return result;
+          try {
+            const saved = await persistArtifact(result.artifactRef, { name: message.format === 'psd' ? 'export.psd' : 'export.png' });
+            return { ...result, ...saved };
+          } catch (error) {
+            // 落盘失败不能掩盖"导出本身成功"：照常返回 artifactRef，另带错误让调用方知情。
+            return { ...result, artifactPersistError: { code: error.code || 'ARTIFACT_PERSIST_FAILED', message: error.message } };
+          }
+        },
+      },
       accessToken,
       baseUrl: '/media-image/relay',
       editorKind: 'image',
@@ -116,9 +132,40 @@ async function connect() {
   try { return await connecting; } finally { connecting = null; }
 }
 
+// 导出产物落盘：把页面内的 blob 字节 POST 给插件，换回真实路径与 sha256。
+// 只有本页能读 blob: URL（Host 不行），所以这一步必须在页面里做。
+async function persistArtifact(blobUrl, { name = 'export.bin' } = {}) {
+  const token = await boot();
+  const response = await fetch(blobUrl);
+  if (!response.ok) throw Object.assign(new Error(`读取导出产物失败（HTTP ${response.status}）`), { code: 'ARTIFACT_READ_FAILED' });
+  const blob = await response.blob();
+  const mime = blob.type || 'application/octet-stream';
+  const upload = await fetch('/media-image/artifacts', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'x-dsh-media-relay': '1',
+      'x-dsh-media-artifact': '1',
+      'x-dsh-media-name': encodeURIComponent(name),
+      'content-type': mime,
+    },
+    body: blob,
+  });
+  const value = await upload.json().catch(() => null);
+  if (!upload.ok || !value?.artifact) {
+    throw Object.assign(new Error(value?.message || `产物落盘失败（HTTP ${upload.status}）`), { code: value?.code || 'ARTIFACT_PERSIST_FAILED' });
+  }
+  return {
+    artifactId: value.artifact.artifactId,
+    artifactPath: value.artifact.path,
+    artifactSha256: value.artifact.sha256,
+    artifactBytes: value.artifact.bytes,
+  };
+}
+
 // Diagnostic read only: goes straight through the MessageChannel transport, not the tools.
-async function readState() {
-  const connection = await connect();
+async function readState() {  const connection = await connect();
   show(await transport.request({
     type: 'editor.read_state',
     requestId: crypto.randomUUID(),

@@ -10,6 +10,7 @@ import { compositePsdLayers } from './psd-composite.js';
 import { planTemplateApply, planTemplateBatch } from './template.js';
 import { describeCommands, summarize } from './commands.js';
 import { planPresetFromXmp } from './xmp-preset.js';
+import { extensionFor, MAX_ARTIFACT_BYTES } from './artifacts.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -145,6 +146,64 @@ async function readBinaryBody(req, limit = MAX_ASSET_BYTES) {
     chunks.push(Buffer.from(chunk));
   }
   return Buffer.concat(chunks, size);
+}
+
+/**
+ * 导出产物落盘。页面把 blob: 产物 POST 到这里（同源 + 页面令牌），
+ * Host 才能拿到真实路径——relay 的 64 KiB 帧根本装不下几 MB 的 PSD。
+ * GET 用于人工/工具取回同一份字节。
+ */
+async function handleArtifacts(req, res, { artifacts, token, prefix, pathname }) {
+  const artifactsPrefix = `${prefix}/artifacts`;
+  const rejection = authorizeSameOrigin(req, token, ['GET', 'POST'], { requireJson: false });
+  if (rejection) {
+    send(res, 403, { code: 'INVALID_REQUEST', message: rejection.message, reason: rejection.reason, observed: rejection.observed });
+    return true;
+  }
+  if (!artifacts?.available) {
+    send(res, 501, { code: 'ARTIFACTS_UNAVAILABLE', message: '未配置 dataDir，导出产物无法落盘。' });
+    return true;
+  }
+
+  // GET /artifacts/<id>
+  if (req.method === 'GET') {
+    if (req.headers?.['x-dsh-media-artifact'] !== '1' || req.headers?.authorization !== `Bearer ${token}`) {
+      send(res, 403, { code: 'INVALID_REQUEST', message: 'Artifact authentication failed.' });
+      return true;
+    }
+    const artifactId = pathname.slice(artifactsPrefix.length + 1);
+    if (!/^[a-f0-9]{32}$/.test(artifactId)) { send(res, 404, { code: 'ARTIFACT_NOT_FOUND', message: 'Artifact not found.' }); return true; }
+    const artifact = artifacts.get(artifactId);
+    if (!artifact) { send(res, 404, { code: 'ARTIFACT_NOT_FOUND', message: 'Artifact not found.' }); return true; }
+    res.writeHead(200, {
+      'content-type': artifact.mime,
+      'content-length': artifact.bytes.length,
+      'cache-control': 'no-store',
+      'x-dsh-media-sha256': artifact.sha256,
+      'x-content-type-options': 'nosniff',
+    });
+    res.end(artifact.bytes);
+    return true;
+  }
+
+  // POST /artifacts
+  if (req.headers?.['x-dsh-media-artifact'] !== '1') { send(res, 403, { code: 'INVALID_REQUEST', message: 'Artifact upload header required.' }); return true; }
+  if (req.headers?.authorization !== `Bearer ${token}`) { send(res, 403, { code: 'INVALID_REQUEST', message: 'Artifact authentication failed.' }); return true; }
+  const mime = String(req.headers?.['content-type'] ?? '').split(';')[0].toLowerCase();
+  if (!extensionFor(mime)) { send(res, 415, { code: 'UNSUPPORTED_ARTIFACT_TYPE', message: `Unsupported artifact type: ${mime || '(none)'}.` }); return true; }
+  let name = req.headers?.['x-dsh-media-name'] || `artifact-${Date.now()}`;
+  try { name = decodeURIComponent(name); } catch { send(res, 400, { code: 'INVALID_REQUEST', message: 'Invalid artifact name encoding.' }); return true; }
+  try {
+    const bytes = await readBinaryBody(req, MAX_ARTIFACT_BYTES);
+    const saved = artifacts.save({ bytes, name, mime });
+    send(res, 201, { ok: true, artifact: saved });
+  } catch (error) {
+    const status = error.code === 'PAYLOAD_TOO_LARGE' ? 413
+      : error.code === 'ARTIFACT_STORE_FULL' ? 507
+        : error.code === 'UNSUPPORTED_ARTIFACT_TYPE' ? 415 : 400;
+    send(res, status, { code: error.code || 'ARTIFACT_FAILED', message: error.message });
+  }
+  return true;
 }
 
 async function handleAssets(req, res, { assets, token, prefix, pathname }) {
@@ -645,7 +704,7 @@ async function handleRelay(req, res, { relay, prefix, token, pathname }) {
   return true;
 }
 
-export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, photoshop = null, ctx = null, remoteFetch = undefined }) {
+export function createMediaRouter({ relay, editorKind, prefix, token, publicDir, editorRoot = null, tickets = null, bindings = null, assets = null, generation = null, fonts = null, batchQueue = null, assist = null, backgroundRemoval = null, photoshop = null, artifacts = null, ctx = null, remoteFetch = undefined }) {
   const hostRoot = resolve(publicDir, 'host');
   const relayPrefix = `${prefix}/relay/`;
   const assetsPrefix = `${prefix}/assets/`;
@@ -720,6 +779,9 @@ export function createMediaRouter({ relay, editorKind, prefix, token, publicDir,
         return handleBatch(req, res, { batchQueue, token, prefix, pathname });
       }
       return handleGenerate(req, res, { generation, token, prefix, pathname });
+    }
+    if (pathname === `${prefix}/artifacts` || pathname.startsWith(`${prefix}/artifacts/`)) {
+      return handleArtifacts(req, res, { artifacts, token, prefix, pathname });
     }
     if (pathname.startsWith(relayPrefix)) return handleRelay(req, res, { relay, prefix: relayPrefix, token, pathname });
     // 面板授权入口在 GET 拦截之前：签发/解绑是 POST。

@@ -34,6 +34,11 @@ const RESULT_SCHEMA = {
     auditRef: { type: 'string' },
     exportId: { type: 'string' },
     artifactRef: { type: 'string' },
+    // 落盘后的真实路径与校验值：模型只看得到 render 文本，所以这两项必须进 schema 与摘要。
+    artifactPath: { type: 'string' },
+    artifactSha256: { type: 'string' },
+    artifactBytes: { type: 'integer' },
+    artifactPersistError: { type: 'object', additionalProperties: true },
     // 生成作业：assetRef 复用上面那个字段，这里只补作业自身的标识与阶段。
     jobId: { type: 'string' },
     provider: { type: 'string' },
@@ -179,6 +184,10 @@ const renderSummary = (_args, value) => {
     `${value.status} · ${value.commandId}${value.revision === undefined ? '' : ` · R${value.revision}`}`,
     ...(value.exportId ? [`exportId ${value.exportId}`] : []),
     ...(value.artifactRef ? [`artifactRef ${value.artifactRef}`] : []),
+    // 导出的真实路径是"能不能复核"的关键，必须写给模型看。
+    ...(value.artifactPath ? [`artifactPath ${value.artifactPath}`] : []),
+    ...(value.artifactSha256 ? [`sha256 ${value.artifactSha256}`] : []),
+    ...(value.artifactPersistError ? [`产物未落盘 ${value.artifactPersistError.code}`] : []),
     ...(value.jobId ? [`jobId ${value.jobId}${value.jobStatus ? ` (${value.jobStatus})` : ''}`] : []),
     // 编辑器算出来的落点等结构化结果：模型只看得到这段文本，所以必须写进正文。
     ...(value.detail && typeof value.detail === 'object' ? [`detail ${JSON.stringify(value.detail).slice(0, 200)}`] : []),
@@ -1107,6 +1116,12 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         stateDigest: state.stateDigest,
         exportId: job.exportId,
         ...(job.artifactRef ? { artifactRef: job.artifactRef } : {}),
+        // 页面把产物落盘后会带回这些字段；没带说明落盘失败或旧页面，如实透传错误。
+        ...(job.artifactId ? { artifactId: job.artifactId } : {}),
+        ...(job.artifactPath ? { artifactPath: job.artifactPath } : {}),
+        ...(job.artifactSha256 ? { artifactSha256: job.artifactSha256 } : {}),
+        ...(Number.isFinite(job.artifactBytes) ? { artifactBytes: job.artifactBytes } : {}),
+        ...(job.artifactPersistError ? { artifactPersistError: job.artifactPersistError } : {}),
       };
     } catch (error) {
       return failure(kind, args.commandId, error);

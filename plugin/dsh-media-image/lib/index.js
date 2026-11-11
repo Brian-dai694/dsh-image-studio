@@ -19,6 +19,7 @@ import { chatTurn, modelInfo } from './assist.js';
 import { createBackgroundRemovalService } from './background-removal.js';
 import { createPhotoshopService } from './photoshop-com.js';
 import { ensureHeadlessEditor, closeAllHeadlessEditors } from './headless-registry.js';
+import { createArtifactStore } from './artifacts.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
 // 两者都没有就不注册任何 provider —— /generate 会如实返回 PROVIDER_UNAVAILABLE，而不是假装能生成。
@@ -57,6 +58,9 @@ export function apply(ctx, config = {}) {
   const bridge = createMediaBridge({ relay, editorKind: 'image' });
   // 配置了 dataDir 就把素材落盘：重启后素材还在；没配置则保持纯内存（临时语义）。
   const assets = createAssetStore({ dir: config.dataDir ? join(resolve(config.dataDir), 'assets') : null });
+  // 导出产物（PSD/PNG）单独一个库：素材库只收图片且上限 32 MiB，PSD 走这里。
+  const artifacts = createArtifactStore({ dir: config.dataDir ? join(resolve(config.dataDir), 'artifacts') : null });
+  if (artifacts.available) artifacts.sweep({ maxAgeDays: config.artifacts?.maxAgeDays ?? 7 });
   // 预录流程（.atn 思路）：和素材同一套目录，重启后仍在。
   const recipes = createRecipeStore({ dir: config.dataDir ? join(resolve(config.dataDir), 'recipes') : null });
   const fonts = createFontStore();
@@ -131,6 +135,7 @@ export function apply(ctx, config = {}) {
     assist: assistant,
     backgroundRemoval,
     photoshop,
+    artifacts,
     ctx,
     editorRoot: config.imageRoot ? resolve(config.imageRoot)
       : existsSync(join(packagedRoot, 'index.html')) ? packagedRoot : null,
