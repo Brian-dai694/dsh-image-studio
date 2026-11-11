@@ -89,6 +89,17 @@ export async function createHeadlessEditor({
 
   const page = await started.newPage({ viewport: { width: 1440, height: 900 } });
   const dispose = async () => { try { await started.close(); } catch { /* 已关闭 */ } };
+  // 页面令牌缓存：上传要用，签票时已经取过一次，别每次都重新 boot。
+  let cachedToken = null;
+  const pageTokenOf = async target => {
+    if (cachedToken) return cachedToken;
+    cachedToken = await target.evaluate(async () => {
+      const boot = await fetch('/media-image/boot', { credentials: 'same-origin', headers: { 'x-dsh-media-boot': '1' } });
+      return boot.ok ? (await boot.json()).accessToken : null;
+    });
+    if (!cachedToken) throw Object.assign(new Error('拿不到页面令牌，无法上传'), { code: 'HEADLESS_TOKEN_UNAVAILABLE' });
+    return cachedToken;
+  };
 
   try {
     await page.goto(`${origin}/media-image/image/host.html`, { waitUntil: 'load', timeout: 30_000 });
@@ -118,7 +129,34 @@ export async function createHeadlessEditor({
     }, instanceId);
     if (!ticket?.ticketId) throw Object.assign(new Error(`签票失败：${JSON.stringify(ticket)}`), { code: 'HEADLESS_TICKET_FAILED' });
 
-    return { instanceId, pageId, projectId: ticket.projectId, ticketId: ticket.ticketId, page, browser: started, dispose };
+    // 借页面令牌把本地文件推进素材库：上传路由要同源 + 页面令牌，Host 侧两样都没有。
+    const upload = async ({ bytes, name = 'upload.png', mime = 'image/png' }) => {
+      const result = await page.evaluate(async ([token, base64, fileName, contentType]) => {
+        const binary = atob(base64);
+        const buffer = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) buffer[index] = binary.charCodeAt(index);
+        const response = await fetch('/media-image/assets/upload', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            authorization: `Bearer ${token}`,
+            'x-dsh-media-relay': '1',
+            'x-dsh-media-asset': '1',
+            'x-dsh-media-name': encodeURIComponent(fileName),
+            'content-type': contentType,
+          },
+          body: buffer,
+        });
+        const body = await response.json().catch(() => null);
+        return { ok: response.ok, status: response.status, body };
+      }, [await pageTokenOf(page), bytes.toString('base64'), name, mime]);
+      if (!result.ok || !result.body?.asset) {
+        throw Object.assign(new Error(result.body?.message || `上传失败（HTTP ${result.status}）`), { code: result.body?.code || 'ASSET_UPLOAD_FAILED' });
+      }
+      return result.body.asset;
+    };
+
+    return { instanceId, pageId, projectId: ticket.projectId, ticketId: ticket.ticketId, page, browser: started, upload, dispose };
   } catch (error) {
     await dispose();
     throw error;

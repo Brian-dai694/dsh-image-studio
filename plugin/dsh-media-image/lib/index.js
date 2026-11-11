@@ -18,7 +18,7 @@ import { createFontStore } from './fonts.js';
 import { chatTurn, modelInfo } from './assist.js';
 import { createBackgroundRemovalService } from './background-removal.js';
 import { createPhotoshopService } from './photoshop-com.js';
-import { ensureHeadlessEditor, closeAllHeadlessEditors, setKnownOrigin, isHeadlessInstance } from './headless-registry.js';
+import { ensureHeadlessEditor, closeAllHeadlessEditors, setKnownOrigin, isHeadlessInstance, uploadViaHeadless } from './headless-registry.js';
 import { createArtifactStore } from './artifacts.js';
 
 // 生成后端配置来源优先级：插件 config.generation.providers > 环境变量 DSH_MEDIA_IMAGE_PROVIDERS(JSON 数组)。
@@ -156,6 +156,7 @@ export function apply(ctx, config = {}) {
         // 人打开的面板页仍然逐次审批；执行结果会带 autonomous:true 并进审计。
         allowHighRisk: config.headless.allowHighRisk === true,
         isHeadless: isHeadlessInstance,
+        upload: options => uploadViaHeadless(options),
         ensure: options => ensureHeadlessEditor(options),
       }
       : null,

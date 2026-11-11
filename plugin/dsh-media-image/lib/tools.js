@@ -1,6 +1,8 @@
 // The five model-facing image tools: read, apply, query plus the export start/status pair.
 // Parameters are the 0.2.x schema DSL (property table), not raw JSON Schema.
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { readFile } from 'node:fs/promises';
+import { basename, resolve as resolveFile } from 'node:path';
 import { MediaBridgeError, HIGH_RISK_COMMANDS } from './bridge.js';
 import { describeCommands, summarize, suggestOperation } from './commands.js';
 import { validateRecipeSteps, fillRecipeParams, recipeParamsOf } from './recipes.js';
@@ -685,6 +687,38 @@ export function registerMediaTools(ctx, { bridge, approvals, bindings = createSe
         }
       },
       timeoutMs: 120_000,
+    }));
+  }
+
+  // 把本地文件推进素材库：走无头实例的页面令牌（Host 没有同源身份，上传路由进不去）。
+  // 这是 A3「注入图层素材」的唯一通路，因此只在 headless 启用时注册。
+  if (headless?.upload) {
+    register(defineTool({
+      name: 'media_image_upload_asset',
+      description: 'Upload a local image file into the editor asset store through the headless editor page, and return the asset id to use as sourceRef in layer.add_image. Requires the headless editor (media_image_ensure_editor first). The Host has no same-origin identity, so this is the only way to get local bytes into the asset store.',
+      parameters: {
+        path: { type: 'string', required: true, description: 'Absolute path of a PNG/JPEG/WebP file on this machine.' },
+        name: { type: 'string', description: 'Display name stored with the asset (defaults to the file name).' },
+      },
+      output: { schema: RESULT_SCHEMA, render: renderSummary, presentationMeta },
+      execute: async (args, exec) => {
+        try {
+          trustedSessionId(exec);
+          const resolved = resolveFile(args.path);
+          const bytes = await readFile(resolved);
+          if (!bytes.length) throw Object.assign(new Error('文件为空'), { code: 'INVALID_REQUEST' });
+          const mime = /\.jpe?g$/i.test(resolved) ? 'image/jpeg' : /\.webp$/i.test(resolved) ? 'image/webp' : 'image/png';
+          const asset = await headless.upload({ bytes, name: args.name || basename(resolved), mime });
+          return {
+            status: 'applied', commandId: 'upload_asset', editorKind: 'image',
+            detail: { assetId: asset.id, name: asset.name, bytes: asset.bytes, sourceRef: `asset:${asset.id}` },
+            note: `已入素材库：asset:${asset.id}（${asset.name}，${asset.bytes} 字节）。下一步用它作为 layer.add_image 的 sourceRef。`,
+          };
+        } catch (error) {
+          return failure('image', 'upload_asset', error);
+        }
+      },
+      timeoutMs: 60_000,
     }));
   }
 

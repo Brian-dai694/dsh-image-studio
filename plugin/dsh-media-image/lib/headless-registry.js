@@ -24,6 +24,16 @@ export function isHeadlessInstance(instanceId) {
   return typeof instanceId === 'string' && instances.has(instanceId);
 }
 
+/**
+ * 借无头实例的页面令牌把一个文件推进素材库。
+ * 为什么必须借页面：上传路由要同源 + 页面令牌，Host 侧两样都没有。
+ */
+export async function uploadViaHeadless({ bytes, name, mime }) {
+  const entry = [...instances.values()][0];
+  if (!entry) throw Object.assign(new Error('没有可用的无头实例；先调用 media_image_ensure_editor'), { code: 'HEADLESS_UNAVAILABLE' });
+  return entry.upload({ bytes, name, mime });
+}
+
 /** 当前登记在册的无头实例（只读快照，给工具回执与状态用）。 */
 export function listHeadlessEditors() {
   return [...instances.values()].map(item => ({
@@ -62,6 +72,7 @@ export async function ensureHeadlessEditor({ origin, reuse = true, timeoutMs } =
     ticketId: editor.ticketId,
     origin: target,
     startedAt: new Date().toISOString(),
+    upload: editor.upload,
     dispose: editor.dispose,
   });
   return { instanceId: editor.instanceId, pageId: editor.pageId, projectId: editor.projectId, ticketId: editor.ticketId, reused: false };
