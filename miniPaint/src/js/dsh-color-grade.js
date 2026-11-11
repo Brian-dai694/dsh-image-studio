@@ -225,27 +225,25 @@ export function applyGrade(pixels, spec = {}, options = {}) {
       lumaPlane[p] = lumaOf(pixels[index], pixels[index + 1], pixels[index + 2]) / 255;
     }
   }
-  const unsharp = (amount, radius, label, cap) => {
+  const unsharp = (amount, radius, label, strength = 1) => {
     if (!amount) return null;
     if (!hasGeometry) { skipped.push(label); return null; }
     const low = boxBlurPlane(lumaPlane, width, height, Math.max(1, Math.round(radius)));
     const detail = new Float32Array(lumaPlane.length);
     const gain = amount / 100;
-    // 钳制每像素增量：不钳的话强值下亮边会被压出黑边（unsharp 的经典 halo），
-    // 对比图里表现为"清晰度反而把四周压暗"。
-    const limit = cap;
+    // 钳制每像素增量，阻止 unsharp halo；强度系数分别设定，清晰度半径大、容许增量也较大。
+    const limit = 0.05 + strength * Math.abs(gain);
     for (let p = 0; p < lumaPlane.length; p += 1) {
       const delta = (lumaPlane[p] - low[p]) * gain;
       detail[p] = delta > limit ? limit : delta < -limit ? -limit : delta;
     }
     return detail;
   };
-  // 半径按画面尺寸缩放：清晰度是大半径（局部对比），纹理/锐化是小半径（细节/边缘）。
-  // 清晰度半径按 (w+h)/40：第一版用 /120，在 240×160 上只有 3px，和锐化几乎没区别，
-  // 对比图里看不出效果 —— 大半径才是"局部对比"该有的尺度。
-  const clarityDetail = unsharp(Number(spec.clarity) || 0, Math.max(6, (width + height) / 40), 'clarity', 0.06);
-  const textureDetail = unsharp(Number(spec.texture) || 0, Math.max(2, (width + height) / 300), 'texture', 0.05);
-  const sharpenDetail = unsharp(Number(spec.sharpen) || 0, 1.2, 'sharpen', 0.05);
+  // 清晰度是中频局部对比：半径按短边约 2.5%（(w+h)/80）缩放。
+  // /40 在 1198×1198 真照片上约 60px，实测边缘暗晕太宽；减半到约 30px。
+  const clarityDetail = unsharp(Number(spec.clarity) || 0, Math.max(4, (width + height) / 80), 'clarity', 0.20);
+  const textureDetail = unsharp(Number(spec.texture) || 0, Math.max(2, (width + height) / 300), 'texture', 0.12);
+  const sharpenDetail = unsharp(Number(spec.sharpen) || 0, 1.2, 'sharpen', 0.08);
   const dehazeAmount = Number(spec.dehaze) || 0;
   if (dehazeAmount && !hasGeometry) skipped.push('dehaze');
   const grainAmount = Number(spec.grain) || 0;
@@ -315,16 +313,19 @@ export function applyGrade(pixels, spec = {}, options = {}) {
       // 去雾：J = A + (I - A)/t。A 是低频大气光估计，t<1 拉开雾幕内的层次。
       // 第一版用"整体加对比 + 提饱和"，方向错了：亮雾区被继续提亮并裁切，雾没有减少。
       if (airlight) {
-        const strength = dehazeAmount / 100;
-        // t 的下限 0.55：第一版放到 0.25，等于把对比拉 4 倍，整图直接压死（实测角落比掉到 0.22）
-        const t = Math.max(0.55, 1 - strength * 0.45);
+        const requested = dehazeAmount / 100;
         const a = airlight[p];
+        // Edge protection: fade dehaze at strong local edges, but don't suppress the whole product.
+        // The threshold is intentionally broad: a narrow threshold made dehaze effectively a no-op on real product photos.
+        const edge = Math.abs(lumaPlane[p] - a);
+        const protection = clamp01(1 - edge / 0.42);
+        const strength = requested * protection;
+        const t = Math.max(0.68, 1 - strength * 0.32);
         r = a + (r - a) / t;
         g = a + (g - a) / t;
         b = a + (b - a) / t;
-        // 提一点饱和：去雾后色彩密度会回来
         const mean = (r + g + b) / 3;
-        const boost = 1 + strength * 0.15;
+        const boost = 1 + strength * 0.12;
         r = mean + (r - mean) * boost;
         g = mean + (g - mean) * boost;
         b = mean + (b - mean) * boost;
