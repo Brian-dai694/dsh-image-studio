@@ -34,6 +34,7 @@ const RESULT_SCHEMA = {
     auditRef: { type: 'string' },
     exportId: { type: 'string' },
     artifactRef: { type: 'string' },
+    artifactId: { type: 'string' },
     // 落盘后的真实路径与校验值：模型只看得到 render 文本，所以这两项必须进 schema 与摘要。
     artifactPath: { type: 'string' },
     artifactSha256: { type: 'string' },
